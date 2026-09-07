@@ -1,0 +1,209 @@
+{
+  "conditions": "1,369 cached photos, select 138 with score explanations; one run per method; 4 BLAS threads; excludes disk read, HTML generation and Python startup.",
+  "rows": [
+    {
+      "method": "uniform",
+      "selection_seconds": 0.007456400000137364,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "laplacian",
+      "selection_seconds": 0.006907700000056138,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "technical_quality",
+      "selection_seconds": 0.006075499999951717,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "aesthetic_only",
+      "selection_seconds": 0.006104699999923469,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "time_quality",
+      "selection_seconds": 0.2008203999998841,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "handcrafted",
+      "selection_seconds": 0.2959435999998732,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mobilenet",
+      "selection_seconds": 0.32819530000006125,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "dino_technical",
+      "selection_seconds": 0.29999580000003334,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "dino_aesthetic35",
+      "selection_seconds": 0.301990799999885,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "dino_aesthetic65",
+      "selection_seconds": 0.3224510999998529,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "dino_tight",
+      "selection_seconds": 0.4574087999999392,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "dino_loose",
+      "selection_seconds": 0.41910009999992326,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "dino_diverse",
+      "selection_seconds": 0.42122539999991204,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "clip_technical",
+      "selection_seconds": 0.40633709999997336,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "clip_aesthetic35",
+      "selection_seconds": 0.45947750000004817,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "clip_aesthetic65",
+      "selection_seconds": 0.4411952000000383,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a35_d20",
+      "selection_seconds": 0.3186318000000483,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a35_d40",
+      "selection_seconds": 0.3160147999999481,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a35_d60",
+      "selection_seconds": 0.32421739999995225,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a65_d20",
+      "selection_seconds": 0.3681503000000248,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a65_d40",
+      "selection_seconds": 0.35223980000000665,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a65_d60",
+      "selection_seconds": 0.3108150000000478,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a85_d20",
+      "selection_seconds": 0.31276019999995697,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a85_d40",
+      "selection_seconds": 0.303743299999951,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "mmr_a85_d60",
+      "selection_seconds": 0.31320599999980914,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a35_d20",
+      "selection_seconds": 1.8822201000000405,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a35_d40",
+      "selection_seconds": 1.871191700000054,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a35_d60",
+      "selection_seconds": 1.766735400000016,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a65_d20",
+      "selection_seconds": 1.8212429000000157,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a65_d40",
+      "selection_seconds": 1.8132631999999376,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a65_d60",
+      "selection_seconds": 1.763560699999971,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a85_d20",
+      "selection_seconds": 1.711770500000057,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a85_d40",
+      "selection_seconds": 1.6826630000000478,
+      "n": 1369,
+      "k": 138
+    },
+    {
+      "method": "coverage_a85_d60",
+      "selection_seconds": 1.7333943000001,
+      "n": 1369,
+      "k": 138
+    }
+  ]
+}

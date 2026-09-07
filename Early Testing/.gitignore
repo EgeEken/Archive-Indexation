@@ -1,0 +1,13 @@
+__pycache__/
+.ruff_cache/
+.venv/
+cache/
+speed-cache/
+models/
+vendor/
+*.zip
+/results/
+/selections/
+/*.html
+ui-test/
+!evidence/models/

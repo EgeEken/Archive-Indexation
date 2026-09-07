@@ -1,0 +1,243 @@
+{
+  "model_load_download_seconds": 6.666048300001421,
+  "total_seconds": 448.0331587999972,
+  "python": "3.13.5",
+  "torch": "2.8.0+cu129",
+  "gpu": "NVIDIA GeForce RTX 3070 Ti Laptop GPU",
+  "sessions": [
+    {
+      "name": "2025.11.06 (çalışma)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\2b01a9c8b95884dc70f41a44",
+      "n": 48,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 1.4995994999917457,
+        "clip_seconds": 0.2565942999935942,
+        "dino_seconds": 0.3604917999909958,
+        "mobile_seconds": 6.269339799997397,
+        "total_seconds": 8.390621700003976
+      },
+      "errors": []
+    },
+    {
+      "name": "2025.11.07 (konser)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\d7d70009ad6d22d0aebed33a",
+      "n": 249,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 8.102390099986224,
+        "clip_seconds": 1.1820192000159295,
+        "dino_seconds": 1.3231852000171784,
+        "mobile_seconds": 3.6953342000197154,
+        "total_seconds": 14.305471599989687
+      },
+      "errors": []
+    },
+    {
+      "name": "2025.11.22 (ipek paris)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\03b963064f5cdf3a2eac601f",
+      "n": 48,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 1.4587383000180125,
+        "clip_seconds": 0.26702270000532735,
+        "dino_seconds": 0.28305180001189,
+        "mobile_seconds": 0.20920319999277126,
+        "total_seconds": 2.2199523000017507
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.01.07 (yurt karşısı kar)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\01810e91924e08293f6d4504",
+      "n": 166,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 5.134344499980216,
+        "clip_seconds": 0.7812904000020353,
+        "dino_seconds": 0.8781862999894656,
+        "mobile_seconds": 3.1219367000303464,
+        "total_seconds": 9.918414799991297
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.03.10 (iş yolu eyfel)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\abe77cc847a30d7d3b429a3e",
+      "n": 36,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 1.2774336000002222,
+        "clip_seconds": 0.21082409999507945,
+        "dino_seconds": 0.21645730000454932,
+        "mobile_seconds": 2.554337300010957,
+        "total_seconds": 4.261156099993968
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.03.14 (evden bulutlar)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\806f92ee5a3acd6e087acc90",
+      "n": 13,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 0.4537672000005841,
+        "clip_seconds": 0.07346530001086649,
+        "dino_seconds": 0.07423280000512023,
+        "mobile_seconds": 2.4580655000027036,
+        "total_seconds": 3.061514000000898
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.05.24 (parc montsouris)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\b26e9952717d17d341a90ee1",
+      "n": 265,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 9.160406700000749,
+        "clip_seconds": 1.253275200011558,
+        "dino_seconds": 1.5767723999888403,
+        "mobile_seconds": 3.6485590999946,
+        "total_seconds": 15.641722100001061
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.06.03-04 (out of the lab 2026)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\5e7146f0349a5363d4b51b57",
+      "n": 521,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 18.49779009995109,
+        "clip_seconds": 2.7244050000153948,
+        "dino_seconds": 3.1722518000169657,
+        "mobile_seconds": 2.665771100015263,
+        "total_seconds": 27.064280600010534
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.07.13 (bastille)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\cb1c540a124a5196c3ce9a1e",
+      "n": 138,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 4.7520627999911085,
+        "clip_seconds": 0.6993633000092814,
+        "dino_seconds": 0.7643990000069607,
+        "mobile_seconds": 3.2869186000025366,
+        "total_seconds": 9.504879000000074
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.12 (solar eclipse)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\5c21437bf4a0852d0ab54ed4",
+      "n": 208,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 6.8120111000025645,
+        "clip_seconds": 1.015270200019586,
+        "dino_seconds": 1.311965600005351,
+        "mobile_seconds": 0.9943753999978071,
+        "total_seconds": 10.136062599995057
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.22 (fx3 - bodruma yol)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\0e0fdf779b5fe35397915e95",
+      "n": 309,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 13.740306300038355,
+        "clip_seconds": 1.4588531000044895,
+        "dino_seconds": 2.0934780000097817,
+        "mobile_seconds": 4.425511400026153,
+        "total_seconds": 21.720780799994827
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.24 (fx3 - flipper)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\bab8862cc10a4cd88590d8e3",
+      "n": 933,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 41.727873800031375,
+        "clip_seconds": 4.548448100016685,
+        "dino_seconds": 5.762202999962028,
+        "mobile_seconds": 7.726046799944015,
+        "total_seconds": 59.769227600001614
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.25 (fx3 - bodrum)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\cdbc0ddf5026f2973e169735",
+      "n": 804,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 30.578592699981527,
+        "clip_seconds": 3.8199032000411535,
+        "dino_seconds": 5.3666945999721065,
+        "mobile_seconds": 3.8797693000233267,
+        "total_seconds": 43.64951980000478
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.26 (fx3 - gümüşlük)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\11d756d6f22ea3e9cb1426bc",
+      "n": 361,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 14.272406299947761,
+        "clip_seconds": 1.7180527999735205,
+        "dino_seconds": 2.4845234000094933,
+        "mobile_seconds": 1.8076780999836046,
+        "total_seconds": 20.285525200000848
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.27 (fx3 - dalış + yalıkavak)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\346cfc47f9a18599375ab9f9",
+      "n": 466,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 18.66466159997799,
+        "clip_seconds": 2.2060980000096606,
+        "dino_seconds": 3.4404587999742944,
+        "mobile_seconds": 4.6154952999640955,
+        "total_seconds": 28.929547899999307
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.08.29 (fx3 - istanbula yol)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\bdfc606e4c395c2cf49c7f9f",
+      "n": 192,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 7.51086550000764,
+        "clip_seconds": 0.8536960000055842,
+        "dino_seconds": 1.2733225999982096,
+        "mobile_seconds": 0.8905742000206374,
+        "total_seconds": 10.53053259999433
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.09.02 (fx3 - üsküdar)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\3ceed8004765be1b5dd81d19",
+      "n": 1182,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 45.34894849997363,
+        "clip_seconds": 5.495538999995915,
+        "dino_seconds": 8.202633800014155,
+        "mobile_seconds": 8.104435199988075,
+        "total_seconds": 67.15693830000237
+      },
+      "errors": []
+    },
+    {
+      "name": "2026.09.03 (fx3 - kadıköy)",
+      "cache": "${EXPERIMENT_ROOT}\\cache\\292cceb651557d2ec08770de",
+      "n": 1369,
+      "timings": {
+        "decode_quality_thumbnails_seconds": 56.106892000025255,
+        "clip_seconds": 6.508124500018312,
+        "dino_seconds": 9.400791499952902,
+        "mobile_seconds": 6.573716099926969,
+        "total_seconds": 78.59549799999513
+      },
+      "errors": []
+    }
+  ]
+}

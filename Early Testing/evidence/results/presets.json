@@ -1,0 +1,60 @@
+{
+  "uniform": {
+    "method": "uniform"
+  },
+  "laplacian": {
+    "method": "laplacian"
+  },
+  "technical_quality": {
+    "method": "quality"
+  },
+  "aesthetic_only": {
+    "method": "aesthetic"
+  },
+  "time_quality": {
+    "method": "time"
+  },
+  "handcrafted": {
+    "method": "handcrafted"
+  },
+  "mobilenet": {
+    "method": "mobile"
+  },
+  "dino_technical": {
+    "method": "dino"
+  },
+  "dino_aesthetic35": {
+    "method": "dino",
+    "aesthetic_weight": 0.35
+  },
+  "dino_aesthetic65": {
+    "method": "dino",
+    "aesthetic_weight": 0.65
+  },
+  "dino_tight": {
+    "method": "dino",
+    "threshold": 0.2,
+    "aesthetic_weight": 0.35
+  },
+  "dino_loose": {
+    "method": "dino",
+    "threshold": 0.4,
+    "aesthetic_weight": 0.35
+  },
+  "dino_diverse": {
+    "method": "dino",
+    "diversity": 0.75,
+    "aesthetic_weight": 0.35
+  },
+  "clip_technical": {
+    "method": "clip"
+  },
+  "clip_aesthetic35": {
+    "method": "clip",
+    "aesthetic_weight": 0.35
+  },
+  "clip_aesthetic65": {
+    "method": "clip",
+    "aesthetic_weight": 0.65
+  }
+}

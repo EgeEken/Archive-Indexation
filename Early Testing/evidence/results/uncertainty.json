@@ -1,0 +1,23 @@
+{
+  "random_100_seeds": {
+    "macro_difference": 0.055257677649774344,
+    "paired_session_bootstrap_95_percent": [
+      0.021517155612349053,
+      0.0886254727726563
+    ]
+  },
+  "uniform": {
+    "macro_difference": 0.04585516631538658,
+    "paired_session_bootstrap_95_percent": [
+      0.004905257282974677,
+      0.0928047590509558
+    ]
+  },
+  "technical_quality": {
+    "macro_difference": 0.004224053581498022,
+    "paired_session_bootstrap_95_percent": [
+      -0.08416245465307676,
+      0.08640655736776219
+    ]
+  }
+}

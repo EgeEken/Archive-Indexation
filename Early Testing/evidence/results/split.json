@@ -1,0 +1,24 @@
+{
+  "rule": "Chronologically sorted eligible sessions: even positions held out, odd positions development (zero based). Fixed before looking at selection performance.",
+  "development": [
+    "2025.11.07 (konser)",
+    "2026.01.07 (yurt karşısı kar)",
+    "2026.05.24 (parc montsouris)",
+    "2026.07.13 (bastille)",
+    "2026.08.22 (fx3 - bodruma yol)",
+    "2026.08.25 (fx3 - bodrum)",
+    "2026.08.27 (fx3 - dalış + yalıkavak)",
+    "2026.09.02 (fx3 - üsküdar)"
+  ],
+  "holdout": [
+    "2025.11.06 (çalışma)",
+    "2025.11.22 (ipek paris)",
+    "2026.03.10 (iş yolu eyfel)",
+    "2026.06.03-04 (out of the lab 2026)",
+    "2026.08.12 (solar eclipse)",
+    "2026.08.24 (fx3 - flipper)",
+    "2026.08.26 (fx3 - gümüşlük)",
+    "2026.08.29 (fx3 - istanbula yol)",
+    "2026.09.03 (fx3 - kadıköy)"
+  ]
+}

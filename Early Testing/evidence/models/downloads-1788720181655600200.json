@@ -1,0 +1,34 @@
+[
+  {
+    "model": "mobile",
+    "file": "mobile.safetensors",
+    "url": "https://huggingface.co/timm/mobilenetv3_large_100.ra_in1k/resolve/main/model.safetensors",
+    "size": 22058321,
+    "sha256": "f425af34cc1cead2b5d6211f789a1f30b94835dc32f9c0fcc5a916e4fd2dde85",
+    "seconds": 2.643771500006551
+  },
+  {
+    "model": "dino",
+    "file": "dino.safetensors",
+    "url": "https://huggingface.co/timm/vit_small_patch14_dinov2.lvd142m/resolve/main/model.safetensors",
+    "size": 88240510,
+    "sha256": "04d27f3400d059fc0cfd7d17dd1909a75bf3ea8fb3eeb48b97cb99e57ee20081",
+    "seconds": 23.543865100000403
+  },
+  {
+    "model": "clip",
+    "file": "ViT-B-32.pt",
+    "url": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+    "size": 353976522,
+    "sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
+    "seconds": 70.85584299999755
+  },
+  {
+    "model": "clip",
+    "file": "sa_0_4_vit_b_32_linear.pth",
+    "url": "https://raw.githubusercontent.com/LAION-AI/aesthetic-predictor/main/sa_0_4_vit_b_32_linear.pth",
+    "size": 3047,
+    "sha256": "c7b14cead230694acc7b9447974d3cad78003c72da032e402a303b6c2429e85f",
+    "seconds": 0.8264685000031022
+  }
+]

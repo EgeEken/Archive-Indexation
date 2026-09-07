@@ -1,0 +1,7 @@
+{
+  "data_status": "All 17 sessions were seen during the previous experiment; this is exploratory reuse, not a new untouched test set.",
+  "candidates": 18,
+  "choice_objective": "Macro exact overlap + 0.10 * manual-group coverage on the original development sessions.",
+  "validation": "Freeze a development choice, report the original holdout separately, and leave-one-session-out recipe selection across all 17 sessions. No image model training.",
+  "started_unix": 1788794197.2632775
+}

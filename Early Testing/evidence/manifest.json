@@ -1,0 +1,250 @@
+{
+  "transformation": "Only absolute workspace/archive prefixes replaced by ${EXPERIMENT_ROOT} and ${PHOTO_ARCHIVE_ROOT}. Values, session identifiers, relative filenames and measurements retained. Published JSON is historical evidence, not a runnable index.",
+  "files": [
+    {
+      "file": "evidence/results/archive_integrity_after.json",
+      "original_sha256": "7820cada6c5a9c39c43672ab5c76224a1dae00c0e19eef44b1435fa36b012fc5",
+      "published_sha256": "55b6b08c3a24e5aa21a7188aa1b59e715ab6746767ec18b461024f8a57453811"
+    },
+    {
+      "file": "evidence/results/archive_inventory_before.json",
+      "original_sha256": "70fd88a7dc32bc3a4d5b67aefda91c3180659ff5254f50aa53b3346bf34e721e",
+      "published_sha256": "2a5a72782e514044c0bf05d1db8109efaaf6d14953d9057c81605308984c7e10"
+    },
+    {
+      "file": "evidence/results/cli-smoke-100.json",
+      "original_sha256": "95e160de495c99ff7c33021680b2b8ba49a5c828dfc6798038292607f27d92c7",
+      "published_sha256": "89b74b11f1aac75425c1e36db3dd5c796a55b2f086cd5ce77e99e28adceeb60e"
+    },
+    {
+      "file": "evidence/results/development.json",
+      "original_sha256": "cc7292f10f2f2b3189a7904fd5ed215e00c563bef262f316ee8071cde77bc675",
+      "published_sha256": "4274f34c2dcafa20695ed6fa354de1fccd47391268d94e81d288a1af106f5f46"
+    },
+    {
+      "file": "evidence/results/frozen_choice.json",
+      "original_sha256": "4c649c57fcce92b56e9731b7bd37df95241b0308e2c0b1c46b9301190ae484a7",
+      "published_sha256": "066460fd1e37310f79c1b497f7e6427d973eec996e0f954b7af96482811c7a5e"
+    },
+    {
+      "file": "evidence/results/holdout.json",
+      "original_sha256": "d7e014394d2ab2465a7ad7bb0d6cbcee12da51067a535902d347652bbab313a5",
+      "published_sha256": "05fd0cfe4cda44a5d7076ce852a70915ff7e71b398a704441bbedec4f3b5fe9b"
+    },
+    {
+      "file": "evidence/results/index_run.json",
+      "original_sha256": "4f703bd689fe4a36292d7d18c959e2d07bc29d916d113be6db7009b8d8fde84e",
+      "published_sha256": "38877d2853c82f61c07559beabd489ebd6a02649f8398fa55f32fdda47283922"
+    },
+    {
+      "file": "evidence/results/label_exceptions.json",
+      "original_sha256": "cbe552f9dfd435d7fdba11b44f0f9051e10349903aca41e6787a72513277b6ab",
+      "published_sha256": "ae5235f27c89da49dd11c3c8a3d7f9fd9c04cee29821f97b8443652798f3c144"
+    },
+    {
+      "file": "evidence/results/label_validation.json",
+      "original_sha256": "8ee18d5cc685324e698498006faf3f22a065e421918cfff9a33bdfb66ed13d90",
+      "published_sha256": "e480aea52af56babe913f882354ee15647e2239f7933d2eb9999394ba5f9aea9"
+    },
+    {
+      "file": "evidence/results/presets.json",
+      "original_sha256": "f7a976f841b2719824759b36a55f10a0cb12de7e9225feecb16be2a35eb872a6",
+      "published_sha256": "5f6a300583128bec2f770c3e558c178365feb3e19506a19c58786011747cbfe0"
+    },
+    {
+      "file": "evidence/results/speed.json",
+      "original_sha256": "7e3a0a7d95422a2c16eb6a47b915b60bdb30d911062f7a7af08a0ce58d38d590",
+      "published_sha256": "52336ca21712d10707525155f3b10308446a0fd87a519c114b48cb8e9e6f9f5d"
+    },
+    {
+      "file": "evidence/results/split.json",
+      "original_sha256": "002463f6aa8d9bc6dbf3ffa6f39ba7bd9b2d36e81b1c2321f4c89a52db29508b",
+      "published_sha256": "b6cb02c19390cf839cb7fa3d8bec799aef35653462080aab4cf768269a72f433"
+    },
+    {
+      "file": "evidence/results/uncertainty.json",
+      "original_sha256": "ac874721c1dc89247e30a02bde49000d0801e605322e954d851007048d10ab20",
+      "published_sha256": "fe72459cab433ab2ae2ecded6a0345efe69fa5724eb1b2ba26ed1ecb3132d61c"
+    },
+    {
+      "file": "evidence/results/v2/archive_before.json",
+      "original_sha256": "2769ebd1c82d3bc590d08ebd3ba2b2ad4d538729afbf38a637a1707c61cf9aab",
+      "published_sha256": "2a5a72782e514044c0bf05d1db8109efaaf6d14953d9057c81605308984c7e10"
+    },
+    {
+      "file": "evidence/results/v2/archive_integrity.json",
+      "original_sha256": "13a8dcba0b2bb1fe2841e601664ceb964d021c0631d5f252a6526881e9cdc152",
+      "published_sha256": "f950616ba570da0e11679db955cc72f8b1ae64ce95bd04ebaddf54bbfb391cb6"
+    },
+    {
+      "file": "evidence/results/v2/archive_scores.json",
+      "original_sha256": "8ad9e07a0c4892e9765d4e9c851806b8479c799d1acd789968eb8c929901c367",
+      "published_sha256": "16c3c4f24f4981655a8e98ceed7b6e819f77e894798154afebbbcf4bc0211f9d"
+    },
+    {
+      "file": "evidence/results/v2/cached_speed.json",
+      "original_sha256": "37bb7fa328ebf5ec8ae42869c52c562d25be1dcad256eb3326bcf75ae1441c2f",
+      "published_sha256": "4e4204fc25530a485d8b937e74e2f4e8976cac391c9b172bb651a6f913b8f14e"
+    },
+    {
+      "file": "evidence/results/v2/cli-experimental.json",
+      "original_sha256": "9c0a795f12e7103692b6360e773641b962c81808b94f664bc131870d65380bd5",
+      "published_sha256": "388babbdefc7422fee9475bfeddd495eac138aa6b4446f9f7f20687632478b97"
+    },
+    {
+      "file": "evidence/results/v2/cross_validation.json",
+      "original_sha256": "3a92274dd68e8eaab5b22fff3b3161fdea330d7111053c75fe97f17fc46e702a",
+      "published_sha256": "f110a9f66b4f89729bd9bdc25b123b4a7a860b803ad28d7d3b7c69be775c044d"
+    },
+    {
+      "file": "evidence/results/v2/development.json",
+      "original_sha256": "c166aa7fc25695a6dcf5880d496da0e73b461a319fa7ddff261fc296234e472f",
+      "published_sha256": "60c698154387bb652e162a253d53bc841b659fbe0871eed8a97b909fa4ee0d31"
+    },
+    {
+      "file": "evidence/results/v2/frozen_choice.json",
+      "original_sha256": "2d680b00e7eef971ed3e71d683f4a0e5fe20ec7ae7ee23b055fbfef95ca0d9eb",
+      "published_sha256": "f1613797e28c2cfb9ad73a7a438ab875c1d79d568639ffd21a741d598e3c726f"
+    },
+    {
+      "file": "evidence/results/v2/holdout.json",
+      "original_sha256": "64e00525f374c6cae63629dc7a73645e5a58e3f49a47c90a1c0679f0c1a07ad2",
+      "published_sha256": "6f47479d269aac35ace013397fd2294496299cb59e34f8c45c5b601e07c678d8"
+    },
+    {
+      "file": "evidence/results/v2/protocol.json",
+      "original_sha256": "c72fb58eef67a72c0b325c67b391b984ba1254c0336fa3a062c97e347e0eb15f",
+      "published_sha256": "d3fcf5fa4a3c8cc5399230c5e15c3a8318f417ca3fe21f4d6658fbc03555662d"
+    },
+    {
+      "file": "evidence/results/v2/recipes.json",
+      "original_sha256": "e80cdf62bd1bf01062c15596bad0accb9132c01e1a45b6129b289d36b9cf99f8",
+      "published_sha256": "a1f3590395706fca0d4a0d635b4074c981e7dfec182904d3ef558619156a83b0"
+    },
+    {
+      "file": "evidence/results/v2/speed.json",
+      "original_sha256": "1817587ee54ce234c3caea76ae2957643a66cf04427cd553d6271c08280e4cd4",
+      "published_sha256": "9a99bcaa2325faf69a767168da8cf9a0275835a19539367649a8b24ef08594c2"
+    },
+    {
+      "file": "evidence/results/v2/ui_integrity.json",
+      "original_sha256": "68ca5e12d834105f615c57675d13805ded640c5c3248b23c4170ad3159c7cade",
+      "published_sha256": "5acead9ce7388de9437c5bc4b8e5d0ed6055161a72ee88a2d7e9a27608164b52"
+    },
+    {
+      "file": "evidence/selections/2025.11.06 (\u00e7al\u0131\u015fma).json",
+      "original_sha256": "d0decbd46f9ddf18d96ed990a05a4680426016f6b59ea3ea12b4260afffc3da0",
+      "published_sha256": "b001686fff3451bcf0b7f3629ce116c7dd70a3caf6853d1dff59dcdcf9460d32"
+    },
+    {
+      "file": "evidence/selections/2025.11.07 (konser).json",
+      "original_sha256": "02c68f13c6481ec8b6dbe7a70a03272690f2ed15d6c3b6b872b3dce8dfcc7e5a",
+      "published_sha256": "295c6a58556755cafa4da7fe442c13cde83b1d3006392813cd99557eb1094ff5"
+    },
+    {
+      "file": "evidence/selections/2025.11.22 (ipek paris).json",
+      "original_sha256": "ca615808ded4598df4b4e66cd44c97aba53bd34f2c2bb091ec7c4651a88c1574",
+      "published_sha256": "f0d60ccdd45eec690ad0d7a4914710541664a9401052d4587134be3942c9b707"
+    },
+    {
+      "file": "evidence/selections/2026.01.07 (yurt kar\u015f\u0131s\u0131 kar).json",
+      "original_sha256": "1e762c6830694e1e12253b6e6427f382768432298cd24c06dd5f2141939d82ac",
+      "published_sha256": "1474ea0124893ec617e2966a8333fa3b408e12b540b44b6c5d51afd6043fde84"
+    },
+    {
+      "file": "evidence/selections/2026.03.10 (i\u015f yolu eyfel).json",
+      "original_sha256": "593c589b32450345e627dfe70ee287c585e70487a6bfd753d56620bc97660b4a",
+      "published_sha256": "bcfb9343599a06d68c01ff85e056095b0f256d1c10e7d980be0c6c5fb43e78ee"
+    },
+    {
+      "file": "evidence/selections/2026.03.14 (evden bulutlar).json",
+      "original_sha256": "ac796e971cc0168a7bea395d39c4a20c5beb5f93beda09307a8785aded1459ee",
+      "published_sha256": "b7c073031b91d00cb7fe503eafbb28dddd5187ea9ec669d328721dda6c817062"
+    },
+    {
+      "file": "evidence/selections/2026.05.24 (parc montsouris).json",
+      "original_sha256": "411ebad4e30f22efc9fce756074c4409c1688458f61221a55d6348e384184a47",
+      "published_sha256": "8af30fd56c7a1b30aca9649b1891805c1c3a646e7f68bf16eaa40775646f055e"
+    },
+    {
+      "file": "evidence/selections/2026.06.03-04 (out of the lab 2026).json",
+      "original_sha256": "e573395fb31ad98d106a87705a0aefac602289f2bef5523d16b7ba669669776e",
+      "published_sha256": "1548e691cc34c38937baaccefdba0f04fabe92e3c72aad46d097ae4c2273cead"
+    },
+    {
+      "file": "evidence/selections/2026.07.13 (bastille).json",
+      "original_sha256": "8fbd08167190c9ec0aa213d7e22b35a57c74e9ad64af4348b983ac3fbd633262",
+      "published_sha256": "3f5ca75c107f8a73ceedec9caa53fd970be804020a7caff8fefcb953db78c9c1"
+    },
+    {
+      "file": "evidence/selections/2026.08.12 (solar eclipse).json",
+      "original_sha256": "a85ca58f6c51c41b2e8395e60118265638992e39f0dac566a6800f0caea9b16f",
+      "published_sha256": "ff40dcd538e94fa70b4927a90564891e19cf0b169987399cc8526be6e7d48b36"
+    },
+    {
+      "file": "evidence/selections/2026.08.22 (fx3 - bodruma yol).json",
+      "original_sha256": "2e37e666b234e26dd74308620bbc3e96656b510fa4941b288280ccb571ee446a",
+      "published_sha256": "6003669890cc43af94f4ea4a7e9d37223a528f8a8503b761ec09ae8bc0a618e8"
+    },
+    {
+      "file": "evidence/selections/2026.08.24 (fx3 - flipper).json",
+      "original_sha256": "d625ce11192e8e579ff1bbdc75c9a628ecf7c240cf18e5abfe2046bea37aa0f3",
+      "published_sha256": "54f92fd473b6a3175276d20ec27eeaeff1da6e68b4d20a993e30bbf8b15a0b02"
+    },
+    {
+      "file": "evidence/selections/2026.08.25 (fx3 - bodrum).json",
+      "original_sha256": "2216c178367fe9643a77b11d26ebd4daef81fad62cdb01b1d3ff13d562203cc6",
+      "published_sha256": "ce1aceb341aa2f45d17c5fb73b36c99faad9cf66934cc5601fcf8507b24105c7"
+    },
+    {
+      "file": "evidence/selections/2026.08.26 (fx3 - g\u00fcm\u00fc\u015fl\u00fck).json",
+      "original_sha256": "0cdcc5073aab6e3ea96de536456a46ee0a5a53b87516a2b751e595738310ca3b",
+      "published_sha256": "b2536a3a27709910fa050379f10c161ad817812ea4b2ab8e4bfb65118318495d"
+    },
+    {
+      "file": "evidence/selections/2026.08.27 (fx3 - dal\u0131\u015f + yal\u0131kavak).json",
+      "original_sha256": "44be1e04aecdac43d2b43562f6d88b1784a2b27e68ae5123ea5a442d169c1693",
+      "published_sha256": "661518784f639612f6021ce5275ca87e05a666831220d26ef19bb29e3e8bd1c1"
+    },
+    {
+      "file": "evidence/selections/2026.08.29 (fx3 - istanbula yol).json",
+      "original_sha256": "546eb32c781a184ffd7b1fdd6a1408f1fff6d1f58f63cc76ad8d1aadcd3780cf",
+      "published_sha256": "d842e62f7008f20af4cccfc1c9b4064762ac5f2993e31ed80738a50f6aca1c7d"
+    },
+    {
+      "file": "evidence/selections/2026.09.02 (fx3 - \u00fcsk\u00fcdar).json",
+      "original_sha256": "449940b6ee5f0227770a69a77db5e5330ed0db8bd425e84fad962ceeedb55fd1",
+      "published_sha256": "f04799f76ac0865bf60c03b6f386c1f9b24da5dec3a4c2c64162d92e30def042"
+    },
+    {
+      "file": "evidence/selections/2026.09.03 (fx3 - kad\u0131k\u00f6y).json",
+      "original_sha256": "db66d536a01dd972d8528ddae9cb238fad727502d7379a76a1e7f65a6541d325",
+      "published_sha256": "0a89c3b5dab71381e036bbbd58603c333ccdb4590d24fe0d033c83c94b90bfea"
+    },
+    {
+      "file": "evidence/selections/kadikoy-100.json",
+      "original_sha256": "ef7d3bc75d2770c795d3d9502ea3eec49d01d35580e8baf35ec52768a3aedfac",
+      "published_sha256": "e5d221aff51dcbed70282413ab320384c054b949406456dc4d17c31303f8cb3b"
+    },
+    {
+      "file": "evidence/selections/kadikoy-experimental.json",
+      "original_sha256": "6db3dbc15204c9ccce1500bab439b3b22c3d8cac8840c0757a19833fbcd01f7f",
+      "published_sha256": "5c47ef410b47ec734dbe265750e85d6fed32af931cceb31700d7091132de93fe"
+    },
+    {
+      "file": "evidence/models/downloads-1788720181655600200.json",
+      "original_sha256": "c6bc32c9590a8a025d973da5a04858991816873df7d5c309c7732b2469f67239",
+      "published_sha256": "64bf6fb289b1de700a85778f3f57a436bb54c37c253ce23a8f5e50c54c1a0ea6"
+    },
+    {
+      "file": "evidence/models/downloads-1788720621731316800.json",
+      "original_sha256": "2130d0c6f20d6c7b68009b49715cd9b3f2961fc354bb18fb126bd0093d163eb9",
+      "published_sha256": "334c875e448f855e65f0e8f1e44a3f1d4fd095956d0cfb7c1b026c9a395328ae"
+    },
+    {
+      "file": "evidence/results/per_session_metrics.csv",
+      "original_sha256": "a573a1d793a7da43aab9d88aaae577acdfe89305f691626f4fd30d6260b9e704",
+      "published_sha256": "33d1252e940ae344dcd1d4bc30da706e4a3835ff39b1d69f9f2c4f621e54ab5b"
+    }
+  ]
+}

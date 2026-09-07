@@ -1,0 +1,61 @@
+{
+  "source": "${PHOTO_ARCHIVE_ROOT}\\2026.09.03 (fx3 - kadıköy)\\all-jpgs",
+  "conditions": "1,369 originals per pipeline; one run; fresh feature cache; six CPU workers; batch 32; warmed GPU; model load excluded; OS file cache not flushed; local laptop. Pipelines run sequentially.",
+  "rows": [
+    {
+      "pipeline": "handcrafted",
+      "n": 1369,
+      "index_seconds": 64.39878629999998,
+      "cached_read_seconds": 0.3435034999999971,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 63.914825099999234,
+        "total_seconds": 63.92647459999989
+      }
+    },
+    {
+      "pipeline": "mobile",
+      "n": 1369,
+      "index_seconds": 72.08928730000002,
+      "cached_read_seconds": 0.3318750999999338,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 58.79066749999993,
+        "mobile_seconds": 12.555503899999849,
+        "total_seconds": 71.35267309999995
+      }
+    },
+    {
+      "pipeline": "dino",
+      "n": 1369,
+      "index_seconds": 73.10588779999989,
+      "cached_read_seconds": 0.3596921000000748,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 62.52302770000006,
+        "dino_seconds": 10.078362300001345,
+        "total_seconds": 72.60798139999997
+      }
+    },
+    {
+      "pipeline": "clip",
+      "n": 1369,
+      "index_seconds": 69.49022710000008,
+      "cached_read_seconds": 0.34726500000010674,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 60.7017266999992,
+        "clip_seconds": 8.196736799999826,
+        "total_seconds": 68.90459259999989
+      }
+    },
+    {
+      "pipeline": "dino_clip",
+      "n": 1369,
+      "index_seconds": 76.3412717000001,
+      "cached_read_seconds": 0.33603470000002744,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 60.2413027999994,
+        "clip_seconds": 6.894709299999477,
+        "dino_seconds": 8.468288100000791,
+        "total_seconds": 75.61003830000004
+      }
+    }
+  ]
+}

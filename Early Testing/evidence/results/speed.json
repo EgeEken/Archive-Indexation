@@ -1,0 +1,57 @@
+{
+  "source": "${PHOTO_ARCHIVE_ROOT}\\2026.05.24 (parc montsouris)\\all-jpgs",
+  "conditions": "One run per method, 265 originals, GPU warmed, model loading excluded, fresh feature caches, OS file cache not flushed; six CPU workers, batch 32. Local laptop, not a controlled hardware comparison.",
+  "rows": [
+    {
+      "method": "handcrafted",
+      "n": 265,
+      "fresh_index_seconds": 8.622732900010305,
+      "images_per_second": 30.732715842292098,
+      "selection_seconds": 0.0134330000000773,
+      "cache_read_seconds": 0.08295890000590589,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 8.545369800005574,
+        "total_seconds": 8.55010370000673
+      }
+    },
+    {
+      "method": "mobile",
+      "n": 265,
+      "fresh_index_seconds": 12.213689899988822,
+      "images_per_second": 21.696964813249643,
+      "selection_seconds": 0.013245900001493283,
+      "cache_read_seconds": 0.09021760000905488,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 8.142652700014878,
+        "mobile_seconds": 3.903121600000304,
+        "total_seconds": 12.048010599988629
+      }
+    },
+    {
+      "method": "dino",
+      "n": 265,
+      "fresh_index_seconds": 9.814659800002119,
+      "images_per_second": 27.00042644371054,
+      "selection_seconds": 0.010147400011192076,
+      "cache_read_seconds": 0.09295310000015888,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 8.097053099991172,
+        "dino_seconds": 1.609728399955202,
+        "total_seconds": 9.709791400004178
+      }
+    },
+    {
+      "method": "clip",
+      "n": 265,
+      "fresh_index_seconds": 10.501622299998417,
+      "images_per_second": 25.23419643458706,
+      "selection_seconds": 0.010305699994205497,
+      "cache_read_seconds": 0.11158540000906214,
+      "stage_timings": {
+        "decode_quality_thumbnails_seconds": 8.793253200026811,
+        "clip_seconds": 1.5861110999830998,
+        "total_seconds": 10.382330299995374
+      }
+    }
+  ]
+}

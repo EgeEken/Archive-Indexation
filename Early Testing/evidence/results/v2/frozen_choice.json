@@ -1,0 +1,9 @@
+{
+  "name": "coverage_a85_d20",
+  "recipe": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.2
+  },
+  "frozen_at_unix": 1788794210.2047849
+}

@@ -1,0 +1,27 @@
+{
+  "pages": 23,
+  "record_references": 17354,
+  "checks": [
+    "Embedded JSON decodes",
+    "Original and thumbnail references exist",
+    "Selection totals reconstruct",
+    "Selected counts match",
+    "Archive source paths unique",
+    "All indexed photos present"
+  ],
+  "browser_checks": [
+    "Synthetic 250-image gallery",
+    "Descending quality",
+    "Chronological timeline",
+    "Bounded group dropdown",
+    "Score modal",
+    "Archive ranking",
+    "Session rows",
+    "Search empty state",
+    "Pagination",
+    "Back navigation",
+    "Chart controls",
+    "390px viewport without horizontal overflow",
+    "No console errors"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "verified_crops": [
+    {
+      "source": "${PHOTO_ARCHIVE_ROOT}\\2026.08.22 (fx3 - bodruma yol)\\all-jpgs\\DSC00148.JPG",
+      "selected": "${PHOTO_ARCHIVE_ROOT}\\2026.08.22 (fx3 - bodruma yol)\\jpgs\\DSC00148.jpg",
+      "template_correlation": 0.9937313795089722,
+      "quarter_scale_crop_origin": [
+        107,
+        262
+      ],
+      "verification": "Visually inspected the pair; same photograph with a tighter crop. Quarter-resolution grayscale template matching at original pixel scale confirms correspondence."
+    }
+  ]
+}

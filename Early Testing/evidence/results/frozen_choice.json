@@ -1,0 +1,21 @@
+{
+  "name": "mobilenet",
+  "options": {
+    "method": "mobile"
+  },
+  "objective": "Macro exact overlap + 0.25 * macro one-to-one near-match overlap; choose among visual grouping methods only.",
+  "development_objectives": {
+    "handcrafted": 0.23940803397724753,
+    "mobilenet": 0.2735101602304802,
+    "dino_technical": 0.25100615531887227,
+    "dino_aesthetic35": 0.24565993726085752,
+    "dino_aesthetic65": 0.2715927597000338,
+    "dino_tight": 0.24936148250409418,
+    "dino_loose": 0.2586239531696179,
+    "dino_diverse": 0.24565993726085752,
+    "clip_technical": 0.26389890822549755,
+    "clip_aesthetic35": 0.265770655565738,
+    "clip_aesthetic65": 0.24893854594513387
+  },
+  "frozen_at_unix": 1788723535.6572475
+}

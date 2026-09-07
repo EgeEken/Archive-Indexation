@@ -1,0 +1,92 @@
+{
+  "mmr_a35_d20": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.35,
+    "diversity": 0.2
+  },
+  "mmr_a35_d40": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.35,
+    "diversity": 0.4
+  },
+  "mmr_a35_d60": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.35,
+    "diversity": 0.6
+  },
+  "mmr_a65_d20": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.65,
+    "diversity": 0.2
+  },
+  "mmr_a65_d40": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.65,
+    "diversity": 0.4
+  },
+  "mmr_a65_d60": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.65,
+    "diversity": 0.6
+  },
+  "mmr_a85_d20": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.2
+  },
+  "mmr_a85_d40": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.4
+  },
+  "mmr_a85_d60": {
+    "strategy": "mmr",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.6
+  },
+  "coverage_a35_d20": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.35,
+    "diversity": 0.2
+  },
+  "coverage_a35_d40": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.35,
+    "diversity": 0.4
+  },
+  "coverage_a35_d60": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.35,
+    "diversity": 0.6
+  },
+  "coverage_a65_d20": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.65,
+    "diversity": 0.2
+  },
+  "coverage_a65_d40": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.65,
+    "diversity": 0.4
+  },
+  "coverage_a65_d60": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.65,
+    "diversity": 0.6
+  },
+  "coverage_a85_d20": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.2
+  },
+  "coverage_a85_d40": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.4
+  },
+  "coverage_a85_d60": {
+    "strategy": "coverage",
+    "aesthetic_weight": 0.85,
+    "diversity": 0.6
+  }
+}
