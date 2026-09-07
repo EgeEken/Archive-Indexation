@@ -2,31 +2,29 @@
 
 ## Purpose
 
-Build a local-first application for personal photo/video archives that combines:
+Build a local-first application for personal photo/video archives combining:
 
-1. **Browse and search** — fast access to indexed media using semantic embeddings, metadata, tags, and later OCR/transcripts/faces.
+1. **Browse and search** — semantic retrieval, metadata, tags, and later OCR/transcripts/faces.
 2. **Archive management** — incremental indexing, grouping, quality-assisted image selection, compression, and derived-file tracking.
-3. **Portability** — an indexed archive should remain browseable/searchable from the archive drive itself without requiring the original indexing models to be installed.
+3. **Portability** — an indexed archive must remain browseable/searchable directly from the archive drive without requiring indexing models to be installed.
 
-The application should eventually support arbitrary archive/folder layouts and possibly mobile devices, but the first implementation should stay simple and target Windows PCs.
+The first implementation targets Windows PCs but must not assume the primary RTX 3070 Ti development machine. Lower-end systems are important and eventual fully local mobile use is a long-term goal.
 
 ## Primary constraints
 
 - Primary development/testing machine: Windows laptop with RTX 3070 Ti.
-- Do not hard-code assumptions about that hardware, phone model, image resolution, archive size, or directory layout.
-- Typical processing unit is one archive/year containing roughly 10–30 GB, thousands of photos, and around hundreds of videos, but a workspace may also be rooted above multiple years.
+- Do not hard-code hardware, camera model, image resolution, archive size, or directory layout.
+- Typical processing scope is one year/session of roughly 10–30 GB, thousands of photos, and around hundreds of videos, although a workspace may be rooted above multiple years.
 - Full archive is over 100 GB.
-- Current source media is mostly JPEG images and MP4/MOV videos.
-- Existing compressed images use JPEG XL; existing compressed videos remain MP4 but use AV1.
-- Selected originals are untouched phone JPEGs, not RAW/PNG/TIFF copies.
-- All processing must be local-first. Permanent cloud hosting is not a requirement and should not become a dependency.
-- Long-running jobs must be resumable and safe to stop.
-- The application itself must never delete source/original files.
-- User may manually delete originals after successful compression.
+- Current media is mostly JPEG/JXL images and MP4/MOV videos; compressed video uses AV1 in MP4.
+- Selected originals are untouched phone JPEGs rather than RAW/PNG/TIFF exports.
+- Core functionality is local-first. Permanent cloud hosting is not a dependency.
+- Every expensive task must be resumable and safe to stop.
+- The application itself must never delete source/original files. Manual deletion after verified compression remains a user action.
 
 ## Product structure
 
-The final application should combine browsing/search and archive management in one UI, but expose distinct sections so users can enter only the workflow they need. Likely sections:
+One application should cover both browsing/search and management, but distinct sections are preferable to a forced continuous workflow. Likely areas:
 
 - Home / workspace selection
 - Browse / Search
@@ -36,26 +34,26 @@ The final application should combine browsing/search and archive management in o
 - Problems / Logs
 - Settings / Advanced
 
-Do not automatically reopen the last workspace as the only startup behavior. The preferred entry point is a home screen listing/selecting workspaces.
+The app should open to workspace selection rather than silently treating the last workspace as the only default.
 
 ## Compute tiers
 
-Treat compute tiers as a first-class feature.
+Compute tiers are a first-class feature.
 
-### Default presets
+### Presets
 
-- **Lightweight** — default; designed for CPU-only / weak devices where practical; smaller models and/or reduced processing quality are acceptable.
-- **High** — better models/denser processing, but still intended for normal consumer hardware rather than datacenter GPUs.
+- **Lightweight** — default. Keep compute as low as practical and accept reduced model/indexing quality when necessary.
+- **High** — improved models/denser processing while remaining usable on ordinary consumer GPUs rather than datacenter hardware.
 
 ### Advanced mode
 
-Allow advanced users to choose individual components/models/features rather than using a monolithic preset.
+Allow individual components/models/features to be selected manually. A user may, for example, choose lightweight embeddings and quality scoring while explicitly enabling OCR.
 
-Important: presets are only UI conveniences. Persist the actual processing provenance, not merely `lightweight` or `high`. For each derived component, record the exact model/algorithm/settings/version used and its completion state.
+Preset names are UI conveniences only. Persist the exact work performed: model/algorithm, settings/version, completion status, and provenance for every derived component. Features omitted in one run must be runnable later without rebuilding unrelated components.
 
-The system should allow omitted features to be run later without rebuilding unrelated components. Compression is a separate explicit workflow, not part of the initial indexing call.
+Compression is an independent workflow, not implicitly part of initial indexing.
 
-Long-term mobile support may use lower-quality/smaller models rather than running the same large models extremely slowly. Initial mobile direction, if attempted, should be fully local browse/search/indexation on the phone itself rather than requiring round trips to a PC.
+Long-term mobile support should favor smaller models and reduced quality over making a large desktop model run impractically slowly. An initial mobile port should ideally index/search/browse locally on the device rather than requiring a PC round trip.
 
 ## Workspace model
 
@@ -64,13 +62,13 @@ A workspace is rooted at a user-selected folder and recursively indexes its subt
 Examples:
 
 - `D:\Archive\2024` can be a workspace.
-- `D:\Archive` can also be a workspace and should include/index `2023`, `2024`, etc. while preserving the subfolder structure for later filtering/navigation.
+- `D:\Archive` can also be a workspace and index `2023`, `2024`, etc., while retaining the subfolder hierarchy as navigable/filterable metadata.
 
-Future support for multiple source roots / global search across multiple workspaces would be useful but is not required initially.
+Future support for multiple roots/global search across workspaces is useful but not required for the first version.
 
 ### Portability
 
-Workspace state should be portable with the archive. Preferred layout:
+Workspace state should be portable with the archive. Preferred conceptual layout:
 
 ```text
 <workspace root>/
@@ -78,59 +76,60 @@ Workspace state should be portable with the archive. Preferred layout:
   .archive-index/
     index.sqlite
     workspace.json        # optional portable/config manifest
-    thumbnails/           # optional, rebuildable cache
+    thumbnails/           # optional rebuildable cache
     logs/
     ... other rebuildable derived data ...
 ```
 
-Processing may use the laptop SSD as temporary/cache storage for speed, but the resulting index/state must be portable back to the archive. Search/browse must work directly from an external hard drive without copying tens of GB of media to the SSD.
+Processing may use a local SSD as temporary/cache storage for speed, but the resulting index must be portable back to the archive. Search/browse must also work directly from an external hard drive without copying the media to the SSD.
 
 ## Canonical data model
 
-Use **SQLite** as the likely canonical index rather than large JSON manifests. JSON may still be useful for portable configuration, debugging, or exports.
+Use **SQLite** as the likely canonical index. JSON remains useful for portable configuration, debugging, manifests, or exports.
 
-Do not make the vector-search index or thumbnail cache the only copy of important state. Derived indexes/caches should be rebuildable.
+Do not make a vector index or thumbnail cache the only copy of important state. Derived indexes/caches should be rebuildable.
 
-Open implementation choice: embeddings may be stored as SQLite BLOBs or as separate contiguous matrix/tensor files referenced by SQLite. Do not lock this decision prematurely; benchmark simplicity, portability, read performance, and update behavior.
+Embedding storage remains an implementation choice: SQLite BLOBs versus a separate contiguous matrix/tensor file referenced by SQLite should be benchmarked rather than fixed prematurely.
 
-The database should at minimum track:
+The database should track at least:
 
 - stable asset identity
 - current path / filename
 - media type
 - file size and filesystem timestamps
-- cryptographic/content hash where available
+- content hash where appropriate
 - EXIF/media metadata
 - source/derived relationships
-- indexing component status
+- indexing component states
 - exact model/algorithm/settings/version per component
 - embeddings or embedding references
-- quality score and component metrics
-- grouping / cluster information
+- absolute quality score and component metrics
+- strict image grouping information
+- optional semantic cluster information
 - user selection state
-- user tags/notes
-- compression jobs and provenance
+- arbitrary tags/notes
+- compression jobs/provenance
 - missing/offline state
-- failure logs
+- failures/logs
 
 ## File identity, moves, and missing media
 
-Do not treat a pathname as the permanent identity of an asset.
+Do not use the pathname as permanent asset identity.
 
-Suggested behavior on rescan:
+Recommended rescan behavior:
 
-1. Check assets still at the same path using cheap metadata first.
-2. Detect new/missing paths.
-3. Use content hashes to recognize moved or renamed files reliably.
-4. Filename matching may be used as a fallback hint, never as definitive identity.
-5. If a previously indexed file cannot be found, mark it **offline/missing** rather than immediately deleting its index entry.
-6. Allow the user to relink, keep offline metadata/index information, or explicitly remove the missing asset from the workspace.
+1. Check unchanged paths cheaply using file metadata.
+2. Identify new and missing paths.
+3. Use content hashes to recognize moved/renamed files reliably.
+4. Filename matching may be a fallback hint but never definitive identity.
+5. Mark unresolved indexed assets **offline/missing** rather than deleting their index entry automatically.
+6. Allow relink, keep-offline, or explicit removal actions.
 
 ## Incremental and resumable processing
 
-Incremental indexing is mandatory. `Update index` should process only new/changed/missing assets and reuse completed work when valid.
+Incremental indexing is mandatory. `Update Index` should reuse valid work and process only new/changed/missing assets.
 
-Every expensive component must have independently persisted progress, e.g.:
+Every expensive component must persist independent progress, e.g.:
 
 ```text
 metadata       complete
@@ -143,196 +142,172 @@ clustering     pending
 compression    43 / 838
 ```
 
-Closing/stopping the app must preserve job state. A disconnected external drive may fail the active operation; automatic hot-reconnect handling is not required initially, but reopening and resuming must be safe and convenient.
+Stopping/closing must preserve state. If an external drive disappears, the operation may fail; hot reconnect is not required initially, but reopening and resuming must be safe.
 
-For per-file errors, log the failure and continue processing the rest of the batch. Provide a Problems view summarizing e.g. `X files failed in Y step`, with detailed logs and retry actions.
+A per-file failure must not abort a batch. Continue processing, then expose a Problems view such as `X files failed in Y step`, detailed logs, and retry actions.
 
 Support both:
 
 - **Update Index** — incremental work.
-- **Rebuild Index / Rebuild Component** — regenerate derived state deliberately.
+- **Rebuild Index / Rebuild Component** — deliberate regeneration.
 
-Already-generated indexes must remain browseable/searchable on another machine without the models installed. Models are required for generating/regenerating derived information, not for consuming valid stored results.
+Already-generated indexes must remain usable for browsing/search on a machine without the generation models installed.
 
 ## Default indexing pipeline
 
-Tentative lightweight/default image indexing components:
+Tentative default/lightweight image stages:
 
 - file/metadata extraction
 - semantic embedding
 - basic quality metrics
-- perceptual hash / duplicate signals
+- perceptual hash / cheap similarity signals
 - thumbnail generation if useful for UI performance
 
-Optional/heavier components exposed by presets/advanced mode may include:
+Optional/heavier stages can include:
 
 - OCR
-- face detection / recognition / clustering
-- workspace-level semantic clustering
-- richer quality models
-- denser or higher-quality embeddings
-- video sampling/shot analysis
+- face detection/recognition/clustering
+- workspace semantic clustering
+- richer learned quality models
+- larger embeddings
+- denser video sampling / shot analysis
 - speech transcription
-
-Users should be able to enable a feature such as OCR even while choosing lightweight settings for other components.
 
 ## Search and browse
 
-### Scope and filters
-
-Semantic search should search the entire current workspace by default.
-
-Structured properties should be explicit filters rather than unnecessarily encoded in the natural-language query. Examples:
+Semantic search should target the whole current workspace by default. Structured attributes should be explicit filters rather than pushed into the text query when avoidable, e.g.:
 
 - year/session/subfolder
 - media type
 - date range
 - tags
-- people (later)
+- people later
 
-A query such as `cat` should primarily represent semantic content; a user who wants 2021 results can explicitly restrict the scope to 2021.
-
-English semantic queries are sufficient initially. Multilingual semantic-query handling can be added later, potentially by translating a query to English before embedding if that proves adequate. Transcript search itself must preserve/search the actual languages spoken in the videos.
+English semantic queries are sufficient initially. Multilingual query translation can be explored later. Transcript indexing must preserve/search whatever languages were actually spoken.
 
 ### Views
 
-Provide at least two switchable search/browse views eventually:
+Eventually provide at least:
 
-1. **Gallery** — primary/default view; similarity score visible under results.
-2. **Embedding map** — secondary/novel exploratory view showing projected embedding positions and where query/results fall.
+1. **Gallery** — primary/default view; similarity score visible.
+2. **Embedding map** — secondary exploratory view showing projected embedding positions and query/result locations.
 
-Each asset should support `find similar`, using image-to-image embedding retrieval. This is considered important.
+Each asset should support `Find similar` / image-to-image search. This is considered important.
 
-The embedding map is initially a secondary feature, but could become useful for selection and exploration if implemented well.
-
-Potential future map/navigation concept:
+The embedding map is initially a novelty/secondary feature but could become useful for selection and archive exploration if implemented well. Potential hierarchy:
 
 - full embedding projection (PCA/UMAP-like)
 - coarse semantic clusters
 - strict photo groups
 - individual photos
 
-Treat this as an experimental visualization, not a core requirement for the first working search UI.
+Do not make this visualization a blocker for the first useful gallery/search UI.
 
-## Clustering
+## Workspace semantic clustering
 
-Workspace-level clustering is optional and should be disabled in the Lightweight preset and available/enabled in High or Advanced modes.
+Workspace-level clustering is optional. It should be off in Lightweight and available/enabled in High or Advanced modes.
 
-Its purpose is **visual organization/navigation**, not semantic truth and not a factor that changes search correctness.
+Its purpose is visual organization/navigation, not search correctness or objective semantic truth.
 
 Potential approach:
 
 - k-means over semantic embeddings
-- choose a usable `K` by optimizing silhouette score over a sensible candidate range
-- persist cluster assignments and the exact embedding/model/K/algorithm used
-- allow the user to disable clustering or manually request another K later
+- select a useful `K` by optimizing silhouette score over a sensible candidate range
+- persist assignments plus embedding/model/K/algorithm provenance
+- allow disabling clustering or manually choosing/recomputing K
 
-Potential cluster labels such as `cats`, `food`, `city streets` are navigation aids only. A lightweight VLM or representative-image labeling step may produce approximate labels. Perfect labels are not required.
+Approximate cluster labels such as `cats`, `food`, or `city streets` are navigation aids. A lightweight VLM may label representative images/groups; perfect labels are unnecessary.
 
-## Image grouping / near-duplicate selection
+## Strict image grouping
 
-A proof of concept already exists conceptually/experimentally using:
+The grouping used for selection means **basically the same photo of the same thing from essentially the same angle**, not broad semantic similarity.
 
-- CLIP embeddings
-- temporal distance between images
-- a general diversity signal for grouping
-- focus and exposure metrics for quality ranking
+A proof of concept used CLIP embeddings, temporal distance, a diversity signal, and simple focus/exposure quality metrics. It worked surprisingly well but is still early and JPEG-only. The implementation from that proof of concept should be inspected once committed and used as evidence rather than recreated from memory.
 
-Results were promising but clearly early/simple and JPEG-image-only.
+Production grouping must strongly prefer false splits over false merges: unrelated photos in one strict group are worse than a true burst being split into smaller groups.
 
-The production grouping system should be **strict/conservative about merges**: placing unrelated photos in the same group is worse than splitting one true burst into multiple groups.
+### Grouping logic
 
-Grouping should be primarily automatic, but manual correction should remain possible.
+Current intended behavior:
 
-Do not conflate all similarity levels:
+- Time proximity is a hard/near-hard prerequisite for a strict group.
+- A rough initial temporal candidate window is **about 10 seconds**.
+- Time is **not sufficient**: grouping should require a strict **AND** between temporal proximity and strong visual similarity.
+- The visual comparison need not be a large semantic embedding model; cheap perceptual/visual similarity is preferable if it works reliably.
+- Manual group correction should remain possible.
+- The best-scoring member should normally become the representative thumbnail.
+
+Do not conflate:
 
 - exact duplicate
 - same source / encoded derivative
-- near-identical burst/angle
+- near-identical burst/angle (strict selection group)
 - same event/moment
-- merely semantically similar
+- broad semantic similarity
 
-Use the appropriate signals for each.
-
-Open grouping questions still to resolve:
-
-- whether time proximity is a hard prerequisite for strict groups
-- preferred temporal window / adaptive temporal logic
-- exact combination of perceptual hash, embeddings, capture time, and possibly GPS
-- whether best-scoring image should become the group representative automatically
-
-## Selection philosophy
-
-The application should **not attempt to infer subjective sentimental value** as the primary selection objective.
-
-Automatic selection should focus on relatively objective/operational signals:
-
-- technical image quality
-- strict redundancy/grouping
-- uniqueness/diversity
-- possibly face/person-presence bonuses later
-
-The user makes final subjective decisions, aided by search, grouping, rankings, and UI.
-
-The user's previous personal categories (`family`, `animals`, `manzara`, `diğer`) should not be baked into the generic app. Arbitrary user-created organization/tags should be supported instead. Semantic clustering/search can help users construct whatever categories they want afterward.
-
-Videos are **not part of automatic quality selection initially**. For now videos are indexing/search/compression targets only.
-
-## Automatic preselection
-
-Automatic preselection is desirable and should be conservative:
-
-- In a strict group of near-identical images, usually recommend/select one strong representative.
-- Two may be retained/recommended when subtle differences make both plausible.
-- Prefer selecting slightly too much rather than silently excluding valuable material, but avoid filling the selection with obviously useless images.
-- The core mechanism should remain score/ranking based so users can globally sort later.
-
-Strong categorical labels such as `definitely keep` / `probably keep` can be UI interpretations of underlying scores; do not make those labels the fundamental representation.
-
-Open questions still to resolve:
-
-- whether uniqueness/diversity is a separate displayed score or part of the composite selection score
-- singleton behavior
-- exact preselection rule per group
+Use separate signals/thresholds where appropriate.
 
 ## Quality scoring
 
-Quality scores must be **absolute/comparable across the workspace**, not only relative within each near-duplicate group. This enables a global `highest quality / best selected images` view.
+Quality must be represented as an **absolute workspace-comparable score** so the user can globally rank images and inspect the best selected images across the workspace.
 
-Initial cheap metrics should emphasize:
+Initial cheap signals should emphasize:
 
 - focus/sharpness
 - exposure
 - contrast
 - noise
 
-Do **not** significantly reward raw resolution: mixed-device archives would otherwise systematically favor newer/higher-resolution cameras.
+Do **not** significantly reward raw resolution; otherwise mixed-device archives systematically favor newer/higher-resolution cameras.
 
-A single composite score should be the main visible value. Detailed component metrics should be accessible in an image/details popup.
+A single composite quality score should be prominent in the UI. Component values belong in a details popup/expanded view.
 
-Important limitation: simple focus/exposure/contrast/noise metrics alone have already shown limited agreement with human judgments. Treat them as a baseline, not as a solved definition of photographic quality. Benchmark lightweight learned/no-reference quality models later if useful.
+Simple focus/exposure/contrast/noise metrics have already shown limited agreement with human quality judgments. Treat them as an inexpensive baseline, not a solved notion of photographic quality. Benchmark lightweight no-reference/learned quality models later if they improve agreement enough for their cost.
 
-Potential future person/face presence can contribute a small selection bonus as a proxy for potentially valuable content, but must not be treated as a true sentimental-value detector.
+**Diversity/uniqueness should not materially alter the quality score.** Quality and diversity are distinct signals. Diversity may influence preselection, but an image must not receive a higher photographic-quality score merely because it is unique.
+
+Potential future detected/repeated-face presence may add a small selection bonus as a proxy for potentially valuable content, but it must not be described as sentimental-value inference.
+
+## Selection philosophy
+
+Do not try to recreate the user's historical subjective category system (`family`, `animals`, `manzara`, `diğer`) as generic automated classification. The app should focus on relatively objective-ish assistance:
+
+- technical quality
+- strict redundancy/grouping
+- diversity/uniqueness
+- optional auxiliary signals such as face presence later
+
+The user makes final subjective decisions using the search/grouping/ranking UI. Arbitrary tags/categories may be created by users afterward.
+
+Videos are excluded from automatic quality selection initially. Their first scope is indexing/search/compression.
+
+### Automatic preselection
+
+Automatic preselection should be conservative but useful:
+
+- Usually select/recommend **one** image from a strict group.
+- Rarely select **2–3** if several members are all high quality and meaningfully different even by intra-group standards.
+- Prefer selecting slightly too much over silently omitting a valuable candidate, but do not retain obviously useless images.
+- Group-level ranking should primarily use quality; diversity can help decide whether a second/third high-quality member adds enough distinct information to keep.
+- Singleton images are strong candidates only when their quality is sufficiently good; being unique does not automatically mean `keep`.
+- Keep the underlying representation score/ranking based. Labels such as `probably keep` can be UI interpretations rather than the canonical logic.
 
 ## Selection UI ideas
 
-Do not prematurely freeze the UI. Keep several ideas available for iterative testing.
+Do not freeze the UI prematurely. Candidate ideas include:
 
-Possible hierarchy:
-
-1. Gallery of strict image groups, one representative thumbnail each.
-2. Open group to inspect every member.
-3. Optional best-to-worst ranking within a group.
-4. Quality score visible; component details available on demand.
-5. Conservative automatic preselection, editable by user.
+1. Gallery of strict image groups with one representative thumbnail each.
+2. Clicking a group shows all members.
+3. Optional best-to-worst ranking within groups.
+4. Quality score visible; component details on demand.
+5. Conservative automatic preselection editable by the user.
 6. Similar-image mini-search from each asset.
 7. Optional workspace embedding map.
-8. Optional semantic clusters as a layer between the full workspace and strict groups.
-9. Time filters, later map/GPS filters.
+8. Optional semantic clusters between full-workspace and strict-group levels.
+9. Time filters and later GPS/map filtering.
+10. Later comparison aids such as synchronized zoom/pan, face crops, keyboard shortcuts, and undo/history.
 
-Useful detailed-comparison features later may include synchronized zoom/pan, face crops, rapid keyboard selection, and undo/history.
-
-Selection decisions should be stored in the index and point to the existing media. Do not physically copy files for every decision. Thumbnail files, if generated, exist solely as rebuildable UI-performance caches.
+Selection state belongs in the index and points to existing media. Do not physically copy media for each selection decision. Thumbnails, if generated, are rebuildable UI caches.
 
 ## User metadata
 
@@ -344,33 +319,26 @@ Useful:
 
 Not a priority:
 
-- star-style ratings/grading of personal media
+- star/rating systems for personal media
 
 ## Metadata
 
-Preserve and use available metadata where possible, especially:
+Preserve/use available metadata where possible, especially timestamps, GPS, orientation, EXIF, video duration/frame rate/codec, and relevant color/HDR information. Some historical compressed files may already have lost metadata; do not assume availability.
 
-- timestamps
-- GPS
-- orientation
-- EXIF
-- video duration/frame rate/codec
-- relevant color/HDR metadata
-
-Some metadata may already have been lost in historical compressed files; do not assume it exists.
-
-Future optional UI can include calendar/timeline and geographic map views where metadata is available.
+Optional later views can include timeline/calendar and map browsing.
 
 ## Video indexing
 
-Initial video scope:
+Initial scope:
 
 - file-level semantic indexing/search is acceptable
 - transcript search can be added
 - compression is supported
 - automatic video quality/selection is deferred
 
-Shot/timestamp-level analysis remains a bookmarked future enhancement. Potential future representation:
+Shot/timestamp-level indexing remains a bookmarked future enhancement and must not block v1.
+
+Potential future representation:
 
 ```text
 video
@@ -384,232 +352,197 @@ video
   detected faces
 ```
 
-Do not make shot-level processing mandatory in the first version.
+## OCR, speech, faces
 
-## Speech, OCR, faces
-
-These are modular optional enrichment passes.
+Keep these as modular enrichment passes.
 
 ### Speech
 
-Eventually support local speech-to-text for videos. Spoken content may be Turkish, English, French, or other languages, so transcript indexing must not assume English-only speech.
+Eventually support local speech-to-text. Audio may contain Turkish, English, French, or other languages, so transcript indexing must not assume English-only content.
 
 ### OCR
 
-Optional. Advanced users may choose OCR even under otherwise lightweight settings.
+Optional and independently selectable, including under otherwise lightweight settings.
 
 ### Faces
 
-Potential future Samsung-Gallery-like flow:
+Potential later Samsung-Gallery-like flow:
 
 - detect faces
 - embed/cluster recurring identities
 - show unknown face clusters
 - user merges/splits/labels identities
-- use known/repeated face presence as an optional selection signal
+- optionally use known/repeated face presence as a selection signal
 
-Keep the face subsystem modular and verify pretrained-model licensing before choosing/distributing checkpoints.
+Keep the subsystem modular and verify pretrained-model licensing before distributing checkpoints.
 
-## Compression model
+## Compression
 
-Compression is a separate workflow from indexing.
+Compression is separate from indexing.
 
-Default scope is the entire workspace. Supporting selected subfolders/files is useful but secondary.
+Default scope is the entire workspace, with selected subfolder/file targeting as a secondary feature.
 
 ### Provenance over codec guessing
 
-Do **not** infer that an asset is already processed merely because its extension/codec is JXL/AV1.
+Do not infer app-managed completion merely from `.jxl` or AV1. A compression is known/complete only if:
 
-The application should regard a compression as known/complete only if:
-
-- the app created it and recorded the provenance, or
+- the app created it and recorded provenance, or
 - the user explicitly imports/marks an existing file as an accepted compressed derivative.
 
-Historical manual compressions should otherwise be ignored for app-managed compression state, because they may use different settings.
+Historical manual compressions otherwise remain outside app-managed compression state; backwards compatibility/consistency with them is not required.
 
-Consistency with historical encoding is not required. Backwards compatibility with old manual compression metadata/settings is not a priority.
+### Relationships and safety
 
-### Source/derived relationship
-
-Track app-generated compressed outputs explicitly:
+Track:
 
 ```text
 source_asset -> compressed_asset
 ```
 
-Store codec/encoder/settings/version and validation state with that relationship/job.
+with codec/encoder/settings/version and validation state.
 
-### Safety
+The application never deletes the source asset. After verified completion, it can list source files that may now be removed manually and show failed jobs.
 
-The application must never delete the source asset.
+### Temporary outputs and resume
 
-After successful compression and verification, the UI may report:
+Encode to a temporary filename/path, verify it, then finalize/rename. If interrupted during an individual JXL/AV1 encode, restart that file later. Resume the **queue**, not a byte position within the encode.
 
-```text
-423 originals safely compressed
-8 failed
-423 source files may now be manually removed
-```
+### Failure handling
 
-Expose the list/reveal operation and allow retry of failed jobs.
-
-### Temporary outputs and resume behavior
-
-Never treat a partially encoded output as complete.
-
-Encode to a temporary file/path, verify it, then finalize/rename it. If interrupted halfway through one file, restart that individual encode later. Resume the **job queue**, not the byte position inside a JXL/AV1 encode.
-
-### Failures
-
-Support:
-
-- retry individual failed job
-- batch retry all failed jobs
-- advanced `retry with different settings`
-
-Do not silently switch encoder settings after failures; archive outputs should not become inconsistent without explicit user action.
+Support individual retry, batch retry, and explicit `Retry with different settings`. Never silently change compression settings as a fallback.
 
 ### Verification
 
-Compression completion requires lightweight validation at minimum:
+Before marking a compression complete, cheaply verify at minimum:
 
 - output exists
-- output can be decoded/probed successfully
-- expected dimensions (images) or duration/dimensions (video)
-- no catastrophic size anomaly
-- relevant metadata preserved where intended
+- it probes/decodes successfully
+- expected dimensions and, for video, duration
+- no catastrophic file-size anomaly
+- intended metadata is preserved where applicable
 
-Expensive perceptual metrics are not required for every normal compression job. They can be used during benchmarking/development and optionally exposed to advanced users.
+Expensive SSIM/VMAF-style validation is optional/benchmarking-oriented rather than mandatory for every job.
 
-### Current historical baseline
+### Historical baseline
 
 Previous manual workflow:
 
 - JPEG XL: quality 60, effort 7
-- video: HandBrake AV1 `4K Very Fast` preset/workflow
+- HandBrake AV1 `4K Very Fast` preset/workflow
 
-These are baselines for testing, not compatibility constraints. Exact HandBrake encoder/rate-control/audio/color settings still need to be inspected on the PC before implementing canonical defaults.
+These are starting points for benchmarking, not compatibility requirements. Exact HandBrake encoder/rate-control/audio/color settings still need to be inspected before canonical defaults are finalized.
 
-### Canonical presets
+Prefer one canonical image preset and one canonical video preset for normal users, with advanced customization.
 
-Prefer one canonical image compression preset and one canonical video compression preset for normal users, with full advanced customization available.
-
-Likely output naming:
+Likely naming:
 
 ```text
 IMG_1234.jpg -> IMG_1234.jxl
-VID_1234.mp4 -> VID_1234.mp4  # AV1 indicated by codec, not extension
+VID_1234.mp4 -> VID_1234.mp4
 ```
 
-Open decision: how to handle pre-existing same-stem compressed files such as `IMG_001.jpg` + `IMG_001.jxl` when the JXL is not app-managed. Revisit deduplication/recompression semantics before implementation.
+Open decision: behavior when an unknown pre-existing same-stem derivative already exists, e.g. `IMG_001.jpg` + `IMG_001.jxl`.
 
-## Existing archive structure
+## Existing archive context
 
-Current rough structure is year-oriented, e.g.:
+Rough historical structure:
 
 ```text
 D:/2018/photos/example.jxl
 D:/2018/selection/diğer/example.jpeg
 ```
 
-The exact filesystem tree will be supplied later. Do not hard-code this structure; the app should eventually handle arbitrary folder structures while preserving them in the index.
+The exact tree still needs to be recorded. Do not hard-code it.
 
-Historically, selected originals used mutually exclusive personal categories with rough precedence:
+Historically selected JPEG originals used mutually exclusive personal categories with precedence roughly:
 
 `family -> animals -> manzara -> diğer`
 
-This historical convention is archive context only and should not define the generic application's automated selection logic.
+This is archive context only and should not define generic automated selection.
 
 ## Checksums and integrity
 
-Cryptographic hashes are useful for:
+Content hashes are useful for stable identity across moves/renames, copy verification, exact duplicate detection, corruption detection, validating SSD-to-archive transfers, and distinguishing originals from derivatives.
 
-- stable asset identity across move/rename
-- verifying source copies
-- duplicate detection
-- detecting accidental corruption
-- verifying SSD temporary processing copied back correctly
-- distinguishing originals from re-encoded derivatives
+Hashes do not replace backups. The user currently has no complete second backup, so development must use conservative source handling and preferably copied test subsets before any mutation-heavy workflow touches the real archive.
 
-Hashes are not a replacement for backups.
+## Candidate technologies — provisional
 
-The user currently does not maintain a complete second backup of the archive. Development/testing must therefore be conservative: use copied test subsets and never perform destructive source operations from the application.
+Likely direction, benchmark before locking in:
 
-## Candidate technologies — provisional, benchmark before locking in
+- Python backend/core
+- SQLite canonical catalog
+- ExifTool + `ffprobe` or equivalent for metadata
+- libjxl / `cjxl` for image compression
+- FFmpeg with a selected AV1 encoder for video compression
+- CLIP/SigLIP-family or other lightweight image-text embeddings, benchmarked for Lightweight/High tiers
+- cheap perceptual/visual similarity for strict burst grouping where possible
+- exact brute-force vector retrieval may be sufficient for thousands of assets; FAISS or equivalent only where useful
+- local Whisper/faster-whisper-class speech recognition
+- local OCR model to be benchmarked
+- local app UI; exact framework undecided
 
-Likely direction:
-
-- language/backend: Python
-- canonical metadata/index: SQLite
-- metadata extraction: ExifTool + `ffprobe` or equivalent
-- image compression: libjxl / `cjxl`
-- video compression: FFmpeg and a chosen AV1 encoder after benchmarking/matching desired quality-speed tradeoff
-- semantic image-text embeddings: benchmark CLIP/SigLIP-family lightweight models and alternatives
-- image-to-image/instance similarity: benchmark semantic embeddings and/or a dedicated visual embedding model
-- vector retrieval: exact brute-force may be sufficient for thousands of assets; FAISS or another local vector index can be added where useful
-- speech: local Whisper/faster-whisper-class implementation
-- OCR: benchmark local options
-- UI: local application with gallery/search/processing views; exact framework not decided
-
-Do not over-engineer for millions of assets. Typical workspaces contain thousands of images. Prefer simple exact methods when their latency is already good enough.
+Do not over-engineer for millions of assets. Typical workspaces contain thousands.
 
 ## Development phases
 
-### Phase 0 — inventory and compression benchmark definition
+### Phase 0 — inspect existing proof of concept and real archive
 
-- inspect exact archive structure/filesystem
-- inspect exact HandBrake/XL Converter settings if still relevant
-- select representative test media
-- define preservation/validation rules
+- inspect the committed proof-of-concept grouping/quality implementation
+- record actual external-drive filesystem and representative folder tree
+- define source/compressed/selection folder-role behavior
+- inspect representative metadata and media formats
+- create a safe representative test workspace
 
 ### Phase 1 — read-only workspace/index foundation
 
 - workspace creation/opening
 - recursive scan
 - SQLite schema
-- stable asset identity
+- stable identity/content hashes
 - metadata extraction
 - incremental rescan
-- missing/offline handling
+- missing/offline behavior
 - optional thumbnails
 - basic gallery/filtering
 
-### Phase 2 — semantic image retrieval
+### Phase 2 — image retrieval
 
-- benchmark lightweight/high embedding candidates
+- benchmark Lightweight/High embedding candidates
 - persist embeddings/provenance
 - text-to-image search
 - image-to-image search
 - gallery result view
-- global/subfolder filters
+- workspace/subfolder filters
 
-### Phase 3 — strict grouping and image selection
+### Phase 3 — strict grouping and selection
 
-- grouping signals and conservative thresholds
-- absolute quality score
-- representative images
-- ranking
-- automatic conservative preselection
-- manual correction and persistence
+- reuse/benchmark proof-of-concept grouping
+- strict time + visual-similarity thresholds
+- absolute quality scoring
+- group representatives
+- global/group rankings
+- conservative automatic preselection
+- manual corrections and persisted selection
 
 ### Phase 4 — compression pipeline
 
-- canonical JXL/AV1 presets
-- job queue/progress/retry
-- temp outputs
+- benchmark/finalize canonical JXL/AV1 settings
+- persistent queue/progress/retry
+- temporary outputs
 - validation
-- source/derived tracking
+- source/derived relationships
 - explicit safe-to-delete-original list
 
 ### Phase 5 — richer browsing/organization
 
-- workspace clustering
+- semantic workspace clustering
 - embedding map
-- cluster labels
+- approximate cluster labels
 - tags/notes
-- richer global ranking/selection views
+- richer global ranking/selection review
 
-### Phase 6 — video and semantic enrichment
+### Phase 6 — video and enrichment
 
 - better video representations / optional shot indexing
 - speech transcription
@@ -617,58 +550,33 @@ Do not over-engineer for millions of assets. Typical workspaces contain thousand
 - face clustering/recognition
 - timeline/map views
 
-These phases are guidance, not rigid milestones. Build vertical prototypes where that produces faster evidence.
+These are guidance, not rigid milestones. Prefer vertical prototypes when they provide faster evidence.
 
-## Still-open questions / future discussion
+## Remaining implementation-relevant unknowns
 
-### Environment / filesystem
-
-- Exact filesystem of the external archive drive (NTFS/exFAT/etc.) still needs to be checked on Windows.
-- Exact archive folder tree will be provided later.
-
-### Grouping / selection
-
-- Whether uniqueness/diversity remains separate from quality or contributes to final preselection score.
-- Whether time proximity is a hard prerequisite for strict grouping.
-- Appropriate temporal window/adaptive strategy.
-- Exact grouping combination of time, perceptual similarity, embeddings, GPS, etc.
-- Representative-thumbnail rule.
-- Singleton automatic-preselection behavior.
-- Exact conservative preselection thresholds/rules.
-- Better human-aligned absolute quality model beyond basic focus/exposure/contrast/noise.
-
-### Compression
-
-- Exact canonical JXL defaults after benchmarking.
-- Exact canonical AV1 encoder/settings after inspecting/testing HandBrake-equivalent candidates.
-- Metadata/color/HDR preservation requirements for all observed formats.
-- Treatment of unknown pre-existing same-stem derivatives.
-
-### Video
-
-- File-level vs shot/timestamp-level semantic indexing after testing usefulness/cost.
-- Frame sampling strategy.
-- Transcript/OCR default vs optional behavior.
-
-### UI
-
-- Exact desktop/web/native framework.
-- Embedding-map projection method and interaction design.
-- Detailed group-comparison UX.
-- Global highest-score/selection review UX.
+- External archive drive filesystem (NTFS/exFAT/etc.), free space, and exact representative folder tree.
+- Which folders under an arbitrary workspace root should be considered canonical media, existing compressed derivatives, historical selections, or ignored/cache folders.
+- Historical-archive behavior where original JPEGs were manually deleted after compression and only JXL plus selected JPEG copies remain.
+- Exact metadata present in representative JPEG/JXL/MP4/MOV files and what must be preserved.
+- Exact HandBrake video settings/canonical AV1 settings when compression work begins.
+- Treatment of unknown pre-existing same-stem compressed derivatives.
+- Final Lightweight/High embedding and quality models after benchmarking.
+- Exact cheap visual-similarity method/thresholds after inspecting the proof-of-concept implementation.
+- Exact UI framework and packaging approach.
 
 ## Coding/agent guidance
 
 - Preserve source media. Never implement automatic deletion of originals.
-- Keep file mutations transactional/safe: temporary output -> validation -> finalization.
-- Make every expensive pipeline stage idempotent and resumable.
-- Store exact provenance for derived data and models.
-- Do not use preset names as the sole persisted processing state.
-- Prefer modular stages so users can run OCR/faces/clustering/etc. later without redoing embeddings or metadata.
-- Keep defaults simple. Put model/algorithm knobs in Advanced settings.
-- Optimize for archives with thousands, not millions, of assets unless benchmarks show a need for more complexity.
-- Treat clustering and automated selection as assistive tools, never destructive truth.
-- Keep arbitrary folder structures and source resolutions/codecs supported.
+- Keep mutations safe: temporary output -> validation -> finalization.
+- Make expensive pipeline stages idempotent and resumable.
+- Persist exact provenance rather than only preset names.
+- Keep optional stages modular so OCR/faces/clustering/etc. can be added later without unrelated recomputation.
+- Keep defaults simple and advanced controls explicit.
+- Optimize for thousands rather than millions of assets unless benchmarks show otherwise.
+- Treat semantic clustering and automated selection as assistive tools, never destructive truth.
+- Strict image grouping must prefer false splits over false merges.
+- Quality and diversity are separate concepts.
+- Support arbitrary folder structures and media resolutions/codecs.
 - Avoid cloud dependencies for core functionality.
-- Do not copy proprietary internship/company source code or private artifacts into this project; general techniques and publicly documented approaches may be independently reimplemented.
+- Do not copy proprietary internship/company source code, configs, private weights, client data, or internal artifacts. General techniques and public approaches may be independently reimplemented.
 - Do not commit or push unrelated changes without explicit user permission.
