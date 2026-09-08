@@ -22,7 +22,7 @@ def main():
                         choices=["handcrafted", "mobile", "dino", "clip", "mmr", "coverage"])
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--output-dir", type=Path,
-                        help="Where to keep the JSON, HTML, and cache (default: a sibling .photo-selection folder)")
+                        help="Where to keep the JSON, HTML, and cache (default: Early Testing/.runs)")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
@@ -42,9 +42,9 @@ def main():
     server_root = Path(os.path.commonpath([source.parent, output_dir]))
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(server_root))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    relative = output.relative_to(server_root).as_posix()
-    url = f"http://127.0.0.1:{args.port}/{relative.replace(' ', '%20').replace('#', '%23')}"
     page = output.with_suffix(".html")
+    relative = page.relative_to(server_root).as_posix()
+    url = f"http://127.0.0.1:{args.port}/{relative.replace(' ', '%20').replace('#', '%23')}"
     page_text = page.read_text(encoding="utf-8")
     page_text = page_text.replace(server_root.as_uri().rstrip("/"), f"http://127.0.0.1:{args.port}")
     page.write_text(page_text, encoding="utf-8")
