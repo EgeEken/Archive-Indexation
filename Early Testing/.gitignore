@@ -12,4 +12,5 @@ vendor/
 ui-test/
 runs/
 .runs/
+.runs*/
 !evidence/models/
