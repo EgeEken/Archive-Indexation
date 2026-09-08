@@ -2,8 +2,11 @@
 
 import argparse
 import functools
+import hashlib
 import http.server
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -12,6 +15,36 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+JPEG = {".jpg", ".jpeg"}
+
+
+def source_fingerprint(source):
+    paths = sorted(p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in JPEG)
+    values = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in paths]
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+
+def choose_output(source, output_dir, method, count, ratio):
+    base = output_dir / f"{source.name}.json"
+    if not base.exists():
+        return base, None
+    try:
+        manifest = json.loads(base.read_text(encoding="utf-8"))
+        expected_count = count if count is not None else max(1, int((len(list(source.rglob("*.jpg"))) + len(list(source.rglob("*.jpeg")))) * ratio + 0.999999))
+        options = manifest.get("options", {})
+        if (manifest.get("fingerprint") == source_fingerprint(source)
+                and manifest.get("count") == expected_count
+                and options.get("method") == method
+                and base.with_suffix(".html").exists()):
+            return base, manifest
+    except (OSError, json.JSONDecodeError):
+        pass
+    number = 2
+    while True:
+        candidate = output_dir / f"{source.name}-{number}.json"
+        if not candidate.exists():
+            return candidate, None
+        number += 1
 
 
 def main():
@@ -29,15 +62,18 @@ def main():
     source = Path.cwd().resolve()
     output_dir = (args.output_dir or ROOT / ".runs" / source.parent.name / source.name).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f"{source.name}.json"
+    output, existing = choose_output(source, output_dir, args.method, args.count, args.ratio)
     cache = output_dir / "cache"
-    command = [sys.executable, str(ROOT / "photo_select.py"), "select", str(source),
-               "--output", str(output), "--cache", str(cache), "--method", args.method]
-    if args.count is None:
-        command.extend(["--ratio", str(args.ratio)])
+    if existing is None:
+        command = [sys.executable, str(ROOT / "photo_select.py"), "select", str(source),
+                   "--output", str(output), "--cache", str(cache), "--method", args.method]
+        if args.count is None:
+            command.extend(["--ratio", str(args.ratio)])
+        else:
+            command.extend(["--count", str(args.count)])
+        subprocess.run(command, check=True)
     else:
-        command.extend(["--count", str(args.count)])
-    subprocess.run(command, check=True)
+        print(f"Existing selection is unchanged; reusing {output}")
 
     server_root = Path(os.path.commonpath([source.parent, output_dir]))
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(server_root))
@@ -46,7 +82,9 @@ def main():
     relative = page.relative_to(server_root).as_posix()
     url = f"http://127.0.0.1:{args.port}/{relative.replace(' ', '%20').replace('#', '%23')}"
     page_text = page.read_text(encoding="utf-8")
-    page_text = page_text.replace(server_root.as_uri().rstrip("/"), f"http://127.0.0.1:{args.port}")
+    browser_root = f"http://127.0.0.1:{args.port}"
+    page_text = re.sub(r"http://127\.0\.0\.1:\d+", browser_root, page_text)
+    page_text = page_text.replace(server_root.as_uri().rstrip("/"), browser_root)
     page.write_text(page_text, encoding="utf-8")
     print(f"Review page: {url}")
     print("Press Ctrl+C to stop the local viewer.")

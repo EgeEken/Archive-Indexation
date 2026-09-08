@@ -40,7 +40,7 @@ cd 'D:\Photos\2026.09.03\all-jpgs'
 python 'C:\path\to\Archive-Indexation\Early Testing\select_here.py' --count 100
 ```
 
-The launcher defaults to the CPU-only `handcrafted` method so it works without downloading model weights. Use `--method mobile` after installing the model dependencies if you want the learned default used in the experiments. Add `--ratio 0.15` instead of `--count 100` to select a percentage. If the folder is large, the first run can take a while; later runs reuse its cache. The launcher refuses to overwrite an existing result with the same name, so delete only a result directory you created yourself or choose a new output location with `--output-dir`.
+The launcher defaults to the CPU-only `handcrafted` method so it works without downloading model weights. Use `--method mobile` after installing the model dependencies if you want the learned default used in the experiments. Add `--ratio 0.15` instead of `--count 100` to select a percentage. If the folder is large, the first run can take a while; later runs reuse its cache. An unchanged folder with the same options reuses its existing selection; changed inputs or options create a numbered result such as `all-jpgs-2.json` without overwriting the earlier review.
 
 Use Python with the versions recorded in `requirements.txt` (tested on Python 3.13.5). Install the appropriate PyTorch build for your CPU/CUDA environment before installing remaining requirements. Model weights are not included.
 
