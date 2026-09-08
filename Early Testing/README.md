@@ -33,6 +33,15 @@ On the RTX 3070 Ti laptop / i9-12900H, fresh feature indexing of 1,369 photos to
 
 ## Run a new selection
 
+For the simplest workflow, copy `select_here.py` into the folder you want to review and run it from that folder. It creates a sibling `.photo-selection` directory, starts a local-only web server, and opens the review page in the default browser. Press Ctrl+C in the terminal when finished.
+
+```powershell
+cd 'D:\Photos\2026.09.03\all-jpgs'
+python .\select_here.py --count 100
+```
+
+The launcher defaults to the CPU-only `handcrafted` method so it works without downloading model weights. Use `--method mobile` after installing the model dependencies if you want the learned default used in the experiments. Add `--ratio 0.15` instead of `--count 100` to select a percentage. If the folder is large, the first run can take a while; later runs reuse its cache. The launcher refuses to overwrite an existing result with the same name, so delete only a result directory you created yourself or choose a new output location with `--output-dir`.
+
 Use Python with the versions recorded in `requirements.txt` (tested on Python 3.13.5). Install the appropriate PyTorch build for your CPU/CUDA environment before installing remaining requirements. Model weights are not included.
 
 ```powershell
