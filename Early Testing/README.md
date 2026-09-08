@@ -33,7 +33,7 @@ On the RTX 3070 Ti laptop / i9-12900H, fresh feature indexing of 1,369 photos to
 
 ## Run a new selection
 
-For the simplest workflow, leave `select_here.py` beside the other files in this `Early Testing` directory and run it with the folder you want to review as the current directory. (You can also copy the complete `Early Testing` directory next to a new folder.) It creates a sibling `.photo-selection` directory, starts a local-only web server, and opens the review page in the default browser. Press Ctrl+C in the terminal when finished.
+For the simplest workflow, leave `select_here.py` beside the other files in this `Early Testing` directory and run it with the folder you want to review as the current directory. (You can also copy the complete `Early Testing` directory next to a new folder.) It creates an ignored `.runs` directory beside the engine, starts a local-only web server, and opens the review page in the default browser. This keeps the protected source/archive tree read-only. Press Ctrl+C in the terminal when finished.
 
 ```powershell
 cd 'D:\Photos\2026.09.03\all-jpgs'

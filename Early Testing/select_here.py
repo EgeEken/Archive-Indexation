@@ -27,8 +27,8 @@ def main():
     args = parser.parse_args()
 
     source = Path.cwd().resolve()
-    output_dir = (args.output_dir or source.parent / ".photo-selection").resolve()
-    output_dir.mkdir(exist_ok=True)
+    output_dir = (args.output_dir or ROOT / ".runs" / source.parent.name / source.name).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"{source.name}.json"
     cache = output_dir / "cache"
     command = [sys.executable, str(ROOT / "photo_select.py"), "select", str(source),

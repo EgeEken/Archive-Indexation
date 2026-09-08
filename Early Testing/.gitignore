@@ -10,4 +10,6 @@ vendor/
 /selections/
 /*.html
 ui-test/
+runs/
+.runs/
 !evidence/models/
