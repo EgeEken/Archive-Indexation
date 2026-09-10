@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Archive Indexation</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #15181c; color: #edf0f3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #15181c; }
+    body.modal-open { overflow: hidden; }
+    button, input, select { font: inherit; }
+    button, select, input { border: 1px solid #4a535e; border-radius: .35rem; padding: .48rem .62rem; background: #232930; color: inherit; }
+    button { cursor: pointer; border-color: #687481; background: #d9e0e6; color: #15181c; font-weight: 600; }
+    button.secondary, button.icon { background: transparent; color: #edf0f3; }
+    button.icon { border: 0; padding: .25rem .4rem; }
+    button:hover, button:focus-visible { border-color: #9bb8d2; }
+    button:disabled { cursor: default; opacity: .45; }
+    a { color: #a9c9e6; }
+    .app-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem max(1rem, calc((100vw - 1500px) / 2)); border-bottom: 1px solid #303841; background: #1c2127; position: sticky; top: 0; z-index: 3; }
+    .brand { display: flex; gap: .7rem; align-items: baseline; min-width: 0; }
+    .brand a { color: #fff; text-decoration: none; font-weight: 700; letter-spacing: .01em; }
+    .crumb { color: #9faab5; font-size: .86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    nav { display: flex; align-items: center; gap: .45rem; flex-shrink: 0; }
+    nav button, nav a { font-size: .82rem; }
+    main { width: min(1500px, calc(100% - 2rem)); margin: 1.1rem auto 3rem; }
+    h1, h2, h3, p { margin-top: 0; }
+    h2 { font-size: 1.2rem; margin-bottom: .35rem; }
+    h3 { font-size: 1rem; margin-bottom: .6rem; }
+    .panel { background: #1d2329; border: 1px solid #303841; border-radius: .55rem; padding: 1rem; }
+    .home-intro { max-width: 680px; margin: 3rem auto 1.2rem; text-align: center; }
+    .home-intro h1 { font-size: clamp(2rem, 5vw, 3.5rem); margin-bottom: .5rem; }
+    .home-intro p, .muted { color: #9faab5; }
+    .workspace-form { display: flex; gap: .55rem; max-width: 760px; margin: 0 auto 2rem; }
+    .workspace-form input { flex: 1; min-width: 0; }
+    .recent-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .7rem; }
+    .recent-card { display: flex; flex-direction: column; gap: .45rem; justify-content: space-between; min-height: 150px; }
+    .recent-card h3 { overflow-wrap: anywhere; margin-bottom: 0; }
+    .recent-card .path { font-size: .78rem; color: #9faab5; overflow-wrap: anywhere; }
+    .recent-actions { display: flex; gap: .45rem; margin-top: .45rem; }
+    .workspace-line { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
+    .workspace-line h2 { margin: 0; }
+    .filters { display: grid; grid-template-columns: minmax(180px, 2fr) repeat(5, minmax(115px, 1fr)); gap: .55rem; align-items: end; padding: .65rem; border: 1px solid #303841; border-radius: .5rem; background: #1d2329; }
+    label { display: grid; gap: .25rem; color: #aeb8c1; font-size: .76rem; }
+    label input, label select { width: 100%; }
+    .job-banner { display: grid; grid-template-columns: 1fr auto; gap: .35rem .8rem; align-items: center; margin: .8rem 0; padding: .65rem .8rem; border-left: 3px solid #9bb8d2; background: #20272e; }
+    .job-copy { font-size: .83rem; }
+    progress { width: 100%; height: .55rem; grid-column: 1 / -1; accent-color: #9bb8d2; }
+    .status { min-height: 1.25rem; margin: .7rem 0; color: #e1aa76; font-size: .85rem; }
+    .gallery { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .7rem; align-items: start; }
+    .photo-card { position: relative; align-self: start; overflow: hidden; border: 1px solid #303841; border-radius: .45rem; background: #1d2329; cursor: pointer; min-width: 0; }
+    .photo-card:hover, .photo-card:focus-visible { border-color: #a9c9e6; outline: none; }
+    .photo-frame { width: 100%; height: auto; aspect-ratio: 1 / 1; display: grid; place-items: center; overflow: hidden; background: #0e1114; }
+    .thumb, .placeholder { width: 100%; height: 100%; min-width: 100%; min-height: 100%; object-fit: cover; display: block; }
+    .placeholder { display: grid; place-items: center; color: #7f8b96; font-size: .8rem; }
+    .photo-card-body { display: grid; grid-template-columns: 1fr auto; gap: .12rem .35rem; padding: .48rem .55rem .55rem; }
+    .filename { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85rem; font-weight: 600; }
+    .quality { color: #bacde0; font-size: .78rem; }
+    .capture { grid-column: 1 / -1; color: #8996a2; font-size: .73rem; }
+    .issues { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .2rem; }
+    .badge { display: inline-block; border-radius: .25rem; padding: .12rem .32rem; background: #4d342d; color: #f2b59a; font-size: .68rem; }
+    .info-button { position: absolute; top: .35rem; right: .35rem; width: 1.8rem; height: 1.8rem; border-radius: 50%; padding: 0; opacity: 0; background: rgb(21 24 28 / 80%); color: #fff; }
+    .photo-card:hover .info-button, .photo-card:focus-within .info-button { opacity: 1; }
+    .pager { display: flex; justify-content: center; align-items: center; gap: .7rem; margin: .9rem 0; }
+    .pager button { padding: .35rem .55rem; font-size: .8rem; }
+    .pager-info { display: grid; min-width: 9rem; text-align: center; line-height: 1.15; }
+    .pager-range { color: #9faab5; font-size: .74rem; }
+    .empty { text-align: center; padding: 3rem 1rem; color: #9faab5; }
+    dialog { width: min(760px, calc(100% - 1rem)); max-height: calc(100dvh - 1rem); overflow: auto; padding: 0; border: 1px solid #4a535e; border-radius: .6rem; background: #1d2329; color: #edf0f3; }
+    dialog::backdrop { background: rgb(0 0 0 / 72%); }
+    .dialog-inner { padding: 1rem; }
+    .dialog-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: .9rem; }
+    .dialog-header h2 { margin: 0; overflow-wrap: anywhere; }
+    .viewer { width: 100vw; height: 100dvh; max-width: none; max-height: none; border: 0; border-radius: 0; background: #090b0d; }
+    .viewer-inner { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    .viewer-top, .viewer-bottom { display: flex; align-items: center; justify-content: space-between; gap: .7rem; padding: .65rem max(.8rem, 3vw); background: rgb(9 11 13 / 90%); }
+    .viewer-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9rem; }
+    .viewer-stage { display: grid; grid-template-columns: auto 1fr auto; align-items: center; min-height: 0; gap: .7rem; padding: .7rem; overflow: hidden; overscroll-behavior: contain; }
+    #viewer-media { display: grid; place-items: center; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: visible; }
+    .viewer-media { min-width: 0; min-height: 0; max-width: 100%; max-height: calc(100dvh - 9rem); width: auto; height: auto; object-fit: contain; transform-origin: center center; will-change: transform; }
+    .viewer-error { max-width: 30rem; text-align: center; color: #f2b59a; padding: 2rem; }
+    .viewer-controls { display: flex; gap: .4rem; }
+    .viewer button { background: transparent; border-color: #65717c; color: #edf0f3; }
+    .section { margin-top: 1rem; }
+    .kv { display: grid; grid-template-columns: minmax(130px, .7fr) 1.3fr; gap: .35rem .8rem; margin: 0; font-size: .85rem; }
+    .kv dt { color: #9faab5; }
+    .kv dd { margin: 0; overflow-wrap: anywhere; }
+    .file-card { border-top: 1px solid #303841; padding: .8rem 0; }
+    .file-card:first-child { border-top: 0; padding-top: 0; }
+    .file-title { display: flex; justify-content: space-between; gap: 1rem; }
+    .quality-summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
+    .quality-score-box { min-width: 4.2rem; padding: .35rem .55rem; border: 1px solid #5b7186; border-radius: .45rem; background: #26333f; text-align: center; }
+    .quality-score { font-size: 1.35rem; font-weight: 700; color: #c2d9ee; }
+    .metric { display: grid; grid-template-columns: 5.5rem 1fr 3rem; gap: .45rem; align-items: center; margin: .42rem 0; font-size: .8rem; }
+    .bar { height: .45rem; border-radius: 1rem; background: #3a444e; overflow: hidden; }
+    .bar span { display: block; width: var(--value); height: 100%; background: #9bb8d2; }
+    .bar.negative span { background: #d99b9b; }
+    .quality-unsupported { padding: .8rem; border: 1px solid #5d4b43; border-radius: .4rem; color: #e5b5a1; background: #2a2220; }
+    .error { color: #f2b59a; }
+    .hidden { display: none !important; }
+    @media (max-width: 1200px) { .gallery { grid-template-columns: repeat(5, minmax(0, 1fr)); } .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 900px) { .gallery { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    @media (max-width: 680px) { main { width: calc(100% - 1rem); margin-top: .7rem; } .app-header { align-items: flex-start; } nav { flex-wrap: wrap; justify-content: end; } .crumb { display: none; } .gallery { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; } .workspace-form { flex-wrap: wrap; } .workspace-form input, .workspace-form button { flex: 1 1 100%; } .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .viewer-stage { grid-template-columns: auto 1fr auto; padding: .3rem; gap: .25rem; } .viewer-bottom { flex-wrap: wrap; } }
+    @media (max-width: 430px) { .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filters { grid-template-columns: 1fr; } .photo-card-body { padding: .4rem; } .metric { grid-template-columns: 4.5rem 1fr 2.5rem; } }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><a href="/">Archive Indexation</a><span id="workspace-crumb" class="crumb hidden"></span></div>
+    <nav>
+      <a id="workspaces-link" href="/">Workspaces</a>
+      <button id="index" class="secondary hidden" type="button">Re-index</button>
+      <button id="problems-button" class="secondary hidden" type="button">Problems <span id="problem-count"></span></button>
+    </nav>
+  </header>
+  <main>
+    <section id="home-view">
+      <div class="home-intro"><h1>Archive Indexation</h1></div>
+      <form id="workspace-form" class="workspace-form">
+        <input id="workspace-path" type="text" required placeholder="C:\\Photos\\Archive" aria-label="Workspace folder path">
+        <button id="browse-workspace" class="secondary" type="button">Choose folder</button>
+        <button type="submit">Open workspace</button>
+      </form>
+      <div id="home-status" class="status" role="status"></div>
+      <section class="panel"><h2>Workspaces</h2><div id="recent-list" class="recent-list"></div></section>
+    </section>
+
+    <section id="workspace-view" class="hidden">
+      <div class="workspace-line"><div id="workspace-summary" class="muted"></div><div id="workspace-current-path" class="muted"></div></div>
+      <section class="filters" aria-label="Gallery filters">
+        <label>Filter filename<input id="search" type="search" placeholder="Filename" autocomplete="off"></label>
+        <label>Folder<select id="folder"><option value="">All folders</option></select></label>
+        <label>Type<select id="media-type"><option value="">All media</option><option value="image">Images</option><option value="video">Videos</option></select></label>
+        <label>Sort by<select id="sort-by"><option value="capture_time">Capture time</option><option value="quality">Technical quality</option><option value="filename">Filename</option></select></label>
+        <label>Direction<select id="direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select></label>
+        <label>Page size<select id="page-size"><option value="60">60</option><option value="120">120</option><option value="180">180</option></select></label>
+      </section>
+      <section id="job-banner" class="job-banner hidden" aria-live="polite"><div id="job-copy" class="job-copy"></div><button id="cancel-job" class="secondary" type="button">Cancel</button><progress id="job-progress" max="1" value="0" aria-label="Indexing progress"></progress></section>
+      <div id="status" class="status" role="status"></div>
+      <div id="pager-top" class="pager"><button id="previous-top" class="secondary" type="button" aria-label="Previous page">‹</button><div class="pager-info"><strong id="page-label-top"></strong><span id="range-label-top" class="pager-range"></span></div><button id="next-top" class="secondary" type="button" aria-label="Next page">›</button></div>
+      <section id="gallery" class="gallery" aria-live="polite"></section>
+      <div id="pager-bottom" class="pager"><button id="previous-bottom" class="secondary" type="button" aria-label="Previous page">‹</button><div class="pager-info"><strong id="page-label-bottom"></strong><span id="range-label-bottom" class="pager-range"></span></div><button id="next-bottom" class="secondary" type="button" aria-label="Next page">›</button></div>
+    </section>
+  </main>
+
+  <dialog id="viewer" class="viewer" aria-labelledby="viewer-title"><div class="viewer-inner"><div class="viewer-top"><div id="viewer-title" class="viewer-title"></div><div class="viewer-controls"><button id="viewer-info" type="button">Info</button><button id="viewer-close" type="button">Close</button></div></div><div id="viewer-stage" class="viewer-stage"><button id="viewer-previous" type="button" aria-label="Previous image">‹</button><div id="viewer-media"></div><button id="viewer-next" type="button" aria-label="Next image">›</button></div><div class="viewer-bottom"><span id="viewer-count" class="muted"></span><label class="smooth-control"><input id="viewer-smooth" type="checkbox" checked> Smooth</label></div></div></dialog>
+  <dialog id="details" aria-labelledby="details-title"></dialog>
+  <dialog id="problems-dialog" aria-labelledby="problems-title"></dialog>
+
+  <script>
+    const query = new URLSearchParams(location.search);
+    const MAX_VIEWER_ZOOM = 40;
+    const state = { workspace: query.get("workspace"), page: Number(query.get("page") || 1), pageSize: Number(localStorage.getItem("archive-index-page-size") || query.get("page_size") || 60), total: 0, items: [], viewerIndex: -1, viewerZoom: 1, viewerPanX: 0, viewerPanY: 0, viewerSmooth: true, activeJobId: null, assetRequest: 0 };
+    const $ = (id) => document.getElementById(id);
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
+    const labels = { offline: "Offline", unsupported: "Unsupported", failed: "Processing failed", processing: "Processing" };
+    function apiPath(path) {
+      if (!state.workspace || !path.startsWith("/api/") || path === "/api/workspaces") return path;
+      const url = new URL(path, location.origin);
+      url.searchParams.set("workspace", state.workspace);
+      return url.pathname + url.search;
+    }
+    async function api(path, options) {
+      const response = await fetch(apiPath(path), options);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Request failed");
+      return payload;
+    }
+    function syncUrl() {
+      const params = new URLSearchParams();
+      if (state.workspace) params.set("workspace", state.workspace);
+      if (state.page > 1) params.set("page", state.page);
+      if ($("search").value.trim()) params.set("q", $("search").value.trim());
+      if ($("folder").value) params.set("folder", $("folder").value);
+      if ($("media-type").value) params.set("media_type", $("media-type").value);
+      params.set("sort_by", $("sort-by").value);
+      params.set("direction", $("direction").value);
+      params.set("page_size", state.pageSize);
+      history.replaceState(null, "", `${location.pathname}?${params}`);
+    }
+    function filterParams() {
+      const params = new URLSearchParams({ page: state.page, page_size: state.pageSize, sort_by: $("sort-by").value, direction: $("direction").value });
+      if ($("search").value.trim()) params.set("q", $("search").value.trim());
+      if ($("folder").value) params.set("folder", $("folder").value);
+      if ($("media-type").value) params.set("media_type", $("media-type").value);
+      return `/api/assets?${params}`;
+    }
+    function formatCapture(value, kind) {
+      if (!value) return "";
+      const local = value.replace("T", " ");
+      return `${local}${kind === "exif_local_unknown" ? " · local time; timezone unknown" : ""}`;
+    }
+    function issueMarkup(issues) { return (issues || []).map((issue) => `<span class="badge">${escapeHtml(labels[issue] || issue)}</span>`).join(""); }
+    function scoreMarkup(score) { return score == null ? "" : `<span class="quality">quality ${Number(score).toFixed(2)}</span>`; }
+    function renderCard(item, index) {
+      const media = item.thumbnail_url ? `<img class="thumb" loading="lazy" src="${item.thumbnail_url}" alt="${escapeHtml(item.filename)}">` : `<div class="placeholder">Preview unavailable</div>`;
+      const capture = $("sort-by").value === "capture_time" && item.capture_time ? `<div class="capture">${escapeHtml(formatCapture(item.capture_time, item.capture_time_kind))}</div>` : "";
+      return `<article class="photo-card" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div>${scoreMarkup(item.quality_score)}${capture}<div class="issues">${issueMarkup(item.issues)}</div></div></article>`;
+    }
+    async function loadHome() {
+      $("home-view").classList.remove("hidden"); $("workspace-view").classList.add("hidden"); $("index").classList.add("hidden"); $("problems-button").classList.add("hidden"); $("workspace-crumb").classList.add("hidden");
+      const data = await api("/api/workspaces");
+      $("recent-list").innerHTML = data.workspaces.map((workspace) => `<article class="panel recent-card"><div><h3>${escapeHtml(workspace.name || "Workspace")}</h3><div class="path">${escapeHtml(workspace.path || "")}</div><div class="muted">${workspace.available === false ? "Unavailable" : `${workspace.assets ?? 0} indexed assets${workspace.last_indexed ? ` · indexed ${escapeHtml(workspace.last_indexed)}` : ""}`}</div></div><div class="recent-actions">${workspace.available === false ? "" : `<button type="button" data-open="${escapeHtml(workspace.id)}">Open</button>`}<button class="secondary" type="button" data-remove="${escapeHtml(workspace.id)}">Remove from list</button></div></article>`).join("") || `<div class="empty">No recent workspaces yet.</div>`;
+      $("recent-list").querySelectorAll("[data-open]").forEach((button) => button.addEventListener("click", () => { location.href = `/?workspace=${encodeURIComponent(button.dataset.open)}`; }));
+      $("recent-list").querySelectorAll("[data-remove]").forEach((button) => button.addEventListener("click", () => removeRecent(button.dataset.remove)));
+    }
+    async function openWorkspace(path, create) {
+      try {
+        const response = await fetch("/api/workspaces/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, create }) });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Could not open workspace");
+        location.href = `/?workspace=${encodeURIComponent(payload.workspace.id)}`;
+      } catch (error) { $("home-status").textContent = error.message; }
+    }
+    async function pickWorkspace() { try { const response = await fetch("/api/workspaces/pick", { method: "POST" }); const payload = await response.json(); if (!response.ok) throw new Error(payload.error || "Could not choose a folder"); if (payload.path) $("workspace-path").value = payload.path; } catch (error) { $("home-status").textContent = error.message; } }
+    async function removeRecent(id) {
+      try { await fetch("/api/workspaces/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace: id }) }); loadHome(); } catch (error) { $("status").textContent = error.message; }
+    }
+    async function loadWorkspace() {
+      $("home-view").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); $("index").classList.remove("hidden"); $("workspace-crumb").classList.remove("hidden");
+      const data = await api("/api/workspace");
+      $("workspace-crumb").textContent = data.name; $("workspace-current-path").textContent = data.path; $("workspace-summary").textContent = `${data.assets} assets · ${data.online_files} online · ${data.offline_files} offline`;
+      const folders = await api("/api/folders");
+      const selected = query.get("folder") || "";
+      $("folder").innerHTML = `<option value="">All folders</option>` + folders.folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join("");
+      $("folder").value = selected;
+      $("search").value = query.get("q") || ""; $("media-type").value = query.get("media_type") || ""; $("sort-by").value = query.get("sort_by") || "capture_time"; $("direction").value = query.get("direction") || "desc"; $("page-size").value = String(state.pageSize); if (!["60", "120", "180"].includes($("page-size").value)) { state.pageSize = 60; $("page-size").value = "60"; }
+      await loadAssets(); await loadJobs(); await loadProblemsBadge();
+    }
+    async function loadAssets() {
+      const requestId = ++state.assetRequest;
+      try {
+        const data = await api(filterParams());
+        if (requestId !== state.assetRequest) return;
+        state.items = data.items; state.total = data.total;
+        $("gallery").innerHTML = data.items.map(renderCard).join("") || `<div class="empty">No matching photos.</div>`;
+        $("gallery").querySelectorAll(".photo-card").forEach((card) => { card.addEventListener("click", (event) => { if (!event.target.closest("button")) showViewer(Number(card.dataset.index)); }); card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && event.target === card) { event.preventDefault(); showViewer(Number(card.dataset.index)); } }); });
+        $("gallery").querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); showDetails(state.items[Number(button.dataset.info)].asset_id); }));
+        const pageCount = Math.max(1, Math.ceil(data.total / data.page_size));
+        const first = data.total ? ((data.page - 1) * data.page_size) + 1 : 0;
+        const last = data.total ? Math.min(data.total, data.page * data.page_size) : 0;
+        const range = data.total ? `${first}–${last} / ${data.total} matches` : "0 / 0 matches";
+        ["top", "bottom"].forEach((place) => { $(`page-label-${place}`).textContent = `Page ${data.page} / ${pageCount}`; $(`range-label-${place}`).textContent = range; $(`previous-${place}`).disabled = data.page <= 1; $(`next-${place}`).disabled = !data.has_next; });
+        syncUrl();
+      } catch (error) { $("status").textContent = error.message; }
+    }
+    function changePage(delta) { state.page = Math.max(1, state.page + delta); syncUrl(); loadAssets().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }
+    function resetViewerZoom() { state.viewerZoom = 1; state.viewerPanX = 0; state.viewerPanY = 0; }
+    function showViewer(index) { if (!state.items[index]) return; state.viewerIndex = index; resetViewerZoom(); renderViewer(); if (!$('viewer').open) { $("viewer").showModal(); document.body.classList.add("modal-open"); } }
+    function renderViewer() {
+      const item = state.items[state.viewerIndex]; if (!item) return;
+      $("viewer-title").textContent = item.filename; $("viewer-count").textContent = `${state.viewerIndex + 1} of ${state.items.length}`; $("viewer-previous").disabled = state.viewerIndex <= 0; $("viewer-next").disabled = state.viewerIndex >= state.items.length - 1;
+      $("viewer-media").innerHTML = "";
+      if (!item.original_url) { $("viewer-media").innerHTML = `<div class="viewer-error">This media is offline or cannot currently be rendered.</div>`; return; }
+      const media = item.media_type === "video" ? document.createElement("video") : document.createElement("img"); media.className = "viewer-media"; media.alt = item.filename; media.controls = item.media_type === "video"; media.src = item.original_url; media.addEventListener("error", () => { $("viewer-media").innerHTML = `<div class="viewer-error">This media could not be rendered.</div>`; }); $("viewer-media").appendChild(media); applyViewerZoom(media);
+    }
+    function applyViewerZoom(media) { media.style.transform = `translate3d(${state.viewerPanX}px, ${state.viewerPanY}px, 0) scale(${state.viewerZoom})`; media.style.imageRendering = state.viewerSmooth ? "auto" : "pixelated"; }
+    function moveViewer(delta) { const next = state.viewerIndex + delta; if (next < 0 || next >= state.items.length) return; state.viewerIndex = next; resetViewerZoom(); renderViewer(); }
+    function closeDialog(dialog) { if (dialog.open) dialog.close(); if (!["viewer", "details", "problems-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open"); }
+    async function showDetails(assetId) {
+      try { const asset = await api(`/api/assets/${encodeURIComponent(assetId)}`); $("details").innerHTML = renderDetails(asset); $("details").showModal(); document.body.classList.add("modal-open"); $("details-close").addEventListener("click", () => closeDialog($("details"))); } catch (error) { $("status").textContent = error.message; }
+    }
+    function renderDetails(asset) {
+      const first = asset.physical_files[0] || {};
+      const dimensions = first.width && first.height ? `${first.width} × ${first.height}` : "Unavailable";
+      return `<div class="dialog-inner"><div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted">${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Capture time unavailable")}</div></div><button id="details-close" class="secondary" type="button">Close</button></div><section><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd></dl></section>${renderTechnicalDetails(first)}<section class="section"><h3>Technical quality</h3>${asset.physical_files.map((file, index) => renderQuality(file, index > 0)).join("")}</section>${asset.physical_files.map(renderComponentProblems).join("")}</div>`;
+    }
+    function renderQuality(file, showFilename) { if (file.media_type === "video" || file.components?.quality?.status === "not_requested") return `<div class="quality-unsupported">Technical quality review is not supported for video yet.</div>`; const score = file.quality_score == null ? "Unavailable" : Number(file.quality_score).toFixed(2); const components = file.quality_components || {}; const metrics = [["Focus", "focus"], ["Exposure", "exposure"], ["Contrast", "contrast"], ["Noise", "noise"]]; return `<div class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box"><span class="quality-score">${score}</span></span></div>${metrics.map(([label, key]) => { const value = components[key]; const number = value == null ? null : Number(value); const negative = key === "noise"; const display = negative && number != null ? 1 - number : number; return `<div class="metric"><span>${label}</span><div class="bar${negative ? " negative" : ""}"><span style="--value:${display == null ? 0 : Math.max(0, Math.min(100, display * 100))}%"></span></div><span>${display == null ? "—" : display.toFixed(2)}</span></div>`; }).join("")}</div>`; }
+    function renderTechnicalDetails(file) { const rows = [["Camera", cameraValue(file), ""], ["Lens", metadataValue(file, ["LensModel", "LensMake"]), ""], ["Aperture", metadataValue(file, ["FNumber", "ApertureValue"]), "Aperture"], ["Shutter speed", metadataValue(file, ["ExposureTime", "ShutterSpeedValue"]), "ExposureTime"], ["ISO", metadataValue(file, ["ISOSpeedRatings", "PhotographicSensitivity"]), "ISOSpeedRatings"], ["Focal length", metadataValue(file, ["FocalLength", "FocalLengthIn35mmFilm"]), "FocalLength"]]; const visible = rows.filter(([, value]) => value); return visible.length ? `<section class="section"><h3>Technical details</h3><dl class="kv">${visible.map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl></section>` : ""; }
+    function renderComponentProblems(file) { const problems = ["metadata", "thumbnail", "quality"].flatMap((name) => { const component = file.components[name]; return component && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(component.error || component.status)}</p>`] : []; }).join(""); return problems; }
+    function cameraValue(file) { const exif = file.metadata?.exif || {}; return [exif.Make, exif.Model].filter((value) => value != null && readable(value)).map(formatExif).filter((value, index, values) => values.indexOf(value) === index).join(" "); }
+    function metadataValue(file, keys) { const exif = file.metadata?.exif || {}; for (const key of keys) { if (exif[key] != null && readable(exif[key])) return formatMetadataValue(key, exif[key]); } return ""; }
+    function readable(value) { return (Array.isArray(value) || typeof value !== "object") && String(value).length < 160; }
+    function formatExif(value) { return Array.isArray(value) ? value.join(" / ") : String(value); }
+    function formatMetadataValue(key, value) { const text = formatExif(value); if (["FNumber", "ApertureValue"].includes(key)) { const number = rationalNumber(value); return number == null ? text : `f/${numberText(number)}`; } if (key === "ExposureTime") return `${formatExposure(value)} s`; if (key === "ShutterSpeedValue") return `${text} s`; if (["ISOSpeedRatings", "PhotographicSensitivity"].includes(key)) return `ISO ${text}`; if (["FocalLength", "FocalLengthIn35mmFilm"].includes(key)) { const number = rationalNumber(value); return number == null ? `${text} mm` : `${numberText(number)} mm`; } return text; }
+    function formatExposure(value) { const text = formatExif(value); const number = rationalNumber(value); if (number > 0 && number < 1) { const denominator = Math.round(1 / number); if (Math.abs(number - (1 / denominator)) < 0.000001) return `1/${denominator}`; } return text.replace(/\s*\/\s*/g, "/"); }
+    function rationalNumber(value) { const text = formatExif(value); const match = text.match(/^(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)$/); if (match && Number(match[2]) !== 0) return Number(match[1]) / Number(match[2]); const number = Number(text); return Number.isFinite(number) ? number : null; }
+    function numberText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, ""); }
+    function formatBytes(value) { if (value == null) return "Unavailable"; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }
+    async function loadJobs() { try { const data = await api("/api/jobs?limit=10"); const active = data.jobs.find((job) => ["pending", "running"].includes(job.status)); if (!active) { $("job-banner").classList.add("hidden"); if (state.activeJobId) { state.activeJobId = null; const workspace = await api("/api/workspace"); $("workspace-summary").textContent = `${workspace.assets} assets · ${workspace.online_files} online · ${workspace.offline_files} offline`; await loadAssets(); await loadProblemsBadge(); } return; } state.activeJobId = active.id; const percent = active.total_items ? (100 * active.completed_items / active.total_items).toFixed(1) : "0.0"; const elapsed = active.started_at ? Math.max((Date.now() - Date.parse(active.started_at)) / 1000, .001) : .001; const rate = (active.completed_items / elapsed).toFixed(1); $("job-banner").classList.remove("hidden"); $("job-copy").textContent = `${active.stage || active.kind} · ${active.completed_items}/${active.total_items} (${percent}%) · ${rate}/s · ${active.failed_items || 0} failed · ${active.skipped_items || 0} skipped`; $("job-progress").max = Math.max(active.total_items || 1, 1); $("job-progress").value = active.completed_items; $("cancel-job").onclick = async () => { await api(`/api/jobs/${active.id}/cancel`, { method: "POST" }); }; } catch (error) { $("status").textContent = error.message; } }
+    async function loadProblemsBadge() { try { const data = await api("/api/problems?limit=500"); const count = data.problems.length; $("problems-button").classList.toggle("hidden", count === 0); $("problem-count").textContent = count ? `(${count})` : ""; } catch (error) { $("status").textContent = error.message; } }
+    async function showProblems() { try { const data = await api("/api/problems?limit=100"); $("problems-dialog").innerHTML = `<div class="dialog-inner"><div class="dialog-header"><h2 id="problems-title">Problems${data.problems.length ? ` (${data.problems.length})` : ""}</h2><button id="problems-close" class="secondary" type="button">Close</button></div>${data.problems.map((problem) => `<div class="file-card"><strong>${escapeHtml(problem.relative_path || "Workspace")}</strong><div class="muted">${escapeHtml(problem.job_kind || "Processing")} · ${escapeHtml(problem.job_created_at || problem.created_at || "")}</div><p class="error">${escapeHtml(problem.message)}</p></div>`).join("") || `<div class="empty">No problems recorded.</div>`}<div class="recent-actions"><button id="problems-index" type="button">Run index again</button></div></div>`; $("problems-dialog").showModal(); document.body.classList.add("modal-open"); $("problems-close").addEventListener("click", () => closeDialog($("problems-dialog"))); $("problems-index").addEventListener("click", async () => { closeDialog($("problems-dialog")); await startIndex(); }); } catch (error) { $("status").textContent = error.message; } }
+    async function startIndex() { try { await api("/api/index", { method: "POST" }); $("status").textContent = ""; await loadJobs(); } catch (error) { $("status").textContent = error.message; } }
+    function setupFilters() { ["folder", "media-type", "sort-by", "direction"].forEach((id) => $(id).addEventListener("change", () => { state.page = 1; syncUrl(); loadAssets(); })); $("page-size").addEventListener("change", () => { state.pageSize = Number($("page-size").value); localStorage.setItem("archive-index-page-size", state.pageSize); state.page = 1; syncUrl(); loadAssets(); }); let debounce; $("search").addEventListener("input", () => { clearTimeout(debounce); debounce = setTimeout(() => { state.page = 1; syncUrl(); loadAssets(); }, 250); }); }
+    $("workspace-form").addEventListener("submit", (event) => { event.preventDefault(); openWorkspace($("workspace-path").value.trim(), false); });
+    $("browse-workspace").addEventListener("click", pickWorkspace);
+    $("index").addEventListener("click", startIndex);
+    $("problems-button").addEventListener("click", showProblems);
+    $("previous-top").addEventListener("click", () => changePage(-1)); $("previous-bottom").addEventListener("click", () => changePage(-1));
+    $("next-top").addEventListener("click", () => changePage(1)); $("next-bottom").addEventListener("click", () => changePage(1));
+    $("viewer-close").addEventListener("click", () => closeDialog($("viewer")));
+    $("viewer-previous").addEventListener("click", () => moveViewer(-1)); $("viewer-next").addEventListener("click", () => moveViewer(1));
+    $("viewer-smooth").addEventListener("change", (event) => { state.viewerSmooth = event.target.checked; const media = $("viewer-media").querySelector("img.viewer-media"); if (media) applyViewerZoom(media); });
+    $("viewer-info").addEventListener("click", () => { const item = state.items[state.viewerIndex]; if (item) showDetails(item.asset_id); });
+    $("viewer").addEventListener("click", (event) => { if (event.target === $("viewer")) closeDialog($("viewer")); });
+    $("viewer-stage").addEventListener("click", (event) => { if (event.target === $("viewer-stage") || event.target === $("viewer-media")) closeDialog($("viewer")); });
+    $("viewer-stage").addEventListener("wheel", (event) => {
+      const media = $("viewer-media").querySelector("img.viewer-media");
+      if (!media) return;
+      const overImage = event.target.closest?.("img.viewer-media");
+      if (event.deltaY < 0 && !overImage) return;
+      event.preventDefault();
+      const rect = $("viewer-stage").getBoundingClientRect();
+      const pointX = event.clientX - (rect.left + rect.width / 2); const pointY = event.clientY - (rect.top + rect.height / 2);
+      const next = Math.max(1, Math.min(MAX_VIEWER_ZOOM, state.viewerZoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2)));
+      if (next === state.viewerZoom) return;
+      const contentX = (pointX - state.viewerPanX) / state.viewerZoom; const contentY = (pointY - state.viewerPanY) / state.viewerZoom;
+      state.viewerZoom = next;
+      if (next === 1) { state.viewerPanX = 0; state.viewerPanY = 0; } else { state.viewerPanX = pointX - contentX * next; state.viewerPanY = pointY - contentY * next; }
+      applyViewerZoom(media);
+    }, { passive: false });
+    $("details").addEventListener("click", (event) => { if (event.target === $("details")) closeDialog($("details")); });
+    $("problems-dialog").addEventListener("click", (event) => { if (event.target === $("problems-dialog")) closeDialog($("problems-dialog")); });
+    ["viewer", "details", "problems-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "problems-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
+    document.addEventListener("keydown", (event) => { if (!$("viewer").open || $("details").open || $("problems-dialog").open) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); moveViewer(event.key === "ArrowLeft" ? -1 : 1); } }); setupFilters();
+    if (state.workspace) { loadWorkspace().catch((error) => $("status").textContent = error.message); setInterval(() => { loadJobs(); loadProblemsBadge(); }, 1500); } else { loadHome().catch((error) => $("status").textContent = error.message); }
+  </script>
+</body>
+</html>

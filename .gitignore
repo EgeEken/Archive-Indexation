@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.tools/
+build/
+dist/
+*.egg-info/
+
+# Generated workspace state and application runs
+.archive-index/
+*.sqlite
+*.sqlite-*
+.archive-index-workspaces.json

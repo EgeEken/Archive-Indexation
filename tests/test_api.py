@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import threading
+import time
+import unittest
+from contextlib import closing
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+from PIL import Image
+
+from archive_index.api.server import WorkspaceHTTPServer
+from archive_index.indexing.media_pipeline import index_workspace
+from archive_index.indexing.scanner import scan
+from archive_index.jobs.engine import JobStore
+from archive_index.workspace import Workspace
+
+
+class ApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        root = Path(self.temporary_directory.name) / "archive"
+        (root / "nested").mkdir(parents=True)
+        _write_image(root / "root.jpg", (640, 480))
+        _write_image(root / "nested" / "nested.jpg", (320, 240))
+        (root / "clip.mp4").write_bytes(b"not a real video")
+        self.workspace = Workspace.create(root)
+        scan(self.workspace)
+        index_workspace(self.workspace, components=("metadata", "thumbnail", "quality"))
+        self.server = WorkspaceHTTPServer(("127.0.0.1", 0), self.workspace)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.temporary_directory.cleanup()
+
+    def test_home_summary_filters_and_pagination(self) -> None:
+        status, home = _get_json(self.base_url, "/api/workspace")
+        self.assertEqual(status, 200)
+        self.assertEqual((home["assets"], home["online_files"]), (3, 3))
+
+        status, nested = _get_json(self.base_url, "/api/assets?folder=nested")
+        self.assertEqual(status, 200)
+        self.assertEqual((nested["total"], nested["items"][0]["filename"]), (1, "nested.jpg"))
+
+        status, images = _get_json(self.base_url, "/api/assets?media_type=image&page_size=1")
+        self.assertEqual(status, 200)
+        self.assertEqual((images["total"], len(images["items"]), images["has_next"]), (2, 1, True))
+        status, ranked = _get_json(self.base_url, "/api/assets?sort=quality_desc")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(ranked["items"][0]["quality_score"])
+        status, lowest = _get_json(self.base_url, "/api/assets?sort=quality_asc")
+        self.assertEqual(status, 200)
+        self.assertIsNone(lowest["items"][-1]["quality_score"])
+        status, filenames = _get_json(
+            self.base_url, "/api/assets?sort_by=filename&direction=asc&media_type=image&page_size=60"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(filenames["items"][0]["filename"], "nested.jpg")
+
+        status, html = _get_bytes(self.base_url, "/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Archive Indexation", html)
+        self.assertIn(b"<dialog", html)
+        self.assertIn(b"problems-dialog", html)
+        self.assertIn(b"page-size", html)
+        self.assertIn(b"Choose folder", html)
+        self.assertIn(b"aspect-ratio: 1 / 1", html)
+        self.assertIn(b"viewer-info", html)
+        self.assertIn(b"viewer-stage", html)
+        self.assertIn(b"quality-unsupported", html)
+        self.assertIn(b"viewer-smooth", html)
+        self.assertIn(b"range-label-top", html)
+        self.assertIn("aria-label=\"Previous page\"".encode(), html)
+        self.assertNotIn(b">Previous<", html)
+        self.assertNotIn(b">Next<", html)
+        self.assertNotIn(b"Open a workspace to browse", html)
+        self.assertNotIn(b"Create / index folder", html)
+        self.assertNotIn(b"Files / representations", html)
+        self.assertNotIn(b"Advanced measurements", html)
+        self.assertNotIn(b"lower is better", html)
+        self.assertNotIn(b">Apply<", html)
+        self.assertNotIn(b"Open thumbnail", html)
+        self.assertNotIn(b"scrollIntoView", html)
+
+    def test_logical_asset_detail_exposes_physical_and_component_state(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            asset_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+
+        status, detail = _get_json(self.base_url, f"/api/assets/{asset_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(detail["physical_files"]), 1)
+        physical = detail["physical_files"][0]
+        self.assertEqual(physical["relative_path"], "root.jpg")
+        self.assertEqual(physical["components"]["metadata"]["status"], "complete")
+        self.assertEqual(physical["components"]["thumbnail"]["status"], "complete")
+        self.assertEqual(physical["components"]["quality"]["status"], "complete")
+        self.assertIsNotNone(physical["quality_score"])
+        self.assertIsNotNone(physical["original_url"])
+        self.assertIsNotNone(physical["thumbnail_url"])
+
+    def test_original_and_thumbnail_routes_do_not_accept_arbitrary_paths(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            file_id = connection.execute(
+                "SELECT id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+            asset_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE id = ?", (file_id,)
+            ).fetchone()[0]
+
+        status, original = _get_bytes(self.base_url, f"/api/files/{file_id}/original")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(original), 10)
+        status, thumbnail = _get_bytes(self.base_url, f"/api/assets/{asset_id}/thumbnail")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(thumbnail), 10)
+
+        outside = Path(self.temporary_directory.name) / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO logical_asset(id, media_type, created_at, updated_at)
+                VALUES ('malicious-asset', 'image', 'now', 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO physical_file(
+                    id, logical_asset_id, relative_path, filename, extension, media_type,
+                    created_at, updated_at
+                ) VALUES ('malicious-file', 'malicious-asset', '../outside.txt', 'outside.txt', '.txt', 'image', 'now', 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO component_state(
+                    physical_file_id, component, status, output_path
+                ) VALUES ('malicious-file', 'thumbnail', 'complete', '../index.sqlite')
+                """
+            )
+
+        status, _ = _get_json(self.base_url, "/api/assets/malicious-asset")
+        self.assertEqual(status, 200)
+        status, _ = _get_bytes(self.base_url, "/api/files/malicious-file/original")
+        self.assertEqual(status, 404)
+        status, _ = _get_bytes(self.base_url, "/api/files/malicious-file/thumbnail")
+        self.assertEqual(status, 404)
+        status, _ = _get_json(self.base_url, "/api/assets?folder=../")
+        self.assertEqual(status, 400)
+        status, _ = _get_bytes(self.base_url, "/.archive-index/index.sqlite")
+        self.assertEqual(status, 404)
+
+    def test_missing_media_placeholder_and_problem_data(self) -> None:
+        missing = self.workspace.root / "nested" / "nested.jpg"
+        missing.unlink()
+        scan(self.workspace)
+        with closing(self.workspace.connect()) as connection:
+            missing_asset = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'nested/nested.jpg'"
+            ).fetchone()[0]
+
+        status, assets = _get_json(self.base_url, "/api/assets?folder=nested")
+        self.assertEqual(status, 200)
+        self.assertFalse(assets["items"][0]["is_online"])
+        self.assertIsNotNone(assets["items"][0]["thumbnail_url"])
+        status, detail = _get_json(self.base_url, f"/api/assets/{missing_asset}")
+        self.assertEqual(status, 200)
+        self.assertIsNone(detail["physical_files"][0]["original_url"])
+
+        job_id = JobStore(self.workspace).create("test")
+        JobStore(self.workspace).record_error(
+            job_id, RuntimeError("problem"), relative_path="nested/nested.jpg"
+        )
+        status, problems = _get_json(self.base_url, "/api/problems")
+        self.assertEqual(status, 200)
+        self.assertEqual(problems["problems"][0]["relative_path"], "nested/nested.jpg")
+        status, jobs = _get_json(self.base_url, "/api/jobs")
+        self.assertEqual(status, 200)
+        self.assertEqual(jobs["jobs"][0]["id"], job_id)
+
+    def test_index_endpoint_starts_and_reports_shared_jobs(self) -> None:
+        status, payload = _post_json(self.base_url, "/api/index")
+        self.assertEqual(status, 202)
+        scan_job_id = payload["job_id"]
+
+        observed = None
+        for _ in range(50):
+            status, jobs = _get_json(self.base_url, "/api/jobs?limit=10")
+            self.assertEqual(status, 200)
+            observed = next(job for job in jobs["jobs"] if job["id"] == scan_job_id)
+            if observed["status"] in {"complete", "failed", "cancelled"}:
+                break
+            time.sleep(0.1)
+
+        self.assertEqual(observed["status"], "complete")
+        self.assertTrue({"stage", "failed_items", "skipped_items"} <= observed.keys())
+        self.assertTrue(any(job["kind"] == "media_index" for job in jobs["jobs"]))
+
+
+class WorkspaceHomeApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        base = Path(self.temporary_directory.name)
+        self.root = base / "new archive"
+        self.root.mkdir()
+        Image.new("RGB", (80, 60), color=(100, 140, 200)).save(self.root / "photo.jpg")
+        self.registry_path = base / "recent.json"
+        self.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=self.registry_path)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.temporary_directory.cleanup()
+
+    def test_open_create_switch_and_remove_recent_workspace_without_server_restart(self) -> None:
+        status, home = _get_json(self.base_url, "/api/workspaces")
+        self.assertEqual((status, home["workspaces"]), (200, []))
+
+        status, opened = _post_json(
+            self.base_url,
+            "/api/workspaces/open",
+            {"path": str(self.root)},
+        )
+        self.assertEqual(status, 200)
+        handle = opened["workspace"]["id"]
+        self.assertIsNotNone(opened["job_id"])
+        self.assertTrue((self.root / ".archive-index" / "index.sqlite").is_file())
+
+        for _ in range(50):
+            status, jobs = _get_json(self.base_url, f"/api/jobs?workspace={handle}&limit=10")
+            self.assertEqual(status, 200)
+            if not any(job["status"] in {"pending", "running"} for job in jobs["jobs"]):
+                break
+            time.sleep(0.1)
+
+        status, summary = _get_json(self.base_url, f"/api/workspace?workspace={handle}")
+        self.assertEqual((status, summary["path"], summary["assets"]), (200, str(self.root), 1))
+        status, removed = _post_json(
+            self.base_url, "/api/workspaces/remove", {"workspace": handle}
+        )
+        self.assertEqual((status, removed["removed"]), (200, True))
+        self.assertTrue((self.root / ".archive-index" / "index.sqlite").is_file())
+
+    def test_unselected_server_requires_workspace_handle_for_workspace_api(self) -> None:
+        status, payload = _get_json(self.base_url, "/api/assets")
+        self.assertEqual(status, 400)
+        self.assertIn("workspace", payload["error"])
+
+
+def _write_image(path: Path, size: tuple[int, int]) -> None:
+    Image.new("RGB", size, color=(100, 140, 200)).save(path, format="JPEG")
+
+
+def _get_json(base_url: str, path: str):
+    status, body = _get_bytes(base_url, path)
+    return status, json.loads(body.decode("utf-8"))
+
+
+def _get_bytes(base_url: str, path: str):
+    try:
+        with urlopen(Request(base_url + path, method="GET"), timeout=5) as response:
+            return response.status, response.read()
+    except HTTPError as error:
+        return error.code, error.read()
+
+
+def _post_json(base_url: str, path: str, body: dict[str, object] | None = None):
+    try:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = Request(base_url + path, data=data, method="POST")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        with urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        return error.code, json.loads(error.read().decode("utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()
