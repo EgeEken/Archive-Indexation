@@ -229,13 +229,12 @@ def build_groups(
                     len(tier_a_groups), tier_a_pair_relations,
                     tier_a_veto_rejections, tier_b_matches,
                 )
-            if record.capture_value is None:
+            if record.feature is None:
+                errors += 1
+                previous_by_semantics.pop(record.capture_semantics, None)
+            elif record.capture_value is None:
                 no_timestamp += 1
                 groups.append([record])
-            elif record.feature is None:
-                errors += 1
-                groups.append([record])
-                previous_by_semantics.pop(record.capture_semantics, None)
             else:
                 eligible += 1
                 active = active_by_semantics[record.capture_semantics]

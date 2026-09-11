@@ -33,8 +33,9 @@ uv run archive-index serve
 The home screen remembers opened workspaces in the ignored repository-root file
 `.archive-index-workspaces.json`. This is convenience state only; each workspace's
 canonical database remains under its own `.archive-index/` directory. A workspace
-path can be entered manually or selected with the native folder picker. Opening or
-creating a workspace starts incremental indexing automatically.
+path can be entered manually or selected with the native folder picker. Opening a
+new or unindexed workspace starts initial indexing automatically; existing indexes
+open without re-indexing and can be updated with Re-index.
 
 Start the localhost UI directly for an existing workspace:
 

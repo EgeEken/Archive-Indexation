@@ -185,10 +185,10 @@ class GroupingTests(unittest.TestCase):
         result = build_groups(workspace)
         self.assertEqual((result.eligible_images, result.total_groups), (1, 1))
 
-    def test_feature_decoder_gap_is_failure_isolated_and_singleton(self) -> None:
+    def test_feature_decoder_gap_is_failure_isolated_and_not_grouped(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "camera.arw": "video"})
         result = build_groups(workspace)
-        self.assertEqual((result.feature_failures, result.total_groups), (1, 2))
+        self.assertEqual((result.feature_failures, result.total_groups), (1, 1))
 
     def _workspace(self, files: dict[str, str]) -> Workspace:
         self.temporary_directory = tempfile.TemporaryDirectory()

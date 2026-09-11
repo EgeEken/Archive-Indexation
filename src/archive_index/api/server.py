@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
+import shutil
+import stat
+import subprocess
+import sys
 import threading
 import webbrowser
 from collections.abc import Mapping
@@ -88,16 +93,36 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         if not isinstance(path, str) or not path.strip():
             raise InvalidRequest("a workspace folder path is required")
         root = Path(path).expanduser().resolve(strict=False)
+        indexed = (root / ".archive-index").is_dir()
         try:
-            workspace = Workspace.create(root) if not (root / ".archive-index").is_dir() else Workspace.open(root)
+            workspace = Workspace.open(root) if indexed else Workspace.create(root)
         except (WorkspaceError, OSError) as error:
             raise InvalidRequest(str(error)) from error
         handle = self._register_workspace(workspace)
         self.registry.add(workspace)
-        job_id = self.start_indexing(handle)
+        job_id = self.start_indexing(handle) if not indexed else None
         return {"workspace": _workspace_entry(handle, workspace, recent=True), "job_id": job_id}
 
     def remove_workspace(self, handle: str) -> bool:
+        return self.registry.remove(handle)
+
+    def workspace_removal_info(self, handle: str) -> dict[str, object]:
+        _, workspace = self.resolve_workspace(handle)
+        return {
+            "workspace": handle,
+            "index_size_bytes": _index_size_bytes(workspace.index_directory),
+            "active_job": _active_job(workspace),
+        }
+
+    def remove_workspace_with_index(self, handle: str, delete_index: bool) -> bool:
+        _, workspace = self.resolve_workspace(handle)
+        if delete_index:
+            active = _active_job(workspace)
+            if active is not None:
+                raise InvalidRequest("the workspace index cannot be deleted while a job is running")
+            _delete_owned_index(workspace)
+            self._workspaces.pop(handle, None)
+            self._recovered_workspaces.discard(handle)
         return self.registry.remove(handle)
 
     def start_indexing(self, handle: str) -> str | None:
@@ -339,6 +364,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"problems": _problems(workspace, query)})
             elif request.path == "/api/groups":
                 self._send_json(200, _groups(workspace, query, handle))
+            elif request.path == "/api/groups/locate":
+                self._send_json(200, _locate_group(workspace, query))
             elif request.path == "/api/recommendations":
                 self._send_json(200, _recommendations(workspace))
             else:
@@ -361,12 +388,22 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if request.path == "/api/workspaces/open":
                 self._send_json(200, self.server.open_workspace(**self._json_body()))
                 return
+            if request.path == "/api/workspaces/remove-info":
+                body = self._json_body()
+                handle = body.get("workspace") or body.get("id")
+                if not isinstance(handle, str):
+                    raise InvalidRequest("workspace is required")
+                self._send_json(200, self.server.workspace_removal_info(handle))
+                return
             if request.path == "/api/workspaces/remove":
                 body = self._json_body()
                 handle = body.get("workspace") or body.get("id")
                 if not isinstance(handle, str):
                     raise InvalidRequest("workspace is required")
-                self._send_json(200, {"removed": self.server.remove_workspace(handle)})
+                self._send_json(
+                    200,
+                    {"removed": self.server.remove_workspace_with_index(handle, bool(body.get("delete_index")))},
+                )
                 return
             handle, workspace = self._workspace(query)
             if request.path == "/api/index":
@@ -601,7 +638,6 @@ def serve(workspace: Workspace | None = None, host: str = "127.0.0.1", port: int
     server = WorkspaceHTTPServer((host, port), workspace)
     if workspace is not None:
         server.registry.add(workspace)
-        server.start_indexing(server.default_handle)
     suffix = f"?workspace={server.default_handle}" if server.default_handle else ""
     url = f"http://{host}:{server.server_port}/{suffix}"
     print(f"Archive Indexation UI: {url}")
@@ -624,17 +660,62 @@ def _ui_resource(name: str) -> str:
 
 def _pick_workspace_path() -> str:
     try:
-        import tkinter
-        from tkinter import filedialog
-
-        root = tkinter.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.askdirectory(title="Choose archive workspace folder")
-        root.destroy()
-        return path or ""
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            [sys.executable, "-m", "archive_index.folder_picker"],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=creation_flags,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "folder picker failed")
+        return result.stdout.strip()
     except Exception as error:
         raise InvalidRequest("the native folder picker is unavailable; enter the path manually") from error
+
+
+def _active_job(workspace: Workspace) -> dict[str, object] | None:
+    connection = workspace.connect()
+    try:
+        row = connection.execute(
+            "SELECT id, kind, status FROM job WHERE status IN ('pending', 'running') ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    return dict(row) if row is not None else None
+
+
+def _index_size_bytes(path: Path) -> int:
+    if not path.is_dir() or path.is_symlink():
+        return 0
+    total = 0
+    for entry in os.scandir(path):
+        if _is_reparse(entry):
+            raise InvalidRequest("the app-owned index contains a symlink or reparse point")
+        if entry.is_dir(follow_symlinks=False):
+            total += _index_size_bytes(Path(entry.path))
+        elif entry.is_file(follow_symlinks=False):
+            total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def _is_reparse(entry: os.DirEntry) -> bool:
+    if entry.is_symlink():
+        return True
+    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _delete_owned_index(workspace: Workspace) -> None:
+    index_directory = workspace.index_directory
+    root = workspace.root.resolve(strict=False)
+    expected = (root / ".archive-index")
+    if index_directory.resolve(strict=False) != expected or not index_directory.is_dir() or index_directory.is_symlink():
+        raise InvalidRequest("the app-owned index location could not be verified")
+    _index_size_bytes(index_directory)
+    shutil.rmtree(index_directory)
 
 
 def _workspace_entry(handle: str, workspace: Workspace, recent: bool) -> dict[str, object]:
@@ -759,6 +840,7 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     finally:
         connection.close()
     physical_by_asset = _physical_rows_for_assets(workspace, [row["id"] for row in rows])
+    group_by_asset = _current_group_ids(workspace, [row["id"] for row in rows])
     return {
         "items": [
             _asset_summary(
@@ -769,6 +851,7 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 row["id"] in representative_ids,
                 row["id"] in recommendation_ids,
                 recommendation_run_id,
+                group_by_asset.get(row["id"]),
             )
             for row in rows
         ],
@@ -790,6 +873,7 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
 def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
     page = _positive_int(_first(query, "page", "1"), "page")
     page_size = min(_positive_int(_first(query, "page_size", "10"), "page_size"), 60)
+    filters = _group_filters(workspace, query)
     connection = workspace.connect()
     try:
         active = connection.execute(
@@ -805,19 +889,31 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 "run_id": None, "groups": [], "page": page, "page_size": page_size,
                 "total": 0, "has_next": False,
             }
-        condition = ""
+        if filters["media_type"] == "video":
+            return {
+                "run_id": active["id"], "algorithm": active["algorithm"], "version": active["version"],
+                "settings": _json_or_none(active["settings_json"]), "groups": [], "page": page,
+                "page_size": page_size, "total": 0, "has_next": False,
+                "empty_reason": "Video grouping is not supported yet.",
+            }
+        condition, condition_params, order = _group_query_parts(active["id"], filters)
         total = connection.execute(
-            f"SELECT COUNT(*) FROM strict_group WHERE run_id = ? {condition}", (active["id"],)
+            f"SELECT COUNT(*) FROM strict_group AS sg WHERE sg.run_id = ? {condition}",
+            [active["id"], *condition_params],
         ).fetchone()[0]
         group_rows = connection.execute(
             f"""
-            SELECT * FROM strict_group
-            WHERE run_id = ? {condition}
-            ORDER BY CASE WHEN first_capture_time IS NULL THEN 1 ELSE 0 END,
-                     first_capture_time, group_id
+            SELECT sg.*,
+                   (SELECT MAX(pf.quality_score) FROM physical_file AS pf
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_quality_score,
+                   (SELECT MIN(LOWER(pf.filename)) FROM physical_file AS pf
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_filename
+            FROM strict_group AS sg
+            WHERE sg.run_id = ? {condition}
+            ORDER BY {order}
             LIMIT ? OFFSET ?
             """,
-            (active["id"], page_size, (page - 1) * page_size),
+            [active["id"], *condition_params, page_size, (page - 1) * page_size],
         ).fetchall()
         group_ids = [row["group_id"] for row in group_rows]
         if not group_ids:
@@ -849,6 +945,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             False,
             row["logical_asset_id"] in recommendation_ids,
             recommendation_run_id,
+            row["group_id"],
         )
         members_by_group[row["group_id"]].append({"asset": summary, "member_order": row["member_order"]})
     response_groups = []
@@ -862,6 +959,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 "member_count": row["member_count"],
                 "first_capture_time": row["first_capture_time"],
                 "representative_asset_id": representative_id,
+                "representative_quality_score": row["representative_quality_score"],
                 "members": [
                     {**member["asset"], "is_representative": member["asset"]["asset_id"] == representative_id}
                     for member in group_members
@@ -878,6 +976,130 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         "page_size": page_size,
         "total": total,
         "has_next": page * page_size < total,
+        "filters": filters,
+    }
+
+
+def _group_filters(workspace: Workspace, query: Mapping[str, list[str]]) -> dict[str, object]:
+    search = _first(query, "q", "").strip()
+    folder = _folder_filter(workspace, _first(query, "folder", ""))
+    media_type = _first(query, "media_type", "")
+    if media_type and media_type not in {"image", "video"}:
+        raise InvalidRequest("media_type must be image or video")
+    selection = _first(query, "selection", "all").lower()
+    if selection not in {"all", "representatives", "recommended", "selected", "rejected", "undecided"}:
+        raise InvalidRequest("selection must be all, representatives, recommended, selected, rejected, or undecided")
+    sort_by, direction = _sort_values(query)
+    if len(search) > 200:
+        raise InvalidRequest("q is too long")
+    return {
+        "search": search,
+        "folder": folder,
+        "media_type": media_type,
+        "selection": selection,
+        "sort_by": sort_by,
+        "direction": direction,
+    }
+
+
+def _group_query_parts(run_id: str, filters: Mapping[str, object]) -> tuple[str, list[object], str]:
+    clauses: list[str] = []
+    params: list[object] = []
+    search = filters["search"]
+    folder = filters["folder"]
+    selection = filters["selection"]
+    if search:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM strict_group_member AS sgm_filter "
+            "JOIN physical_file AS pf_filter ON pf_filter.logical_asset_id = sgm_filter.logical_asset_id "
+            "WHERE sgm_filter.run_id = sg.run_id AND sgm_filter.group_id = sg.group_id "
+            "AND LOWER(pf_filter.filename) LIKE ? ESCAPE '\\')"
+        )
+        params.append(f"%{_like_value(str(search).casefold())}%")
+    if folder:
+        escaped = _like_value(str(folder))
+        clauses.append(
+            "EXISTS (SELECT 1 FROM strict_group_member AS sgm_folder "
+            "JOIN physical_file AS pf_folder ON pf_folder.logical_asset_id = sgm_folder.logical_asset_id "
+            "WHERE sgm_folder.run_id = sg.run_id AND sgm_folder.group_id = sg.group_id "
+            "AND (pf_folder.relative_path = ? OR pf_folder.relative_path LIKE ? ESCAPE '\\'))"
+        )
+        params.extend([folder, f"{escaped}/%"])
+    if selection == "representatives":
+        clauses.append("sg.representative_logical_asset_id IS NOT NULL")
+    elif selection == "recommended":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM asset_recommendation AS ar "
+            "JOIN workspace_recommendation AS wr ON wr.active_run_id = ar.run_id AND wr.id = 1 "
+            "JOIN recommendation_run AS rr ON rr.id = ar.run_id "
+            "JOIN workspace_grouping AS wg ON wg.id = 1 "
+            "WHERE ar.logical_asset_id = sg.representative_logical_asset_id AND ar.auto_recommended = 1 "
+            "AND rr.source_grouping_run_id = wg.active_run_id)"
+        )
+    elif selection in {"selected", "rejected", "undecided"}:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM strict_group_member AS sgm_state "
+            "JOIN logical_asset AS la_state ON la_state.id = sgm_state.logical_asset_id "
+            "WHERE sgm_state.run_id = sg.run_id AND sgm_state.group_id = sg.group_id "
+            "AND la_state.selection_state = ?)"
+        )
+        params.append(selection)
+    condition = f" AND {' AND '.join(clauses)}" if clauses else ""
+    direction = filters["direction"]
+    if filters["sort_by"] == "quality":
+        quality = "(SELECT MAX(pf_order.quality_score) FROM physical_file AS pf_order WHERE pf_order.logical_asset_id = sg.representative_logical_asset_id)"
+        order = f"CASE WHEN {quality} IS NULL THEN 1 ELSE 0 END, {quality} {direction}, sg.group_id"
+    elif filters["sort_by"] == "filename":
+        filename = "(SELECT MIN(LOWER(pf_order.filename)) FROM physical_file AS pf_order WHERE pf_order.logical_asset_id = sg.representative_logical_asset_id)"
+        order = f"CASE WHEN {filename} IS NULL THEN 1 ELSE 0 END, {filename} {direction}, sg.group_id"
+    else:
+        order = f"CASE WHEN sg.first_capture_time IS NULL THEN 1 ELSE 0 END, sg.first_capture_time {direction}, sg.group_id"
+    return condition, params, order
+
+
+def _locate_group(workspace: Workspace, query: Mapping[str, list[str]]) -> dict[str, object]:
+    group_id = _first(query, "group_id", "")
+    if not group_id:
+        raise InvalidRequest("group_id is required")
+    page_size = min(_positive_int(_first(query, "page_size", "10"), "page_size"), 60)
+    filters = _group_filters(workspace, query)
+    connection = workspace.connect()
+    try:
+        active = connection.execute(
+            "SELECT active_run_id FROM workspace_grouping WHERE id = 1"
+        ).fetchone()
+        if active is None or not connection.execute(
+            "SELECT 1 FROM strict_group WHERE run_id = ? AND group_id = ?",
+            (active["active_run_id"], group_id),
+        ).fetchone():
+            return {"found": False}
+        condition, condition_params, order = _group_query_parts(active["active_run_id"], filters)
+        rows = connection.execute(
+            f"""
+            SELECT sg.group_id,
+                   (SELECT MAX(pf.quality_score) FROM physical_file AS pf
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_quality_score,
+                   (SELECT MIN(LOWER(pf.filename)) FROM physical_file AS pf
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_filename,
+                   ROW_NUMBER() OVER (ORDER BY {order}) AS position
+            FROM strict_group AS sg
+            WHERE sg.run_id = ? {condition}
+            GROUP BY sg.group_id
+            """,
+            [active["active_run_id"], *condition_params],
+        ).fetchall()
+    finally:
+        connection.close()
+    row = next((candidate for candidate in rows if candidate["group_id"] == group_id), None)
+    if row is None:
+        return {"found": False, "hidden_by_filters": True}
+    position = row["position"]
+    return {
+        "found": True,
+        "group_id": group_id,
+        "page": ((position - 1) // page_size) + 1,
+        "position": position,
+        "page_size": page_size,
     }
 
 
@@ -900,6 +1122,26 @@ def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
     finally:
         connection.close()
     return {row["representative_logical_asset_id"] for row in rows}, True
+
+
+def _current_group_ids(workspace: Workspace, asset_ids: list[str]) -> dict[str, str]:
+    if not asset_ids:
+        return {}
+    placeholders = ",".join("?" for _ in asset_ids)
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT sgm.logical_asset_id, sgm.group_id
+            FROM workspace_grouping AS wg
+            JOIN strict_group_member AS sgm ON sgm.run_id = wg.active_run_id
+            WHERE wg.id = 1 AND sgm.logical_asset_id IN ({placeholders})
+            """,
+            asset_ids,
+        ).fetchall()
+    finally:
+        connection.close()
+    return {row["logical_asset_id"]: row["group_id"] for row in rows}
 
 
 def _current_recommendations(workspace: Workspace) -> tuple[set[str], str | None]:
@@ -1017,6 +1259,7 @@ def _asset_summary(
     is_representative: bool = False,
     is_recommended: bool = False,
     recommendation_run_id: str | None = None,
+    current_group_id: str | None = None,
 ) -> dict[str, object]:
     physical = _physical_rows(workspace, asset["id"]) if physical is None else physical
     representative = sorted(
@@ -1031,6 +1274,7 @@ def _asset_summary(
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
+        "codec": (online or representative)["codec"],
         "capture_time": asset["capture_time"],
         "capture_time_kind": asset["capture_time_kind"],
         "filename": representative["filename"],
@@ -1043,6 +1287,7 @@ def _asset_summary(
         "quality_score": max((row["quality_score"] for row in physical if row["quality_score"] is not None), default=None),
         "issues": _asset_issues(physical),
         "is_representative": is_representative,
+        "current_group_id": current_group_id,
         "auto_recommended": is_recommended,
         "user_decision": asset["selection_state"],
         "user_decision_updated_at": asset["selection_updated_at"],
@@ -1074,6 +1319,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
         raise ResourceNotFound("asset not found")
     physical = _physical_rows(workspace, asset_id)
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+    current_group_id = _current_group_ids(workspace, [asset_id]).get(asset_id)
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
@@ -1083,6 +1329,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
         "user_decision": asset["selection_state"],
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
+        "current_group_id": current_group_id,
         "physical_files": [
             {
                 "id": row["id"],

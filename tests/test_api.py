@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from archive_index.api.server import WorkspaceHTTPServer
+from archive_index.api.server import WorkspaceHTTPServer, _pick_workspace_path
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
@@ -80,8 +80,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"aspect-ratio: 1 / 1", css)
         status, js = _get_bytes(self.base_url, "/app.js")
         self.assertEqual(status, 200)
-        self.assertIn(b"Strict groups", html)
+        self.assertIn(b">Groups<", html)
         self.assertNotIn(b">Selection<", html)
+        self.assertNotIn(b">Strict groups<", html)
+        self.assertNotIn(b"Workspaces</a>", html)
+        self.assertNotIn(b"Rebuild groups", html)
+        self.assertNotIn(b"Rebuild recommendations", html)
+        self.assertIn(b"groups-pager-top", html)
+        self.assertIn(b"groups-pager-bottom", html)
         self.assertIn(b"Recommended", html)
         self.assertIn(b"viewer-selection", html)
         self.assertIn(b"viewer-info", html)
@@ -93,10 +99,13 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn(b">Clear<", js)
         self.assertIn(b"viewer-smooth", html)
         self.assertIn(b"const progress = state.viewerZoom > 1", js)
-        self.assertIn(b'event.target === $("viewer-stage")', js)
-        self.assertIn(b'event.target === $("viewer-media")', js)
+        self.assertIn(b'"viewer-media-pane"', js)
+        self.assertIn(b"setPointerCapture", js)
         self.assertIn(b"qualityColor", js)
         self.assertIn(b"technical-reading", js)
+        self.assertIn(b"recommended-card", js)
+        self.assertIn(b"viewerClickSuppressed", js)
+        self.assertIn(b"focused-group .group-heading", css)
         self.assertIn(b"range-label-top", html)
         self.assertIn("aria-label=\"Previous page\"".encode(), html)
         self.assertNotIn(b">Previous<", html)
@@ -110,7 +119,15 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn(b">Apply<", html)
         self.assertNotIn(b"Open thumbnail", html)
         self.assertNotIn(b"scrollIntoView", html)
-        self.assertIn(b"selection-filter", html)
+        self.assertNotIn(b'id="selection-filter"', html)
+        for label in (b"All", b"Representatives", b"Recommended", b"Selected", b"Rejected", b"Undecided"):
+            self.assertIn(b"data-selection-filter=\"" + label.lower() + b"\"", html)
+        self.assertIn(b"review-filter-buttons", html)
+        self.assertIn(b"function formatCapture", js)
+        self.assertIn(b"slice(1, 3)", js)
+        self.assertIn(b'data-detail-thumbnail', js)
+        self.assertIn(b'renderDetails(state.viewerDetail', js)
+        self.assertIn(b'params.set("selection", state.selectionFilter)', js)
 
     def test_logical_asset_detail_exposes_physical_and_component_state(self) -> None:
         with closing(self.workspace.connect()) as connection:
@@ -257,6 +274,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(groups["groups"]), 2)
         self.assertTrue(all(group["members"] for group in groups["groups"]))
+        self.assertTrue(
+            all(
+                member["current_group_id"] == group["group_id"]
+                for group in groups["groups"]
+                for member in group["members"]
+            )
+        )
+
+        status, filtered = _get_json(self.base_url, "/api/groups?q=root.jpg")
+        self.assertEqual((status, filtered["total"], len(filtered["groups"][0]["members"])), (200, 1, 1))
+        status, video_groups = _get_json(self.base_url, "/api/groups?media_type=video")
+        self.assertEqual((status, video_groups["total"], video_groups["empty_reason"]), (200, 0, "Video grouping is not supported yet."))
+        group_id = groups["groups"][0]["group_id"]
+        status, location = _get_json(self.base_url, f"/api/groups/locate?group_id={group_id}")
+        self.assertEqual((status, location["found"], location["page"]), (200, True, 1))
 
         status, representatives = _get_json(self.base_url, "/api/assets?representatives=1")
         self.assertEqual(status, 200)
@@ -413,6 +445,12 @@ class WorkspaceHomeApiTests(unittest.TestCase):
 
         status, summary = _get_json(self.base_url, f"/api/workspace?workspace={handle}")
         self.assertEqual((status, summary["path"], summary["assets"]), (200, str(self.root), 1))
+        status, reopened = _post_json(
+            self.base_url,
+            "/api/workspaces/open",
+            {"path": str(self.root)},
+        )
+        self.assertEqual((status, reopened["workspace"]["id"], reopened["job_id"]), (200, handle, None))
         status, removed = _post_json(
             self.base_url, "/api/workspaces/remove", {"workspace": handle}
         )
@@ -423,6 +461,37 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         status, payload = _get_json(self.base_url, "/api/assets")
         self.assertEqual(status, 400)
         self.assertIn("workspace", payload["error"])
+
+    def test_folder_picker_returns_helper_output_and_cancel_is_empty(self) -> None:
+        completed = type("Completed", (), {"returncode": 0, "stdout": "C:\\Photos\\Archive\n", "stderr": ""})()
+        with patch("archive_index.api.server.subprocess.run", return_value=completed):
+            self.assertEqual(_pick_workspace_path(), "C:\\Photos\\Archive")
+        completed.stdout = "\n"
+        with patch("archive_index.api.server.subprocess.run", return_value=completed):
+            self.assertEqual(_pick_workspace_path(), "")
+
+    def test_workspace_removal_preflight_and_delete_preserve_media(self) -> None:
+        source = self.root / "photo.jpg"
+        source_bytes = source.read_bytes()
+        status, opened = _post_json(self.base_url, "/api/workspaces/open", {"path": str(self.root)})
+        self.assertEqual(status, 200)
+        handle = opened["workspace"]["id"]
+        for _ in range(50):
+            _, jobs = _get_json(self.base_url, f"/api/jobs?workspace={handle}&limit=10")
+            if not any(job["status"] in {"pending", "running"} for job in jobs["jobs"]):
+                break
+            time.sleep(.1)
+        status, info = _post_json(self.base_url, "/api/workspaces/remove-info", {"workspace": handle})
+        self.assertEqual(status, 200)
+        self.assertGreater(info["index_size_bytes"], 0)
+        blocked_job = JobStore(self.server._workspaces[handle]).create("test")
+        status, _ = _post_json(self.base_url, "/api/workspaces/remove", {"workspace": handle, "delete_index": True})
+        self.assertEqual(status, 400)
+        JobStore(self.server._workspaces[handle]).cancel(blocked_job)
+        status, removed = _post_json(self.base_url, "/api/workspaces/remove", {"workspace": handle, "delete_index": True})
+        self.assertEqual((status, removed["removed"]), (200, True))
+        self.assertFalse((self.root / ".archive-index").exists())
+        self.assertEqual(source.read_bytes(), source_bytes)
 
 
 def _write_image(path: Path, size: tuple[int, int]) -> None:
