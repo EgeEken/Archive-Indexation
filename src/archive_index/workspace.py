@@ -21,6 +21,42 @@ class WorkspaceError(ValueError):
     """Raised when a workspace cannot be safely opened or addressed."""
 
 
+def compact_database(workspace: "Workspace") -> dict[str, int | str]:
+    """Checkpoint and compact a workspace database when no job is active."""
+
+    connection = workspace.connect()
+    try:
+        active = connection.execute(
+            "SELECT id, kind, status FROM job WHERE status IN ('pending', 'running') ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if active is not None:
+            raise WorkspaceError(
+                f"cannot compact while job {active['id']} is {active['status']}"
+            )
+
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        before_page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+        before_freelist_count = connection.execute("PRAGMA freelist_count").fetchone()[0]
+        before_size_bytes = workspace.database_path.stat().st_size
+        connection.execute("VACUUM")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        after_page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+        after_freelist_count = connection.execute("PRAGMA freelist_count").fetchone()[0]
+        after_size_bytes = workspace.database_path.stat().st_size
+        return {
+            "before_size_bytes": before_size_bytes,
+            "after_size_bytes": after_size_bytes,
+            "before_page_count": before_page_count,
+            "after_page_count": after_page_count,
+            "before_freelist_count": before_freelist_count,
+            "after_freelist_count": after_freelist_count,
+            "integrity_check": str(integrity),
+        }
+    finally:
+        connection.close()
+
+
 class Workspace:
     def __init__(self, root: Path) -> None:
         self.root = root

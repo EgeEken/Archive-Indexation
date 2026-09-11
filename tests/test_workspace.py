@@ -9,7 +9,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from archive_index.db.schema import MIGRATIONS
-from archive_index.workspace import Workspace, WorkspaceError
+from archive_index.jobs.engine import JobStore
+from archive_index.workspace import Workspace, WorkspaceError, compact_database
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -118,6 +119,68 @@ class WorkspaceTests(unittest.TestCase):
             with closing(workspace.connect()) as connection:
                 count = connection.execute("SELECT COUNT(*) FROM logical_asset").fetchone()[0]
             self.assertEqual(count, 0)
+
+    def test_compaction_refuses_active_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Workspace.create(Path(temporary_directory) / "archive")
+            store = JobStore(workspace)
+            job_id = store.create("media_index", total_items=1)
+            store.start(job_id)
+
+            with self.assertRaises(WorkspaceError):
+                compact_database(workspace)
+
+    def test_compaction_reclaims_pages_and_preserves_index_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            source = root / "photo.jpg"
+            root.mkdir()
+            source.write_bytes(b"source")
+            workspace = Workspace.create(root)
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO logical_asset(id, media_type, selection_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    ("asset-1", "image", "selected", "now", "now"),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO physical_file(
+                        id, logical_asset_id, relative_path, filename, extension, media_type,
+                        size_bytes, created_at, updated_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "file-1",
+                        "asset-1",
+                        "photo.jpg",
+                        "photo.jpg",
+                        ".jpg",
+                        "image",
+                        6,
+                        "now",
+                        "now",
+                        "x" * 2_000_000,
+                    ),
+                )
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "UPDATE physical_file SET metadata_json = '{}' WHERE id = 'file-1'"
+                )
+            before = workspace.database_path.stat().st_size
+            report = compact_database(workspace)
+
+            self.assertEqual(report["integrity_check"], "ok")
+            self.assertLess(report["after_size_bytes"], before)
+            self.assertEqual(report["after_freelist_count"], 0)
+            with closing(workspace.connect()) as connection:
+                asset = connection.execute(
+                    "SELECT selection_state FROM logical_asset WHERE id = 'asset-1'"
+                ).fetchone()[0]
+                count = connection.execute("SELECT COUNT(*) FROM physical_file").fetchone()[0]
+                self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(asset, "selected")
+            self.assertEqual(count, 1)
+            self.assertEqual(source.read_bytes(), b"source")
 
     def test_existing_v1_database_migrates_to_current_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

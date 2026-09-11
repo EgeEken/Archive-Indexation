@@ -29,8 +29,8 @@ from ..workspace import Workspace
 METADATA_COMPONENT = "metadata"
 THUMBNAIL_COMPONENT = "thumbnail"
 QUALITY_COMPONENT = "quality"
-METADATA_ALGORITHM = "pillow-exif-ffprobe"
-METADATA_VERSION = "3"
+METADATA_ALGORITHM = "pillow-curated-exif-ffprobe"
+METADATA_VERSION = "4"
 COMPONENTS = frozenset({METADATA_COMPONENT, THUMBNAIL_COMPONENT, QUALITY_COMPONENT})
 
 

@@ -6,6 +6,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,40 @@ from PIL import ExifTags, Image, UnidentifiedImageError
 
 DECODER_GAP_EXTENSIONS = frozenset(
     {".arw", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jxl", ".nef", ".raf", ".rw2"}
+)
+CURATED_EXIF_FIELDS = frozenset(
+    {
+        "DateTimeOriginal",
+        "DateTimeDigitized",
+        "DateTime",
+        "SubSecTimeOriginal",
+        "SubSecTimeDigitized",
+        "SubSecTime",
+        "SubsecTimeOriginal",
+        "SubsecTimeDigitized",
+        "SubsecTime",
+        "OffsetTimeOriginal",
+        "OffsetTimeDigitized",
+        "OffsetTime",
+        "Make",
+        "Model",
+        "LensMake",
+        "LensModel",
+        "LensSpecification",
+        "FNumber",
+        "ApertureValue",
+        "ExposureTime",
+        "ShutterSpeedValue",
+        "ISOSpeedRatings",
+        "PhotographicSensitivity",
+        "FocalLength",
+        "FocalLengthIn35mmFilm",
+        "Software",
+        "ExposureBiasValue",
+        "Flash",
+        "WhiteBalance",
+        "Orientation",
+    }
 )
 
 
@@ -47,26 +82,21 @@ def _extract_image_metadata(path: Path) -> MediaMetadata:
     try:
         with Image.open(path) as image:
             exif = image.getexif()
-            exif_values = {
-                ExifTags.TAGS.get(tag, str(tag)): _json_value(value)
-                for tag, value in exif.items()
-            }
+            exif_values = _curated_ifd_values(exif.items())
             try:
                 nested_exif = exif.get_ifd(ExifTags.IFD.Exif)
             except (AttributeError, KeyError, TypeError, ValueError):
                 nested_exif = {}
-            exif_values.update(
-                {
-                    ExifTags.TAGS.get(tag, str(tag)): _json_value(value)
-                    for tag, value in nested_exif.items()
-                }
-            )
+            exif_values.update(_curated_ifd_values(nested_exif.items()))
             capture_time, capture_time_kind = _capture_time(exif_values)
             values = {
                 "format": image.format,
                 "mode": image.mode,
                 "exif": exif_values,
             }
+            gps = _normalized_gps(exif)
+            if gps:
+                values["gps"] = gps
             return MediaMetadata(
                 values=values,
                 capture_time=capture_time,
@@ -204,14 +234,88 @@ def _container_capture_time(tags: dict[str, Any]) -> str | None:
     return str(value)
 
 
+def _curated_ifd_values(items) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for tag, value in items:
+        name = ExifTags.TAGS.get(tag, str(tag))
+        if name not in CURATED_EXIF_FIELDS:
+            continue
+        normalized = _json_value(value)
+        if normalized is not None:
+            values[name] = normalized
+    return values
+
+
+def _normalized_gps(exif) -> dict[str, Any]:
+    try:
+        gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return {}
+    values = {ExifTags.GPSTAGS.get(tag, str(tag)): value for tag, value in gps_ifd.items()}
+    result: dict[str, Any] = {}
+    latitude = _gps_coordinate(values.get("GPSLatitude"), values.get("GPSLatitudeRef"))
+    longitude = _gps_coordinate(values.get("GPSLongitude"), values.get("GPSLongitudeRef"))
+    altitude = _gps_number(values.get("GPSAltitude"))
+    direction = _gps_number(values.get("GPSImgDirection"))
+    if latitude is not None:
+        result["latitude"] = latitude
+    if longitude is not None:
+        result["longitude"] = longitude
+    if altitude is not None:
+        result["altitude_m"] = altitude * (-1 if _gps_number(values.get("GPSAltitudeRef")) == 1 else 1)
+    if direction is not None:
+        result["image_direction_degrees"] = direction
+    date = _json_value(values.get("GPSDateStamp"))
+    time_values = values.get("GPSTimeStamp")
+    if date is not None and isinstance(time_values, (list, tuple)) and len(time_values) >= 3:
+        numbers = [_gps_number(value) for value in time_values[:3]]
+        if all(number is not None for number in numbers):
+            result["timestamp"] = f"{date}T{int(numbers[0]):02d}:{int(numbers[1]):02d}:{numbers[2]:06.3f}".rstrip("0").rstrip(".")
+    return result
+
+
+def _gps_coordinate(value: Any, reference: Any) -> float | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    parts = [_gps_number(item) for item in value[:3]]
+    if any(part is None for part in parts):
+        return None
+    coordinate = parts[0] + parts[1] / 60 + parts[2] / 3600
+    if str(reference).upper() in {"S", "W"}:
+        coordinate = -coordinate
+    return coordinate
+
+
+def _gps_number(value: Any) -> float | None:
+    normalized = _json_value(value)
+    if isinstance(normalized, (list, tuple)) and len(normalized) == 2:
+        try:
+            denominator = float(normalized[1])
+            return float(normalized[0]) / denominator if denominator else None
+        except (TypeError, ValueError):
+            return None
+    try:
+        return float(normalized) if normalized is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, Real):
+        return float(value)
+    if hasattr(value, "numerator") and hasattr(value, "denominator"):
+        try:
+            return [int(value.numerator), int(value.denominator)]
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
     if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
+        normalized = [_json_value(item) for item in value]
+        return normalized if all(item is not None for item in normalized) else None
     if isinstance(value, bytes):
-        return value.hex()
-    return str(value)
+        return None
+    return None
 
 
 def _float_or_none(value: Any) -> float | None:

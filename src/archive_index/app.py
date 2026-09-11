@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", default=8765, type=int, help="TCP port to bind")
     index = commands.add_parser("index", help="scan and process a workspace")
     index.add_argument("workspace", type=Path, help="workspace root")
+    compact = commands.add_parser("compact", help="compact a workspace index database")
+    compact.add_argument("workspace", type=Path, help="workspace root")
     recommend = commands.add_parser("recommend", help="rebuild automatic recommendations")
     recommend.add_argument("workspace", type=Path, help="workspace root")
     diagnostics = commands.add_parser("group-diagnostics", help="write strict-group candidate diagnostics")
@@ -64,6 +66,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "index":
         return _index_command(args.workspace)
+
+    if args.command == "compact":
+        return _compact_command(args.workspace)
 
     if args.command == "recommend":
         return _recommend_command(args.workspace)
@@ -184,6 +189,25 @@ def _recommend_command(root: Path) -> int:
         return 130 if result.cancelled else 0
     finally:
         signal.signal(signal.SIGINT, old_handler)
+
+
+def _compact_command(root: Path) -> int:
+    from .workspace import Workspace, WorkspaceError, compact_database
+
+    try:
+        report = compact_database(Workspace.open(root))
+    except WorkspaceError as error:
+        print(f"Compaction refused: {error}")
+        return 2
+    mib = lambda value: value / (1024 * 1024)
+    print(
+        "SQLite compaction complete\n"
+        f"size: {mib(report['before_size_bytes']):.2f} -> {mib(report['after_size_bytes']):.2f} MiB\n"
+        f"page_count: {report['before_page_count']} -> {report['after_page_count']}\n"
+        f"freelist_count: {report['before_freelist_count']} -> {report['after_freelist_count']}\n"
+        f"integrity_check: {report['integrity_check']}"
+    )
+    return 0 if report["integrity_check"] == "ok" else 1
 
 
 def _progress_reporter(label: str):

@@ -32,7 +32,8 @@ class MediaPipelineTests(unittest.TestCase):
             self.assertEqual((first.succeeded, first.errors), (1, 0))
             row, states = _file_and_states(workspace)
             self.assertEqual(states["thumbnail"]["algorithm"], "pillow-reduced-jpeg")
-            self.assertEqual(states["thumbnail"]["version"], "pillow-jpeg-v1")
+            self.assertEqual(states["thumbnail"]["version"], "pillow-jpeg-v2")
+            self.assertEqual(json.loads(states["thumbnail"]["settings_json"])["jpeg_quality"], 50)
             thumbnail_path = workspace.index_path(states["thumbnail"]["output_path"])
             self.assertTrue(thumbnail_path.is_file())
             with Image.open(thumbnail_path) as thumbnail:
@@ -326,8 +327,83 @@ class MediaPipelineTests(unittest.TestCase):
             self.assertEqual(states["quality"]["status"], "not_requested")
 
             self.assertEqual(states["thumbnail"]["algorithm"], "ffmpeg-center-frame-jpeg")
-            self.assertEqual(states["thumbnail"]["version"], "ffmpeg-center-frame-jpeg-v1")
-            self.assertIn("center_frame", states["thumbnail"]["settings_json"])
+            self.assertEqual(states["thumbnail"]["version"], "ffmpeg-center-frame-jpeg-v2")
+            settings = json.loads(states["thumbnail"]["settings_json"])
+            self.assertEqual(settings["selection"], "center_frame")
+            self.assertEqual(settings["jpeg_quality"], 50)
+
+    def test_curated_metadata_omits_large_binary_exif(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Workspace.create(Path(temporary_directory) / "archive")
+            path = workspace.root / "curated.jpg"
+            image = Image.new("RGB", (80, 60), color=(80, 140, 210))
+            exif = image.getexif()
+            exif[36867] = "2024:01:02 03:04:05"
+            exif[36881] = "+03:00"
+            exif[37500] = b"maker-note" * 5000
+            exif[40092] = b"unknown-binary" * 200
+            exif[ExifTags.IFD.Exif] = {
+                33434: (1, 4000),
+                33437: (56, 10),
+                34855: 2500,
+                37386: (200, 1),
+                37521: "123",
+            }
+            image.save(path, format="JPEG", exif=exif)
+
+            from archive_index.media.metadata import extract_metadata
+
+            result = extract_metadata(path, "image")
+            persisted = json.dumps(result.values, ensure_ascii=False)
+            values = result.values["exif"]
+            self.assertNotIn("MakerNote", values)
+            self.assertNotIn("PrintImageMatching", values)
+            self.assertNotIn("maker-note", persisted)
+            self.assertLess(len(persisted.encode("utf-8")), 5000)
+            self.assertEqual(values["FNumber"], [56, 10])
+            self.assertEqual(values["ExposureTime"], [1, 4000])
+            self.assertEqual(values["ISOSpeedRatings"], 2500)
+            self.assertEqual(values["FocalLength"], [200, 1])
+            self.assertEqual(result.capture_time, "2024-01-02T03:04:05.123000+03:00")
+
+            scan(workspace)
+            index_workspace(workspace, components=("metadata",))
+            with closing(workspace.connect()) as connection:
+                persisted = connection.execute(
+                    "SELECT metadata_json FROM physical_file WHERE relative_path = 'curated.jpg'"
+                ).fetchone()[0]
+            self.assertNotIn("MakerNote", persisted)
+            self.assertNotIn("maker-note", persisted)
+            self.assertLess(len(persisted.encode("utf-8")), 5000)
+
+    def test_metadata_version_invalidates_only_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            source = root / "photo.jpg"
+            _write_image(source, size=(640, 480), with_exif=True)
+            workspace = Workspace.create(root)
+            scan(workspace)
+            index_workspace(workspace)
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "UPDATE component_state SET version = 'pillow-curated-exif-v3' WHERE component = 'metadata'"
+                )
+
+            from archive_index.indexing import media_pipeline
+
+            with patch(
+                "archive_index.indexing.media_pipeline.extract_metadata",
+                side_effect=media_pipeline.extract_metadata,
+            ) as extractor, patch(
+                "archive_index.indexing.media_pipeline.generate_thumbnail",
+                side_effect=AssertionError("thumbnail recomputed unexpectedly"),
+            ) as thumbnail_mock:
+                result = index_workspace(workspace)
+
+            self.assertEqual((result.succeeded, result.errors), (1, 0))
+            extractor.assert_called_once()
+            thumbnail_mock.assert_not_called()
 
     def test_exif_local_time_without_offset_is_not_made_utc(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

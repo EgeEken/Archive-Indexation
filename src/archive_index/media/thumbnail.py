@@ -13,9 +13,10 @@ from .metadata import DECODER_GAP_EXTENSIONS, MetadataExtractionError, Unsupport
 
 THUMBNAIL_SIZE = (320, 320)
 IMAGE_THUMBNAIL_ALGORITHM = "pillow-reduced-jpeg"
-IMAGE_THUMBNAIL_VERSION = "pillow-jpeg-v1"
+IMAGE_THUMBNAIL_VERSION = "pillow-jpeg-v2"
 VIDEO_THUMBNAIL_ALGORITHM = "ffmpeg-center-frame-jpeg"
-VIDEO_THUMBNAIL_VERSION = "ffmpeg-center-frame-jpeg-v1"
+VIDEO_THUMBNAIL_VERSION = "ffmpeg-center-frame-jpeg-v2"
+THUMBNAIL_JPEG_QUALITY = 50
 THUMBNAIL_VERSION = IMAGE_THUMBNAIL_VERSION
 
 
@@ -28,13 +29,17 @@ def thumbnail_provenance(media_type: str) -> tuple[str, str, dict[str, object]]:
                 "pipeline": "ffprobe-duration+ffmpeg-center-frame",
                 "selection": "center_frame",
                 "size": THUMBNAIL_SIZE,
-                "jpeg_quality": 85,
+                "jpeg_quality": THUMBNAIL_JPEG_QUALITY,
             },
         )
     return (
         IMAGE_THUMBNAIL_ALGORITHM,
         IMAGE_THUMBNAIL_VERSION,
-        {"pipeline": "pillow-reduced-decode", "size": THUMBNAIL_SIZE, "jpeg_quality": 85},
+        {
+            "pipeline": "pillow-reduced-decode",
+            "size": THUMBNAIL_SIZE,
+            "jpeg_quality": THUMBNAIL_JPEG_QUALITY,
+        },
     )
 
 
@@ -56,7 +61,7 @@ def generate_thumbnail(
             else load_reduced_image(source, size)
         )
         try:
-            image.save(temporary, format="JPEG", quality=85, optimize=True)
+            image.save(temporary, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
         finally:
             image.close()
         with Image.open(temporary) as validation:
