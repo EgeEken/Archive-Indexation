@@ -35,13 +35,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("doctor", help="check that the application shell can start")
-    commands.add_parser("run", help="start the production application shell")
+    run = commands.add_parser("run", help="start the localhost UI")
+    run.add_argument("workspace", type=Path, nargs="?", help="optional workspace root")
+    run.add_argument("--host", default="127.0.0.1", help="loopback host to bind")
+    run.add_argument("--port", default=8765, type=int, help="TCP port to bind")
     serve = commands.add_parser("serve", help="start the localhost UI")
     serve.add_argument("workspace", type=Path, nargs="?", help="optional workspace root containing .archive-index")
     serve.add_argument("--host", default="127.0.0.1", help="loopback host to bind")
     serve.add_argument("--port", default=8765, type=int, help="TCP port to bind")
     index = commands.add_parser("index", help="scan and process a workspace")
     index.add_argument("workspace", type=Path, help="workspace root")
+    recommend = commands.add_parser("recommend", help="rebuild automatic recommendations")
+    recommend.add_argument("workspace", type=Path, help="workspace root")
+    diagnostics = commands.add_parser("group-diagnostics", help="write strict-group candidate diagnostics")
+    diagnostics.add_argument("workspace", type=Path, help="workspace root")
+    diagnostics.add_argument("--limit", type=int, default=100, help="number of borderline rejected pairs to write")
     return parser
 
 
@@ -54,19 +62,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{APP_NAME} {__version__}: ready")
         return 0
 
-    if args.command == "run":
-        LOGGER.info("starting production application shell")
-        print("Archive Indexation application shell is ready.")
-        return 0
-
     if args.command == "index":
         return _index_command(args.workspace)
 
-    if args.command == "serve":
+    if args.command == "recommend":
+        return _recommend_command(args.workspace)
+
+    if args.command == "group-diagnostics":
+        from .indexing.grouping import write_grouping_diagnostics
+        from .workspace import Workspace
+
+        destination = write_grouping_diagnostics(Workspace.open(args.workspace), args.limit)
+        print(destination)
+        return 0
+
+    if args.command in {None, "run", "serve"}:
         from .api.server import serve
         from .workspace import Workspace
 
-        serve(Workspace.open(args.workspace) if args.workspace else None, host=args.host, port=args.port)
+        workspace_root = getattr(args, "workspace", None)
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 8765)
+        serve(Workspace.open(workspace_root) if workspace_root else None, host=host, port=port)
         return 0
 
     parser.print_help()
@@ -75,10 +92,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _index_command(root: Path) -> int:
     from .indexing.media_pipeline import index_workspace
+    from .indexing.grouping import build_groups, extract_visual_features
+    from .indexing.recommendation import build_recommendations
     from .indexing.scanner import scan
+    from .jobs.engine import JobStore
     from .workspace import Workspace
 
     workspace = Workspace.open(root) if (root / ".archive-index").is_dir() else Workspace.create(root)
+    JobStore(workspace).recover_interrupted()
 
     cancel_event = Event()
     old_handler = signal.getsignal(signal.SIGINT)
@@ -102,12 +123,65 @@ def _index_command(root: Path) -> int:
             cancel_event=cancel_event,
             progress=_progress_reporter("media"),
         )
+        if media_result.cancelled:
+            return 130
+        feature_result = extract_visual_features(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("features"),
+        )
+        if feature_result.cancelled:
+            return 130
+        grouping_result = build_groups(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("groups"),
+        )
+        recommendation_result = build_recommendations(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("recommendations"),
+        )
+        if recommendation_result.cancelled:
+            return 130
         print(
             f"\nIndex complete: {media_result.succeeded} processed, "
-            f"{media_result.skipped} skipped, {media_result.errors} failed.",
+            f"{media_result.skipped} skipped, {media_result.errors} failed; "
+            f"{grouping_result.multi_image_groups} multi-image groups; "
+            f"{recommendation_result.auto_recommended} recommendations.",
             flush=True,
         )
         return 130 if media_result.cancelled else 0
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
+
+
+def _recommend_command(root: Path) -> int:
+    from .indexing.recommendation import build_recommendations
+    from .jobs.engine import JobStore
+    from .workspace import Workspace
+
+    workspace = Workspace.open(root)
+    JobStore(workspace).recover_interrupted()
+    cancel_event = Event()
+    old_handler = signal.getsignal(signal.SIGINT)
+
+    def request_cancel(signum, frame) -> None:
+        cancel_event.set()
+        print("\nCancellation requested; finishing the current group...", flush=True)
+
+    signal.signal(signal.SIGINT, request_cancel)
+    try:
+        result = build_recommendations(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("recommendations"),
+        )
+        print(
+            f"\nRecommendation rebuild complete: {result.auto_recommended} recommendations.",
+            flush=True,
+        )
+        return 130 if result.cancelled else 0
     finally:
         signal.signal(signal.SIGINT, old_handler)
 

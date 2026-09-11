@@ -20,9 +20,9 @@ from ..media.quality import (
 )
 from ..media.thumbnail import (
     THUMBNAIL_SIZE,
-    THUMBNAIL_VERSION,
     generate_thumbnail,
     load_reduced_image,
+    thumbnail_provenance,
 )
 from ..workspace import Workspace
 
@@ -130,7 +130,7 @@ def _prepare_component_states(workspace: Workspace, rows, components: tuple[str,
         for row in rows:
             fingerprint = _input_fingerprint(row)
             for component in components:
-                algorithm, version = _provenance(component)
+                algorithm, version = _provenance(component, row["media_type"])
                 state = connection.execute(
                     """
                     SELECT * FROM component_state
@@ -183,14 +183,14 @@ def _process_file(workspace: Workspace, row, components: tuple[str, ...]) -> str
 
     for component in components:
         state = _component_state(workspace, row["id"], component)
-        version = _provenance(component)[1]
+        version = _provenance(component, row["media_type"])[1]
         if _state_ready(workspace, state, row, component, fingerprint, version):
             continue
         pending_components.append(component)
 
     if not pending_components:
         return "skipped"
-    _mark_running_many(workspace, row["id"], pending_components)
+    _mark_running_many(workspace, row["id"], pending_components, row["media_type"])
 
     image_components = {
         component
@@ -282,7 +282,7 @@ def _process_thumbnail(
     fingerprint: str,
     prepared_image,
 ) -> None:
-    algorithm = "pillow-thumbnail"
+    algorithm, version, provenance = thumbnail_provenance(row["media_type"])
     destination = workspace.index_directory / "thumbnails" / f"{row['id']}.jpg"
     if row["media_type"] == "video":
         generate_thumbnail(source, destination, THUMBNAIL_SIZE, media_type="video")
@@ -290,7 +290,7 @@ def _process_thumbnail(
         generate_thumbnail(source, destination, THUMBNAIL_SIZE, prepared_image)
     output_fingerprint = _file_fingerprint(destination)
     output_path = workspace.index_relative_path(destination)
-    settings = json.dumps({"size": THUMBNAIL_SIZE, "quality": 85}, sort_keys=True)
+    settings = json.dumps(provenance, sort_keys=True)
     with workspace.transaction() as connection:
         connection.execute(
             """
@@ -302,7 +302,7 @@ def _process_thumbnail(
             """,
             (
                 algorithm,
-                THUMBNAIL_VERSION,
+                version,
                 settings,
                 fingerprint,
                 output_path,
@@ -362,10 +362,12 @@ def _process_quality(
         )
 
 
-def _mark_running_many(workspace: Workspace, file_id: str, components: list[str]) -> None:
+def _mark_running_many(
+    workspace: Workspace, file_id: str, components: list[str], media_type: str = "image"
+) -> None:
     with workspace.transaction() as connection:
         for component in components:
-            algorithm, version = _provenance(component)
+            algorithm, version = _provenance(component, media_type)
             connection.execute(
                 """
                 UPDATE component_state
@@ -469,12 +471,12 @@ def _file_fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _provenance(component: str) -> tuple[str, str]:
+def _provenance(component: str, media_type: str | None = None) -> tuple[str, str]:
     _validate_component(component)
     if component == METADATA_COMPONENT:
         return METADATA_ALGORITHM, METADATA_VERSION
     if component == THUMBNAIL_COMPONENT:
-        return "pillow-thumbnail", THUMBNAIL_VERSION
+        return thumbnail_provenance(media_type or "image")[:2]
     return QUALITY_ALGORITHM, QUALITY_SCORE_VERSION
 
 

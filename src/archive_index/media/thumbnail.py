@@ -12,7 +12,30 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .metadata import DECODER_GAP_EXTENSIONS, MetadataExtractionError, UnsupportedDecoderError
 
 THUMBNAIL_SIZE = (320, 320)
-THUMBNAIL_VERSION = "pillow-jpeg-v1"
+IMAGE_THUMBNAIL_ALGORITHM = "pillow-reduced-jpeg"
+IMAGE_THUMBNAIL_VERSION = "pillow-jpeg-v1"
+VIDEO_THUMBNAIL_ALGORITHM = "ffmpeg-center-frame-jpeg"
+VIDEO_THUMBNAIL_VERSION = "ffmpeg-center-frame-jpeg-v1"
+THUMBNAIL_VERSION = IMAGE_THUMBNAIL_VERSION
+
+
+def thumbnail_provenance(media_type: str) -> tuple[str, str, dict[str, object]]:
+    if media_type == "video":
+        return (
+            VIDEO_THUMBNAIL_ALGORITHM,
+            VIDEO_THUMBNAIL_VERSION,
+            {
+                "pipeline": "ffprobe-duration+ffmpeg-center-frame",
+                "selection": "center_frame",
+                "size": THUMBNAIL_SIZE,
+                "jpeg_quality": 85,
+            },
+        )
+    return (
+        IMAGE_THUMBNAIL_ALGORITHM,
+        IMAGE_THUMBNAIL_VERSION,
+        {"pipeline": "pillow-reduced-decode", "size": THUMBNAIL_SIZE, "jpeg_quality": 85},
+    )
 
 
 def generate_thumbnail(

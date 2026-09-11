@@ -299,6 +299,10 @@ def _update_existing(
     )
     if changed_content:
         connection.execute(
+            "DELETE FROM visual_feature WHERE physical_file_id = ?",
+            (existing["id"],),
+        )
+        connection.execute(
             """
             UPDATE component_state
             SET status = 'pending', input_fingerprint = NULL,

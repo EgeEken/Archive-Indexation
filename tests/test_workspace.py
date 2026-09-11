@@ -24,7 +24,7 @@ class WorkspaceTests(unittest.TestCase):
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
 
             self.assertIsNotNone(info["workspace_id"])
-            self.assertEqual(version, 4)
+            self.assertEqual(version, 6)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -160,9 +160,14 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('physical_file')").fetchall()
                 }
-            self.assertEqual(version, 4)
+                selection_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
+                }
+            self.assertEqual(version, 6)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
+            self.assertIn("selection_updated_at", selection_columns)
             self.assertTrue(
                 {
                     "quality_raw_json",
@@ -173,6 +178,42 @@ class WorkspaceTests(unittest.TestCase):
                 }
                 <= quality_columns
             )
+            with closing(workspace.connect()) as connection:
+                self.assertTrue(
+                    {"visual_feature", "grouping_run", "workspace_grouping", "strict_group", "strict_group_member"}
+                    <= {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        ).fetchall()
+                    }
+                )
+                self.assertTrue(
+                    {"recommendation_run", "workspace_recommendation", "asset_recommendation"}
+                    <= {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        ).fetchall()
+                    }
+                )
+
+    def test_open_repairs_phase6_database_missing_selection_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            workspace = Workspace.create(root)
+            with closing(sqlite3.connect(workspace.database_path)) as connection:
+                connection.execute("ALTER TABLE logical_asset DROP COLUMN selection_updated_at")
+                connection.execute("PRAGMA user_version = 6")
+                connection.commit()
+
+            Workspace.open(root)
+            with closing(workspace.connect()) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(logical_asset)").fetchall()
+                }
+            self.assertIn("selection_updated_at", columns)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from threading import Event
 from ..workspace import Workspace
 
 LOGGER = logging.getLogger(__name__)
-JOB_STATES = frozenset({"pending", "running", "complete", "failed", "cancelled"})
+JOB_STATES = frozenset({"pending", "running", "complete", "failed", "cancelled", "interrupted"})
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class JobStore:
                 UPDATE job
                 SET status = 'running', stage = COALESCE(stage, kind), updated_at = ?, started_at = COALESCE(started_at, ?),
                     finished_at = NULL
-                WHERE id = ? AND status IN ('pending', 'cancelled')
+                WHERE id = ? AND status IN ('pending', 'cancelled', 'interrupted')
                 """,
                 (now, now, job_id),
             )
@@ -151,10 +151,10 @@ class JobStore:
             cursor = connection.execute(
                 """
                 UPDATE job
-                SET status = 'pending', updated_at = ?, started_at = NULL, finished_at = NULL
-                WHERE status = 'running'
+                SET status = 'interrupted', updated_at = ?, finished_at = ?
+                WHERE status IN ('pending', 'running')
                 """,
-                (now,),
+                (now, now),
             )
             connection.execute(
                 """
@@ -231,6 +231,8 @@ def run_items(
     store = JobStore(workspace)
     identifier = job_id or store.create(kind, len(item_list))
     store.set_total(identifier, len(item_list))
+    if stage is not None:
+        store.set_stage(identifier, stage)
     store.start(identifier)
     processed = 0
     succeeded = 0

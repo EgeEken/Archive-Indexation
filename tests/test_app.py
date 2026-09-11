@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -21,12 +22,18 @@ class AppTests(unittest.TestCase):
         self.assertIn("ready", output.getvalue())
 
     def test_run_command(self) -> None:
-        output = io.StringIO()
-        with redirect_stdout(output):
+        with patch("archive_index.api.server.serve") as serve:
             result = main(["run"])
 
         self.assertEqual(result, 0)
-        self.assertIn("application shell is ready", output.getvalue())
+        serve.assert_called_once_with(None, host="127.0.0.1", port=8765)
+
+    def test_no_command_starts_home_ui(self) -> None:
+        with patch("archive_index.api.server.serve") as serve:
+            result = main([])
+
+        self.assertEqual(result, 0)
+        serve.assert_called_once_with(None, host="127.0.0.1", port=8765)
 
     def test_index_command_creates_and_processes_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

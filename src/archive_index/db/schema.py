@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -119,6 +119,98 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE physical_file ADD COLUMN quality_version TEXT",
         "CREATE INDEX physical_file_quality_idx ON physical_file(quality_score)",
     ),
+    5: (
+        """
+        CREATE TABLE visual_feature (
+            physical_file_id TEXT PRIMARY KEY REFERENCES physical_file(id) ON DELETE CASCADE,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            dhash TEXT NOT NULL,
+            luma_json TEXT NOT NULL,
+            color_hist_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX visual_feature_fingerprint_idx ON visual_feature(input_fingerprint)",
+        """
+        CREATE TABLE grouping_run (
+            id TEXT PRIMARY KEY,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE workspace_grouping (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active_run_id TEXT REFERENCES grouping_run(id),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE strict_group (
+            run_id TEXT NOT NULL REFERENCES grouping_run(id) ON DELETE CASCADE,
+            group_id TEXT NOT NULL,
+            first_capture_time TEXT,
+            member_count INTEGER NOT NULL,
+            representative_logical_asset_id TEXT REFERENCES logical_asset(id) ON DELETE SET NULL,
+            PRIMARY KEY (run_id, group_id)
+        )
+        """,
+        """
+        CREATE TABLE strict_group_member (
+            run_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            logical_asset_id TEXT NOT NULL REFERENCES logical_asset(id) ON DELETE CASCADE,
+            member_order INTEGER NOT NULL,
+            is_representative INTEGER NOT NULL DEFAULT 0,
+            min_visual_similarity REAL,
+            max_capture_delta_seconds REAL,
+            PRIMARY KEY (run_id, logical_asset_id),
+            FOREIGN KEY (run_id, group_id)
+                REFERENCES strict_group(run_id, group_id) ON DELETE CASCADE
+        )
+        """,
+        "CREATE INDEX strict_group_member_group_idx ON strict_group_member(run_id, group_id, member_order)",
+        "CREATE INDEX strict_group_member_asset_idx ON strict_group_member(logical_asset_id)",
+    ),
+    6: (
+        "ALTER TABLE logical_asset ADD COLUMN selection_updated_at TEXT",
+        """
+        CREATE TABLE recommendation_run (
+            id TEXT PRIMARY KEY,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE workspace_recommendation (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active_run_id TEXT REFERENCES recommendation_run(id),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE asset_recommendation (
+            run_id TEXT NOT NULL REFERENCES recommendation_run(id) ON DELETE CASCADE,
+            logical_asset_id TEXT NOT NULL REFERENCES logical_asset(id) ON DELETE CASCADE,
+            auto_recommended INTEGER NOT NULL CHECK (auto_recommended IN (0, 1)),
+            recommendation_rank INTEGER,
+            is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
+            reason TEXT NOT NULL,
+            PRIMARY KEY (run_id, logical_asset_id)
+        )
+        """,
+        "CREATE INDEX asset_recommendation_asset_idx ON asset_recommendation(logical_asset_id)",
+    ),
 }
 
 
@@ -141,3 +233,14 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 (version, applied_at),
             )
             connection.execute(f"PRAGMA user_version = {version}")
+    _repair_known_schema_drift(connection)
+
+
+def _repair_known_schema_drift(connection: sqlite3.Connection) -> None:
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(logical_asset)").fetchall()
+    }
+    if "selection_updated_at" not in columns:
+        with connection:
+            connection.execute("ALTER TABLE logical_asset ADD COLUMN selection_updated_at TEXT")

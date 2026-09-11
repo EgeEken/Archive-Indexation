@@ -9,11 +9,14 @@ from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 from PIL import Image
 
 from archive_index.api.server import WorkspaceHTTPServer
 from archive_index.indexing.media_pipeline import index_workspace
+from archive_index.indexing.grouping import build_groups, extract_visual_features
+from archive_index.indexing.recommendation import build_recommendations
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
@@ -72,10 +75,19 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"problems-dialog", html)
         self.assertIn(b"page-size", html)
         self.assertIn(b"Choose folder", html)
-        self.assertIn(b"aspect-ratio: 1 / 1", html)
+        status, css = _get_bytes(self.base_url, "/app.css")
+        self.assertEqual(status, 200)
+        self.assertIn(b"aspect-ratio: 1 / 1", css)
+        status, js = _get_bytes(self.base_url, "/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Strict groups", html)
+        self.assertIn(b"Selection", html)
+        self.assertIn(b"Recommended", html)
+        self.assertIn(b"viewer-selection", html)
         self.assertIn(b"viewer-info", html)
         self.assertIn(b"viewer-stage", html)
-        self.assertIn(b"quality-unsupported", html)
+        self.assertIn(b"quality-unsupported", js)
+        self.assertIn(b"Representative", js)
         self.assertIn(b"viewer-smooth", html)
         self.assertIn(b"range-label-top", html)
         self.assertIn("aria-label=\"Previous page\"".encode(), html)
@@ -86,9 +98,11 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn(b"Files / representations", html)
         self.assertNotIn(b"Advanced measurements", html)
         self.assertNotIn(b"lower is better", html)
+        self.assertNotIn(b"Include singletons", html)
         self.assertNotIn(b">Apply<", html)
         self.assertNotIn(b"Open thumbnail", html)
         self.assertNotIn(b"scrollIntoView", html)
+        self.assertIn(b"representatives-only", html)
 
     def test_logical_asset_detail_exposes_physical_and_component_state(self) -> None:
         with closing(self.workspace.connect()) as connection:
@@ -206,6 +220,123 @@ class ApiTests(unittest.TestCase):
         self.assertTrue({"stage", "failed_items", "skipped_items"} <= observed.keys())
         self.assertTrue(any(job["kind"] == "media_index" for job in jobs["jobs"]))
 
+    def test_media_failure_does_not_rewrite_completed_scan(self) -> None:
+        scan_job_id = JobStore(self.workspace).create("scan")
+        JobStore(self.workspace).complete(scan_job_id)
+        handle = self.server.default_handle
+        with patch("archive_index.api.server.scan", return_value=type("Scan", (), {"cancelled": False})()), patch(
+            "archive_index.api.server.index_workspace", side_effect=RuntimeError("media stop")
+        ):
+            self.server._run_indexing(handle, self.workspace, scan_job_id, threading.Event())
+        self.assertEqual(JobStore(self.workspace).get(scan_job_id)["status"], "complete")
+        with closing(self.workspace.connect()) as connection:
+            media = connection.execute(
+                "SELECT status FROM job WHERE kind = 'media_index' ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(media["status"], "failed")
+
+    def test_gallery_page_uses_bulk_physical_lookup(self) -> None:
+        with patch("archive_index.api.server._physical_rows", side_effect=AssertionError("N+1 lookup")):
+            status, assets = _get_json(self.base_url, "/api/assets?page_size=60")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(assets["items"]), 3)
+
+    def test_group_api_uses_bulk_physical_lookup(self) -> None:
+        extract_visual_features(self.workspace)
+        build_groups(self.workspace)
+        with patch("archive_index.api.server._physical_rows", side_effect=AssertionError("N+1 group lookup")):
+            status, groups = _get_json(self.base_url, "/api/groups")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(groups["groups"]), 2)
+        self.assertTrue(all(group["members"] for group in groups["groups"]))
+
+        status, representatives = _get_json(self.base_url, "/api/assets?representatives=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(representatives["total"], 2)
+        self.assertTrue(all(item["is_representative"] for item in representatives["items"]))
+
+    def test_video_original_supports_safe_byte_ranges(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            file_id = connection.execute(
+                "SELECT id FROM physical_file WHERE relative_path = 'clip.mp4'"
+            ).fetchone()[0]
+
+        status, headers, body = _get_response(
+            self.base_url,
+            f"/api/files/{file_id}/original",
+            {"Range": "bytes=0-3"},
+        )
+        self.assertEqual(status, 206)
+        self.assertEqual(len(body), 4)
+        self.assertEqual(headers["Content-Type"], "video/mp4")
+        self.assertEqual(headers["Accept-Ranges"], "bytes")
+        self.assertEqual(headers["Content-Range"], "bytes 0-3/16")
+
+        status, headers, _ = _get_response(
+            self.base_url,
+            f"/api/files/{file_id}/original",
+            {"Range": "bytes=100-"},
+        )
+        self.assertEqual(status, 416)
+        self.assertEqual(headers["Content-Range"], "bytes */16")
+
+    def test_recommendation_filters_and_workspace_scoped_decisions(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            root_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+            nested_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'nested/nested.jpg'"
+            ).fetchone()[0]
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE physical_file SET quality_score = .8 WHERE logical_asset_id = ?", (root_id,))
+            connection.execute("UPDATE physical_file SET quality_score = .2 WHERE logical_asset_id = ?", (nested_id,))
+        extract_visual_features(self.workspace)
+        build_groups(self.workspace)
+        build_recommendations(self.workspace)
+
+        status, recommended = _get_json(self.base_url, "/api/assets?recommended=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(recommended["total"], 1)
+        self.assertTrue(recommended["items"][0]["auto_recommended"])
+        self.assertEqual(recommended["items"][0]["user_decision"], "undecided")
+
+        status, decision = _post_json(
+            self.base_url,
+            f"/api/assets/{root_id}/decision",
+            {"decision": "selected"},
+        )
+        self.assertEqual((status, decision["user_decision"]), (200, "selected"))
+        status, selected = _get_json(self.base_url, "/api/assets?decision=selected")
+        self.assertEqual((status, selected["total"]), (200, 1))
+        self.assertEqual((selected["items"][0]["user_decision"], selected["items"][0]["auto_recommended"]), ("selected", True))
+        status, undecided = _get_json(self.base_url, "/api/assets?decision=undecided")
+        self.assertEqual((status, undecided["total"]), (200, 2))
+        status, invalid = _post_json(
+            self.base_url,
+            f"/api/assets/{root_id}/decision",
+            {"decision": "maybe"},
+        )
+        self.assertEqual(status, 400)
+        status, invalid_scope = _post_json(
+            self.base_url,
+            f"/api/assets/{root_id}/decision?workspace=not-a-workspace",
+            {"decision": "rejected"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(invalid_scope["error"], "workspace is unavailable")
+        status, info = _get_json(self.base_url, "/api/recommendations")
+        self.assertEqual((status, info["available"], info["counts"]["recommended"]), (200, True, 1))
+        status, rebuild = _post_json(self.base_url, "/api/recommendations/rebuild")
+        self.assertEqual(status, 202)
+        for _ in range(50):
+            status, jobs = _get_json(self.base_url, "/api/jobs?limit=10")
+            recommendation_job = next(job for job in jobs["jobs"] if job["id"] == rebuild["job_id"])
+            if recommendation_job["status"] in {"complete", "failed", "cancelled"}:
+                break
+            time.sleep(.1)
+        self.assertEqual(recommendation_job["status"], "complete")
+
 
 class WorkspaceHomeApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -271,11 +402,17 @@ def _get_json(base_url: str, path: str):
 
 
 def _get_bytes(base_url: str, path: str):
+    status, _, body = _get_response(base_url, path)
+    return status, body
+
+
+def _get_response(base_url: str, path: str, headers: dict[str, str] | None = None):
     try:
-        with urlopen(Request(base_url + path, method="GET"), timeout=5) as response:
-            return response.status, response.read()
+        request = Request(base_url + path, method="GET", headers=headers or {})
+        with urlopen(request, timeout=5) as response:
+            return response.status, response.headers, response.read()
     except HTTPError as error:
-        return error.code, error.read()
+        return error.code, error.headers, error.read()
 
 
 def _post_json(base_url: str, path: str, body: dict[str, object] | None = None):

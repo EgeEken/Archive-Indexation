@@ -12,12 +12,17 @@ Install `uv`, then let it create and manage the project environment from `pyproj
 uv sync
 ```
 
-Run the application shell or its health check:
+Start the application UI (the browser opens automatically):
 
 ```powershell
-uv run archive-index run
-uv run archive-index doctor
+uv run archive-index
 ```
+
+`uv run` starts the project inside its locked environment. The application needs
+the local backend because it serves the workspace database, thumbnails, originals,
+and indexing API; the HTML page alone cannot browse an archive. The `run` and
+`serve` subcommands remain available as explicit equivalents. Use `doctor` for a
+health check.
 
 Start the localhost UI at the workspace home:
 

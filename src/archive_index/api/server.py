@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
-import shutil
 import threading
+import webbrowser
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..app_state import WorkspaceRegistry, workspace_id
+from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
+from ..indexing.recommendation import build_recommendations
 from ..indexing.scanner import scan
 from ..jobs.engine import JobStore
 from ..workspace import Workspace, WorkspaceError
@@ -35,12 +38,16 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, threading.Thread] = {}
         self._cancel_events: dict[tuple[str, str], threading.Event] = {}
+        self._recovered_workspaces: set[str] = set()
         if workspace is not None:
             self.default_handle = self._register_workspace(workspace)
 
     def _register_workspace(self, workspace: Workspace) -> str:
         handle = workspace_id(workspace)
         self._workspaces[handle] = workspace
+        if handle not in self._recovered_workspaces:
+            JobStore(workspace).recover_interrupted()
+            self._recovered_workspaces.add(handle)
         return handle
 
     def resolve_workspace(self, handle: str | None) -> tuple[str, Workspace]:
@@ -53,7 +60,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 workspace = self.registry.open(selected)
             except WorkspaceError as error:
                 raise ResourceNotFound("workspace is unavailable") from error
-            self._workspaces[selected] = workspace
+            self._register_workspace(workspace)
         return selected, workspace
 
     def list_workspaces(self) -> list[dict[str, object]]:
@@ -70,7 +77,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 continue
             try:
                 workspace = self._workspaces.get(handle) or self.registry.open(handle)
-                self._workspaces[handle] = workspace
+                self._register_workspace(workspace)
                 entries.append(_workspace_entry(handle, workspace, recent=True))
             except WorkspaceError:
                 entries.append({"id": handle, "name": Path(path).name, "path": path, "available": False})
@@ -112,6 +119,44 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             thread.start()
             return job_id
 
+    def start_group_rebuild(self, handle: str) -> str | None:
+        _, workspace = self.resolve_workspace(handle)
+        with self._active_lock:
+            thread = self._active_threads.get(handle)
+            if thread is not None and thread.is_alive():
+                return None
+            feature_job_id = JobStore(workspace).create("visual_features")
+            cancel_event = threading.Event()
+            self._cancel_events[(handle, feature_job_id)] = cancel_event
+            thread = threading.Thread(
+                target=self._run_grouping_only,
+                args=(handle, workspace, feature_job_id, cancel_event),
+                name=f"archive-index-groups-{handle[:8]}",
+                daemon=True,
+            )
+            self._active_threads[handle] = thread
+            thread.start()
+            return feature_job_id
+
+    def start_recommendation_rebuild(self, handle: str) -> str | None:
+        _, workspace = self.resolve_workspace(handle)
+        with self._active_lock:
+            thread = self._active_threads.get(handle)
+            if thread is not None and thread.is_alive():
+                return None
+            job_id = JobStore(workspace).create("recommendations")
+            cancel_event = threading.Event()
+            self._cancel_events[(handle, job_id)] = cancel_event
+            thread = threading.Thread(
+                target=self._run_recommendation_only,
+                args=(handle, workspace, job_id, cancel_event),
+                name=f"archive-index-recommendations-{handle[:8]}",
+                daemon=True,
+            )
+            self._active_threads[handle] = thread
+            thread.start()
+            return job_id
+
     def cancel_job(self, handle: str, job_id: str) -> bool:
         with self._active_lock:
             event = self._cancel_events.get((handle, job_id))
@@ -128,6 +173,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         cancel_event: threading.Event,
     ) -> None:
         job_ids = [job_id]
+        current_job_id = job_id
         try:
             scan_result = scan(workspace, job_id=job_id, cancel_event=cancel_event)
             if scan_result.cancelled:
@@ -136,17 +182,115 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             with self._active_lock:
                 self._cancel_events[(handle, media_job_id)] = cancel_event
             job_ids.append(media_job_id)
-            index_workspace(workspace, job_id=media_job_id, cancel_event=cancel_event)
+            current_job_id = media_job_id
+            media_result = index_workspace(workspace, job_id=media_job_id, cancel_event=cancel_event)
+            if media_result.cancelled:
+                return
+            feature_job_id = JobStore(workspace).create("visual_features")
+            with self._active_lock:
+                self._cancel_events[(handle, feature_job_id)] = cancel_event
+            job_ids.append(feature_job_id)
+            current_job_id = feature_job_id
+            feature_result = extract_visual_features(
+                workspace, job_id=feature_job_id, cancel_event=cancel_event
+            )
+            if feature_result.cancelled:
+                return
+            group_job_id = JobStore(workspace).create("grouping")
+            with self._active_lock:
+                self._cancel_events[(handle, group_job_id)] = cancel_event
+            job_ids.append(group_job_id)
+            current_job_id = group_job_id
+            group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
+            if group_result.cancelled:
+                return
+            recommendation_job_id = JobStore(workspace).create("recommendations")
+            with self._active_lock:
+                self._cancel_events[(handle, recommendation_job_id)] = cancel_event
+            job_ids.append(recommendation_job_id)
+            current_job_id = recommendation_job_id
+            recommendation_result = build_recommendations(
+                workspace, job_id=recommendation_job_id, cancel_event=cancel_event
+            )
+            if recommendation_result.cancelled:
+                return
         except Exception:
             LOGGER.exception("workspace indexing failed")
             try:
-                JobStore(workspace).fail(job_id)
+                row = JobStore(workspace).get(current_job_id)
+                if row is not None and row["status"] in {"pending", "running"}:
+                    JobStore(workspace).fail(current_job_id)
             except Exception:
                 LOGGER.exception("could not mark workspace job failed")
         finally:
             with self._active_lock:
                 for active_job_id in job_ids:
                     self._cancel_events.pop((handle, active_job_id), None)
+                if self._active_threads.get(handle) is threading.current_thread():
+                    self._active_threads.pop(handle, None)
+
+    def _run_grouping_only(
+        self,
+        handle: str,
+        workspace: Workspace,
+        feature_job_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        job_ids = [feature_job_id]
+        current_job_id = feature_job_id
+        try:
+            feature_result = extract_visual_features(
+                workspace, job_id=feature_job_id, cancel_event=cancel_event
+            )
+            if feature_result.cancelled:
+                return
+            group_job_id = JobStore(workspace).create("grouping")
+            with self._active_lock:
+                self._cancel_events[(handle, group_job_id)] = cancel_event
+            job_ids.append(group_job_id)
+            current_job_id = group_job_id
+            group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
+            if group_result.cancelled:
+                return
+        except Exception:
+            LOGGER.exception("workspace grouping failed")
+            try:
+                row = JobStore(workspace).get(current_job_id)
+                if row is not None and row["status"] in {"pending", "running"}:
+                    JobStore(workspace).fail(current_job_id)
+            except Exception:
+                LOGGER.exception("could not mark grouping job failed")
+        finally:
+            with self._active_lock:
+                for active_job_id in job_ids:
+                    self._cancel_events.pop((handle, active_job_id), None)
+                if self._active_threads.get(handle) is threading.current_thread():
+                    self._active_threads.pop(handle, None)
+
+    def _run_recommendation_only(
+        self,
+        handle: str,
+        workspace: Workspace,
+        recommendation_job_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        try:
+            build_recommendations(
+                workspace,
+                job_id=recommendation_job_id,
+                cancel_event=cancel_event,
+            )
+        except Exception:
+            LOGGER.exception("workspace recommendation rebuild failed")
+            try:
+                row = JobStore(workspace).get(recommendation_job_id)
+                if row is not None and row["status"] in {"pending", "running"}:
+                    JobStore(workspace).fail(recommendation_job_id)
+            except Exception:
+                LOGGER.exception("could not mark recommendation job failed")
+        finally:
+            with self._active_lock:
+                self._cancel_events.pop((handle, recommendation_job_id), None)
                 if self._active_threads.get(handle) is threading.current_thread():
                     self._active_threads.pop(handle, None)
 
@@ -160,6 +304,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         try:
             if request.path == "/":
                 self._send_bytes(200, _ui_html().encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if request.path in {"/app.css", "/app.js"}:
+                name = request.path.removeprefix("/")
+                content_type = "text/css; charset=utf-8" if name == "app.css" else "text/javascript; charset=utf-8"
+                self._send_bytes(200, _ui_resource(name).encode("utf-8"), content_type)
                 return
             if request.path == "/api/health":
                 self._send_json(200, {"status": "ok"})
@@ -178,6 +327,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"jobs": _jobs(workspace, query)})
             elif request.path == "/api/problems":
                 self._send_json(200, {"problems": _problems(workspace, query)})
+            elif request.path == "/api/groups":
+                self._send_json(200, _groups(workspace, query, handle))
+            elif request.path == "/api/recommendations":
+                self._send_json(200, _recommendations(workspace))
             else:
                 self._handle_resource_get(request.path, workspace, handle)
         except InvalidRequest as error:
@@ -205,13 +358,34 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     raise InvalidRequest("workspace is required")
                 self._send_json(200, {"removed": self.server.remove_workspace(handle)})
                 return
-            handle, _ = self._workspace(query)
+            handle, workspace = self._workspace(query)
             if request.path == "/api/index":
                 job_id = self.server.start_indexing(handle)
                 if job_id is None:
                     self._send_json(409, {"error": "indexing is already running"})
                 else:
                     self._send_json(202, {"job_id": job_id})
+                return
+            if request.path == "/api/groups/rebuild":
+                job_id = self.server.start_group_rebuild(handle)
+                if job_id is None:
+                    self._send_json(409, {"error": "a workspace job is already running"})
+                else:
+                    self._send_json(202, {"job_id": job_id})
+                return
+            if request.path == "/api/recommendations/rebuild":
+                job_id = self.server.start_recommendation_rebuild(handle)
+                if job_id is None:
+                    self._send_json(409, {"error": "a workspace job is already running"})
+                else:
+                    self._send_json(202, {"job_id": job_id})
+                return
+            parts = request.path.strip("/").split("/")
+            if len(parts) == 4 and parts[:2] == ["api", "assets"] and parts[3] == "decision":
+                decision = self._json_body().get("decision")
+                if decision not in {"undecided", "selected", "rejected"}:
+                    raise InvalidRequest("decision must be undecided, selected, or rejected")
+                self._send_json(200, _set_user_decision(workspace, parts[2], decision))
                 return
             prefix = "/api/jobs/"
             if request.path.startswith(prefix) and request.path.endswith("/cancel"):
@@ -313,9 +487,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             source = workspace.absolute_path(row["relative_path"])
         except WorkspaceError as error:
             raise ResourceNotFound("invalid source path") from error
-        self._send_file(source, mimetypes.guess_type(source.name)[0] or "application/octet-stream")
+        self._send_file(
+            source,
+            mimetypes.guess_type(source.name)[0] or "application/octet-stream",
+            allow_range=True,
+        )
 
-    def _send_file(self, path: Path, content_type: str) -> None:
+    def _send_file(self, path: Path, content_type: str, allow_range: bool = False) -> None:
         if not path.is_file():
             raise ResourceNotFound("file is unavailable")
         try:
@@ -323,13 +501,67 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             source = path.open("rb")
         except OSError as error:
             raise ResourceNotFound("file is unavailable") from error
+        start = 0
+        end = size - 1
+        partial = False
+        if allow_range:
+            range_header = self.headers.get("Range")
+            if range_header:
+                if not range_header.startswith("bytes=") or "," in range_header:
+                    self._send_range_not_satisfiable(size)
+                    source.close()
+                    return
+                specification = range_header[6:]
+                first, separator, last = specification.partition("-")
+                try:
+                    if not separator:
+                        raise ValueError
+                    if first:
+                        start = int(first)
+                        end = int(last) if last else size - 1
+                    else:
+                        suffix_length = int(last)
+                        if suffix_length <= 0:
+                            raise ValueError
+                        start = max(size - suffix_length, 0)
+                        end = size - 1
+                except ValueError:
+                    self._send_range_not_satisfiable(size)
+                    source.close()
+                    return
+                if start < 0 or start >= size or end < start:
+                    self._send_range_not_satisfiable(size)
+                    source.close()
+                    return
+                end = min(end, size - 1)
+                partial = True
+        length = end - start + 1 if size else 0
         with source:
-            self.send_response(200)
+            if partial:
+                source.seek(start)
+            self.send_response(206 if partial else 200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(size))
+            if allow_range:
+                self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(length))
             self.send_header("Cache-Control", "private, max-age=60")
             self.end_headers()
-            shutil.copyfileobj(source, self.wfile)
+            remaining = length
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
+    def _send_range_not_satisfiable(self, size: int) -> None:
+        self.send_response(416)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Range", f"bytes */{size}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send_json(self, status: int, value: object) -> None:
         self._send_bytes(status, json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json")
@@ -361,7 +593,9 @@ def serve(workspace: Workspace | None = None, host: str = "127.0.0.1", port: int
         server.registry.add(workspace)
         server.start_indexing(server.default_handle)
     suffix = f"?workspace={server.default_handle}" if server.default_handle else ""
-    print(f"Archive Indexation UI: http://{host}:{server.server_port}/{suffix}")
+    url = f"http://{host}:{server.server_port}/{suffix}"
+    print(f"Archive Indexation UI: {url}")
+    webbrowser.open(url, new=2)
     try:
         server.serve_forever()
     finally:
@@ -370,6 +604,12 @@ def serve(workspace: Workspace | None = None, host: str = "127.0.0.1", port: int
 
 def _ui_html() -> str:
     return files("archive_index.web").joinpath("index.html").read_text(encoding="utf-8")
+
+
+def _ui_resource(name: str) -> str:
+    if name not in {"app.css", "app.js"}:
+        raise ResourceNotFound("resource not found")
+    return files("archive_index.web").joinpath(name).read_text(encoding="utf-8")
 
 
 def _pick_workspace_path() -> str:
@@ -425,8 +665,16 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         raise InvalidRequest("media_type must be image or video")
     sort_by, direction = _sort_values(query)
     search = _first(query, "q", "").strip()
+    representatives_only = _first(query, "representatives", "").lower() in {"1", "true", "yes"}
+    recommended_only = _first(query, "recommended", "").lower() in {"1", "true", "yes"}
+    decision = _first(query, "decision", "").lower()
+    if decision and decision not in {"undecided", "selected", "rejected"}:
+        raise InvalidRequest("decision must be undecided, selected, or rejected")
     if len(search) > 200:
         raise InvalidRequest("q is too long")
+
+    representative_ids, grouping_available = _current_representatives(workspace)
+    recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
 
     clauses = ["1 = 1"]
     params: list[object] = []
@@ -448,6 +696,23 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             "AND LOWER(pf_search.filename) LIKE ? ESCAPE '\\')"
         )
         params.append(f"%{_like_value(search.casefold())}%")
+    if representatives_only:
+        if not representative_ids:
+            clauses.append("1 = 0")
+        else:
+            placeholders = ",".join("?" for _ in representative_ids)
+            clauses.append(f"la.id IN ({placeholders})")
+            params.extend(sorted(representative_ids))
+    if recommended_only:
+        if not recommendation_ids:
+            clauses.append("1 = 0")
+        else:
+            placeholders = ",".join("?" for _ in recommendation_ids)
+            clauses.append(f"la.id IN ({placeholders})")
+            params.extend(sorted(recommendation_ids))
+    if decision:
+        clauses.append("la.selection_state = ?")
+        params.append(decision)
     where = " AND ".join(clauses)
     connection = workspace.connect()
     try:
@@ -474,14 +739,252 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         ).fetchall()
     finally:
         connection.close()
+    physical_by_asset = _physical_rows_for_assets(workspace, [row["id"] for row in rows])
     return {
-        "items": [_asset_summary(workspace, row, handle) for row in rows],
+        "items": [
+            _asset_summary(
+                workspace,
+                row,
+                handle,
+                physical_by_asset.get(row["id"], []),
+                row["id"] in representative_ids,
+                row["id"] in recommendation_ids,
+                recommendation_run_id,
+            )
+            for row in rows
+        ],
         "page": page,
         "page_size": page_size,
         "total": total,
         "has_next": page * page_size < total,
         "sort_by": sort_by,
         "direction": direction,
+        "representatives_only": representatives_only,
+        "grouping_available": grouping_available,
+        "recommended_only": recommended_only,
+        "decision": decision or None,
+        "recommendation_run_id": recommendation_run_id,
+    }
+
+
+def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
+    page = _positive_int(_first(query, "page", "1"), "page")
+    page_size = min(_positive_int(_first(query, "page_size", "10"), "page_size"), 60)
+    connection = workspace.connect()
+    try:
+        active = connection.execute(
+            """
+            SELECT gr.id, gr.algorithm, gr.version, gr.settings_json
+            FROM workspace_grouping AS wg
+            JOIN grouping_run AS gr ON gr.id = wg.active_run_id
+            WHERE wg.id = 1
+            """
+        ).fetchone()
+        if active is None:
+            return {
+                "run_id": None, "groups": [], "page": page, "page_size": page_size,
+                "total": 0, "has_next": False,
+            }
+        condition = ""
+        total = connection.execute(
+            f"SELECT COUNT(*) FROM strict_group WHERE run_id = ? {condition}", (active["id"],)
+        ).fetchone()[0]
+        group_rows = connection.execute(
+            f"""
+            SELECT * FROM strict_group
+            WHERE run_id = ? {condition}
+            ORDER BY CASE WHEN first_capture_time IS NULL THEN 1 ELSE 0 END,
+                     first_capture_time, group_id
+            LIMIT ? OFFSET ?
+            """,
+            (active["id"], page_size, (page - 1) * page_size),
+        ).fetchall()
+        group_ids = [row["group_id"] for row in group_rows]
+        if not group_ids:
+            members = []
+        else:
+            placeholders = ",".join("?" for _ in group_ids)
+            members = connection.execute(
+                f"""
+                SELECT sgm.*, la.*
+                FROM strict_group_member AS sgm
+                JOIN logical_asset AS la ON la.id = sgm.logical_asset_id
+                WHERE sgm.run_id = ? AND sgm.group_id IN ({placeholders})
+                ORDER BY sgm.group_id, sgm.member_order
+                """,
+                [active["id"], *group_ids],
+            ).fetchall()
+    finally:
+        connection.close()
+    member_asset_ids = [row["logical_asset_id"] for row in members]
+    physical_by_asset = _physical_rows_for_assets(workspace, member_asset_ids)
+    recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+    members_by_group: dict[str, list[dict[str, object]]] = {group_id: [] for group_id in group_ids}
+    for row in members:
+        summary = _asset_summary(
+            workspace,
+            row,
+            handle,
+            physical_by_asset.get(row["logical_asset_id"], []),
+            False,
+            row["logical_asset_id"] in recommendation_ids,
+            recommendation_run_id,
+        )
+        members_by_group[row["group_id"]].append({"asset": summary, "member_order": row["member_order"]})
+    response_groups = []
+    for index, row in enumerate(group_rows, start=(page - 1) * page_size + 1):
+        group_members = members_by_group[row["group_id"]]
+        ranked = sorted(
+            group_members,
+            key=lambda member: (
+                member["asset"]["quality_score"] is None,
+                -(member["asset"]["quality_score"] or 0),
+                member["member_order"],
+            ),
+        )
+        representative_id = ranked[0]["asset"]["asset_id"] if ranked else None
+        response_groups.append(
+            {
+                "group_id": row["group_id"],
+                "label": f"Group {index}",
+                "member_count": row["member_count"],
+                "first_capture_time": row["first_capture_time"],
+                "representative_asset_id": representative_id,
+                "members": [
+                    {**member["asset"], "is_representative": member["asset"]["asset_id"] == representative_id}
+                    for member in group_members
+                ],
+            }
+        )
+    return {
+        "run_id": active["id"],
+        "algorithm": active["algorithm"],
+        "version": active["version"],
+        "settings": _json_or_none(active["settings_json"]),
+        "groups": response_groups,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_next": page * page_size < total,
+    }
+
+
+def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
+    connection = workspace.connect()
+    try:
+        active = connection.execute(
+            "SELECT active_run_id FROM workspace_grouping WHERE id = 1"
+        ).fetchone()
+        if active is None:
+            return set(), False
+        rows = connection.execute(
+            """
+            SELECT sgm.group_id, sgm.logical_asset_id, sgm.member_order,
+                   MAX(pf.quality_score) AS quality_score
+            FROM strict_group_member AS sgm
+            LEFT JOIN physical_file AS pf ON pf.logical_asset_id = sgm.logical_asset_id
+            WHERE sgm.run_id = ?
+            GROUP BY sgm.group_id, sgm.logical_asset_id, sgm.member_order
+            """,
+            (active["active_run_id"],),
+        ).fetchall()
+    finally:
+        connection.close()
+    by_group: dict[str, list] = {}
+    for row in rows:
+        by_group.setdefault(row["group_id"], []).append(row)
+    representatives = set()
+    for members in by_group.values():
+        representative = sorted(
+            members,
+            key=lambda row: (
+                row["quality_score"] is None,
+                -(row["quality_score"] or 0),
+                row["member_order"],
+                row["logical_asset_id"],
+            ),
+        )[0]
+        representatives.add(representative["logical_asset_id"])
+    return representatives, True
+
+
+def _current_recommendations(workspace: Workspace) -> tuple[set[str], str | None]:
+    connection = workspace.connect()
+    try:
+        active = connection.execute(
+            "SELECT active_run_id FROM workspace_recommendation WHERE id = 1"
+        ).fetchone()
+        if active is None or active["active_run_id"] is None:
+            return set(), None
+        rows = connection.execute(
+            "SELECT logical_asset_id FROM asset_recommendation WHERE run_id = ? AND auto_recommended = 1",
+            (active["active_run_id"],),
+        ).fetchall()
+    finally:
+        connection.close()
+    return {row["logical_asset_id"] for row in rows}, active["active_run_id"]
+
+
+def _recommendations(workspace: Workspace) -> dict[str, object]:
+    connection = workspace.connect()
+    try:
+        active = connection.execute(
+            """
+            SELECT rr.id, rr.algorithm, rr.version, rr.settings_json, rr.created_at, rr.completed_at
+            FROM workspace_recommendation AS wr
+            JOIN recommendation_run AS rr ON rr.id = wr.active_run_id
+            WHERE wr.id = 1
+            """
+        ).fetchone()
+        if active is None:
+            return {"run_id": None, "available": False, "counts": {}}
+        counts = {
+            "assets": connection.execute(
+                "SELECT COUNT(*) FROM asset_recommendation WHERE run_id = ?", (active["id"],)
+            ).fetchone()[0],
+            "recommended": connection.execute(
+                "SELECT COUNT(*) FROM asset_recommendation WHERE run_id = ? AND auto_recommended = 1",
+                (active["id"],),
+            ).fetchone()[0],
+            "selected": connection.execute(
+                "SELECT COUNT(*) FROM logical_asset WHERE selection_state = 'selected'"
+            ).fetchone()[0],
+            "rejected": connection.execute(
+                "SELECT COUNT(*) FROM logical_asset WHERE selection_state = 'rejected'"
+            ).fetchone()[0],
+            "undecided": connection.execute(
+                "SELECT COUNT(*) FROM logical_asset WHERE selection_state = 'undecided'"
+            ).fetchone()[0],
+        }
+    finally:
+        connection.close()
+    return {
+        "run_id": active["id"],
+        "available": True,
+        "algorithm": active["algorithm"],
+        "version": active["version"],
+        "settings": _json_or_none(active["settings_json"]),
+        "created_at": active["created_at"],
+        "completed_at": active["completed_at"],
+        "counts": counts,
+    }
+
+
+def _set_user_decision(workspace: Workspace, asset_id: str, decision: str) -> dict[str, object]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with workspace.transaction() as connection:
+        cursor = connection.execute(
+            "UPDATE logical_asset SET selection_state = ?, selection_updated_at = ?, updated_at = ? WHERE id = ?",
+            (decision, now, now, asset_id),
+        )
+        if cursor.rowcount != 1:
+            raise ResourceNotFound("asset not found")
+    recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+    return {
+        "asset_id": asset_id,
+        "user_decision": decision,
+        "auto_recommended": asset_id in recommendation_ids,
+        "recommendation_run_id": recommendation_run_id,
     }
 
 
@@ -498,8 +1001,16 @@ def _sort_values(query: Mapping[str, list[str]]) -> tuple[str, str]:
     return sort_by, direction.upper()
 
 
-def _asset_summary(workspace: Workspace, asset, handle: str) -> dict[str, object]:
-    physical = _physical_rows(workspace, asset["id"])
+def _asset_summary(
+    workspace: Workspace,
+    asset,
+    handle: str,
+    physical=None,
+    is_representative: bool = False,
+    is_recommended: bool = False,
+    recommendation_run_id: str | None = None,
+) -> dict[str, object]:
+    physical = _physical_rows(workspace, asset["id"]) if physical is None else physical
     representative = sorted(
         physical,
         key=lambda row: (not bool(row["is_online"]), row["media_type"] != "image", row["relative_path"]),
@@ -523,6 +1034,11 @@ def _asset_summary(workspace: Workspace, asset, handle: str) -> dict[str, object
         "original_url": _url(f"/api/files/{online['id']}/original", handle) if online else None,
         "quality_score": max((row["quality_score"] for row in physical if row["quality_score"] is not None), default=None),
         "issues": _asset_issues(physical),
+        "is_representative": is_representative,
+        "auto_recommended": is_recommended,
+        "user_decision": asset["selection_state"],
+        "user_decision_updated_at": asset["selection_updated_at"],
+        "recommendation_run_id": recommendation_run_id,
     }
 
 
@@ -549,11 +1065,16 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
     if asset is None:
         raise ResourceNotFound("asset not found")
     physical = _physical_rows(workspace, asset_id)
+    recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
         "capture_time": asset["capture_time"],
         "capture_time_kind": asset["capture_time_kind"],
+        "auto_recommended": asset_id in recommendation_ids,
+        "user_decision": asset["selection_state"],
+        "user_decision_updated_at": asset["selection_updated_at"],
+        "recommendation_run_id": recommendation_run_id,
         "physical_files": [
             {
                 "id": row["id"],
@@ -609,6 +1130,39 @@ def _physical_rows(workspace: Workspace, asset_id: str):
         ).fetchall()
     finally:
         connection.close()
+
+
+def _physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict[str, list]:
+    if not asset_ids:
+        return {}
+    placeholders = ",".join("?" for _ in asset_ids)
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT pf.*,
+                   metadata.status AS metadata_status, metadata.algorithm AS metadata_algorithm,
+                   metadata.version AS metadata_version, metadata.error_message AS metadata_error,
+                   thumbnail.status AS thumbnail_status, thumbnail.algorithm AS thumbnail_algorithm,
+                   thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
+                   thumbnail.output_path AS thumbnail_output_path,
+                   quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
+                   quality.version AS quality_component_version, quality.error_message AS quality_component_error
+            FROM physical_file AS pf
+            LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
+            LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
+            LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
+            WHERE pf.logical_asset_id IN ({placeholders})
+            ORDER BY pf.logical_asset_id, pf.is_online DESC, pf.relative_path
+            """,
+            asset_ids,
+        ).fetchall()
+    finally:
+        connection.close()
+    grouped: dict[str, list] = {asset_id: [] for asset_id in asset_ids}
+    for row in rows:
+        grouped.setdefault(row["logical_asset_id"], []).append(row)
+    return grouped
 
 
 def _component_info(row, component: str) -> dict[str, object]:

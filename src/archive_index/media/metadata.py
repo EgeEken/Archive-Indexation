@@ -152,21 +152,30 @@ def _capture_time(exif_values: dict[str, Any]) -> tuple[str | None, str | None]:
         value = exif_values.get(key)
         if value is None:
             continue
-        parsed = _parse_exif_datetime(str(value), exif_values.get("OffsetTimeOriginal"))
+        suffix = key.removeprefix("DateTime")
+        offset = exif_values.get(f"OffsetTime{suffix}") or exif_values.get("OffsetTimeOriginal")
+        subsecond = exif_values.get(f"SubSecTime{suffix}") or exif_values.get(f"SubsecTime{suffix}")
+        parsed = _parse_exif_datetime(str(value), offset, subsecond)
         if parsed is not None:
             return parsed
     return None, None
 
 
-def _parse_exif_datetime(value: str, offset: Any) -> tuple[str, str]:
+def _parse_exif_datetime(value: str, offset: Any, subsecond: Any = None) -> tuple[str, str]:
     try:
         parsed = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
     except ValueError:
         return value, "exif_local_unknown"
+    if subsecond is not None:
+        digits = "".join(character for character in str(subsecond) if character.isdigit())[:6]
+        if digits:
+            parsed = parsed.replace(microsecond=int(digits.ljust(6, "0")))
     timezone_offset = _parse_offset(offset)
     if timezone_offset is None:
-        return parsed.isoformat(timespec="seconds"), "exif_local_unknown"
-    return parsed.replace(tzinfo=timezone_offset).isoformat(timespec="seconds"), "exif_offset"
+        precision = "microseconds" if parsed.microsecond else "seconds"
+        return parsed.isoformat(timespec=precision), "exif_local_unknown"
+    precision = "microseconds" if parsed.microsecond else "seconds"
+    return parsed.replace(tzinfo=timezone_offset).isoformat(timespec=precision), "exif_offset"
 
 
 def _parse_offset(value: Any) -> timezone | None:

@@ -16,21 +16,17 @@ This file is the production handoff/specification for future coding agents. `Ear
 
 # Current project status
 
-Requirements discovery is sufficiently complete to begin implementation.
+The production foundation and current Phase 0–5 work are implemented outside `Early Testing/`:
 
-The next work should be a **fresh production core built from scratch outside `Early Testing/`**. Reuse ideas, tests, formulas, UI interactions, and small isolated techniques where they remain appropriate, but do not evolve `Early Testing/photo_select.py` into the production architecture.
+1. Phase 0: production package and `uv` setup;
+2. Phase 1: workspace lifecycle and SQLite persistence;
+3. Phase 2: incremental, source-safe scanner;
+4. Phase 3: metadata, thumbnails, and persistent jobs;
+5. Phase 4: localhost workspace/gallery UI;
+6. Phase 5: fixed technical-quality baseline;
+7. subsequent UI/UX improvements, image viewer, workspace registry/picker, and video center-frame thumbnails.
 
-The first production milestone should deliberately prioritize persistence, safety, and incremental behavior over ML features:
-
-1. workspace creation/opening;
-2. `.archive-index/index.sqlite`;
-3. recursive media discovery;
-4. logical assets / physical files;
-5. metadata + hashes + per-component state;
-6. resumable jobs;
-7. a basic localhost gallery.
-
-Semantic embeddings, production grouping, automatic selection, and compression should sit on that foundation rather than define it.
+The real Kadıköy validation workspace contains 1,369 images. Its production indexing and thumbnail performance checkpoint was completed and accepted; the current application uses reduced JPEG decoding and shared image processing where applicable. Phase 6 strict near-identical grouping is implemented and accepted for the Phase 7 review baseline. Its current correction uses versioned Pillow-only dHash, 16×16 normalized luminance, and 32×32 RGB histograms with a 10-second chronology window, complete-linkage membership, and fixed gates (dHash ≤ 8, luminance RMSE ≤ 0.16, RGB histogram L1 ≤ 0.18). Candidate diagnostics are available through `archive-index group-diagnostics` and app-owned JSON under `.archive-index/diagnostics/`. The UI includes all strict groups, representative markers, and a representative-only gallery filter. Phase 7 now adds versioned conservative automatic recommendations, persisted human decisions, selection filters, direct review controls, and shared-job rebuilds without changing group membership or the technical-quality algorithm. Original-media serving now supports safe single-range video requests; browser playback still depends on the source codec. Semantic embeddings/search, compression, OCR, faces, RAW/JPEG pairing, and semantic clustering remain later phases.
 
 ---
 
@@ -1236,6 +1232,8 @@ Then benchmark at least one lightweight learned/IQA alternative if practical.
 ---
 
 ## Phase 6 — strict near-identical grouping
+
+This is the current review gate before Phase 7. Large-video HTTP Range support for efficient playback/seeking remains a deferred video-viewer concern and is not a Phase 6 blocker.
 
 ### Goal
 

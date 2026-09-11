@@ -15,6 +15,7 @@ from archive_index.indexing.media_pipeline import index_workspace, invalidate_co
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
+from archive_index.api.server import WorkspaceHTTPServer
 
 
 class MediaPipelineTests(unittest.TestCase):
@@ -30,6 +31,8 @@ class MediaPipelineTests(unittest.TestCase):
             first = index_workspace(workspace)
             self.assertEqual((first.succeeded, first.errors), (1, 0))
             row, states = _file_and_states(workspace)
+            self.assertEqual(states["thumbnail"]["algorithm"], "pillow-reduced-jpeg")
+            self.assertEqual(states["thumbnail"]["version"], "pillow-jpeg-v1")
             thumbnail_path = workspace.index_path(states["thumbnail"]["output_path"])
             self.assertTrue(thumbnail_path.is_file())
             with Image.open(thumbnail_path) as thumbnail:
@@ -177,7 +180,7 @@ class MediaPipelineTests(unittest.TestCase):
                     (file_id,),
                 )
             self.assertEqual(store.recover_interrupted(), 1)
-            self.assertEqual(store.get(job_id)["status"], "pending")
+            self.assertEqual(store.get(job_id)["status"], "interrupted")
 
             resumed = index_workspace(workspace, job_id=job_id)
             self.assertEqual(resumed.job_id, job_id)
@@ -211,6 +214,42 @@ class MediaPipelineTests(unittest.TestCase):
                 [call.args[0].name for call in generator.call_args_list],
                 ["b.jpg"],
             )
+
+    def test_workspace_open_recovers_interrupted_jobs_and_components(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "photo.jpg", size=(100, 100))
+            workspace = Workspace.create(root)
+            scan(workspace)
+            with closing(workspace.connect()) as connection:
+                file_id = connection.execute("SELECT id FROM physical_file").fetchone()[0]
+            store = JobStore(workspace)
+            job_id = store.create("media_index")
+            store.start(job_id)
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO component_state(physical_file_id, component, status, algorithm, version) VALUES (?, 'metadata', 'running', 'old', '1')",
+                    (file_id,),
+                )
+                connection.execute(
+                    "INSERT INTO component_state(physical_file_id, component, status, algorithm, version) VALUES (?, 'thumbnail', 'complete', 'old', '1')",
+                    (file_id,),
+                )
+            server = WorkspaceHTTPServer(("127.0.0.1", 0), workspace)
+            try:
+                self.assertEqual(store.get(job_id)["status"], "interrupted")
+                with closing(workspace.connect()) as connection:
+                    states = {
+                        row[0]: row[1]
+                        for row in connection.execute(
+                            "SELECT component, status FROM component_state WHERE physical_file_id = ?",
+                            (file_id,),
+                        ).fetchall()
+                    }
+                self.assertEqual(states, {"metadata": "pending", "thumbnail": "complete"})
+            finally:
+                server.server_close()
 
     def test_video_probe_parser_preserves_basic_stream_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -286,6 +325,10 @@ class MediaPipelineTests(unittest.TestCase):
             self.assertEqual(states["thumbnail"]["status"], "complete")
             self.assertEqual(states["quality"]["status"], "not_requested")
 
+            self.assertEqual(states["thumbnail"]["algorithm"], "ffmpeg-center-frame-jpeg")
+            self.assertEqual(states["thumbnail"]["version"], "ffmpeg-center-frame-jpeg-v1")
+            self.assertIn("center_frame", states["thumbnail"]["settings_json"])
+
     def test_exif_local_time_without_offset_is_not_made_utc(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "local.jpg"
@@ -318,6 +361,22 @@ class MediaPipelineTests(unittest.TestCase):
             self.assertEqual(values["ExposureTime"], [1, 4000])
             self.assertEqual(values["ISOSpeedRatings"], 2500)
             self.assertEqual(values["FocalLength"], [200, 1])
+
+    def test_exif_subseconds_are_preserved_for_capture_ordering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "subsecond.jpg"
+            image = Image.new("RGB", (80, 60), color=(80, 140, 210))
+            exif = image.getexif()
+            exif[36867] = "2024:01:02 03:04:05"
+            exif[36881] = "+03:00"
+            exif[ExifTags.IFD.Exif] = {37521: "123"}
+            image.save(path, format="JPEG", exif=exif)
+
+            from archive_index.media.metadata import extract_metadata
+
+            result = extract_metadata(path, "image")
+            self.assertEqual(result.capture_time, "2024-01-02T03:04:05.123000+03:00")
+            self.assertEqual(result.capture_time_kind, "exif_offset")
 
     def test_discovered_decoder_gap_is_reported_without_aborting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

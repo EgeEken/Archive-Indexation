@@ -18,4 +18,4 @@ archive-index = "archive_index.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"archive_index.web" = ["index.html"]
+"archive_index.web" = ["index.html", "app.css", "app.js"]
