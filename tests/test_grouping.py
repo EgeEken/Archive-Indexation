@@ -36,7 +36,23 @@ class GroupingTests(unittest.TestCase):
     def test_dissimilar_images_one_tenth_second_apart_do_not_group(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "other"})
         self._set_times(workspace, {"a.jpg": "2026-09-03T12:00:00+03:00", "b.jpg": "2026-09-03T12:00:00.100000+03:00"})
-        self.assertEqual(build_groups(workspace).multi_image_groups, 0)
+        result = build_groups(workspace)
+        self.assertEqual((result.multi_image_groups, result.tier_a_pair_relations, result.tier_a_veto_rejections), (0, 1, 1))
+
+    def test_high_speed_burst_chain_allows_non_complete_linkage(self) -> None:
+        workspace = Workspace.create(Path(tempfile.mkdtemp()) / "archive")
+        def record(asset_id: str, seconds: float, dhash: str, value: float) -> AssetRecord:
+            feature = FeatureRecord(asset_id, asset_id, dhash, (value,) * 4, (value,) * 24)
+            return AssetRecord(asset_id, None, "exif_offset", seconds, "absolute", feature, None)
+        records = [
+            record("A", 0.0, "0000000000000000", 0.0),
+            record("B", 0.1, "00000000000000ff", 0.1),
+            record("C", 0.2, "000000000000ffff", 0.2),
+        ]
+        with patch.object(grouping, "_asset_records", return_value=records), patch.object(grouping, "_activate_groups"):
+            result = build_groups(workspace)
+        self.assertEqual((result.group_sizes, result.tier_a_pair_relations, result.tier_a_burst_chains), ((3,), 2, 1))
+        self.assertFalse(grouping._visual_match(records[0].feature, records[2].feature))
 
     def test_identical_images_outside_temporal_window_do_not_group(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene"})

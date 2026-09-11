@@ -34,20 +34,20 @@ class RecommendationTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(sum(row[1] for row in rows), 1)
 
-    def test_group_primary_is_normal_and_optional_members_need_quality_and_diversity(self) -> None:
+    def test_recommendation_is_only_the_current_representative(self) -> None:
         base = VisualFeature("0" * 16, (0.0, 0.0), (0.0, 0.0, 0.0))
         distinct_one = VisualFeature("000000000000001f", (0.09, 0.0), (0.09, 0.0, 0.0))
         distinct_two = VisualFeature("000000000000003f", (0.18, 0.0), (0.18, 0.0, 0.0))
         candidates = [
-            Candidate("group", "a", 0, .80, base),
+            Candidate("group", "a", 0, .80, base, True),
             Candidate("group", "b", 1, .75, distinct_one),
             Candidate("group", "c", 2, .73, distinct_two),
         ]
         decisions = _recommend_group("group", candidates)
-        self.assertEqual([row[1] for row in decisions if row[2]], ["a", "b", "c"])
+        self.assertEqual([row[1] for row in decisions if row[2]], ["a"])
 
-        same = [Candidate("group", "a", 0, .80, base), Candidate("group", "b", 1, .75, base)]
-        self.assertEqual(sum(row[2] for row in _recommend_group("group", same)), 1)
+        below_threshold = [Candidate("group", "a", 0, .59, base, True)]
+        self.assertEqual(sum(row[2] for row in _recommend_group("group", below_threshold)), 0)
 
     def test_manual_decision_survives_recommendation_rebuild(self) -> None:
         workspace = self._workspace({"a.jpg": "scene"})
@@ -57,13 +57,33 @@ class RecommendationTests(unittest.TestCase):
         first = build_recommendations(workspace)
         with closing(workspace.connect()) as connection:
             asset_id = connection.execute("SELECT id FROM logical_asset").fetchone()[0]
+            grouping_run_id = connection.execute("SELECT active_run_id FROM workspace_grouping WHERE id = 1").fetchone()[0]
+            source_grouping_run_id = connection.execute("SELECT source_grouping_run_id FROM recommendation_run WHERE id = (SELECT active_run_id FROM workspace_recommendation WHERE id = 1)").fetchone()[0]
+        self.assertEqual(source_grouping_run_id, grouping_run_id)
         with workspace.transaction() as connection:
             connection.execute("UPDATE logical_asset SET selection_state = 'rejected' WHERE id = ?", (asset_id,))
         second = build_recommendations(workspace)
         with closing(workspace.connect()) as connection:
             decision = connection.execute("SELECT selection_state FROM logical_asset WHERE id = ?", (asset_id,)).fetchone()[0]
             version = connection.execute("SELECT version FROM recommendation_run WHERE id = (SELECT active_run_id FROM workspace_recommendation WHERE id = 1)").fetchone()[0]
-        self.assertEqual((first.auto_recommended, second.auto_recommended, decision, version), (1, 1, "rejected", "1"))
+        self.assertEqual((first.auto_recommended, second.auto_recommended, decision, version), (1, 1, "rejected", "2"))
+
+    def test_group_rebuild_invalidates_old_recommendations_without_erasing_decision(self) -> None:
+        workspace = self._workspace({"a.jpg": "scene"})
+        self._set_times(workspace, {"a.jpg": "2026-09-03T12:00:00+03:00"})
+        self._set_quality(workspace, {"a.jpg": .8})
+        build_groups(workspace)
+        build_recommendations(workspace)
+        with closing(workspace.connect()) as connection:
+            asset_id = connection.execute("SELECT id FROM logical_asset").fetchone()[0]
+        with workspace.transaction() as connection:
+            connection.execute("UPDATE logical_asset SET selection_state = 'selected' WHERE id = ?", (asset_id,))
+        build_groups(workspace)
+        with closing(workspace.connect()) as connection:
+            active_recommendation = connection.execute("SELECT active_run_id FROM workspace_recommendation WHERE id = 1").fetchone()[0]
+            decision = connection.execute("SELECT selection_state FROM logical_asset WHERE id = ?", (asset_id,)).fetchone()[0]
+        self.assertIsNone(active_recommendation)
+        self.assertEqual(decision, "selected")
 
     def test_cancelled_rebuild_preserves_previous_recommendation_run(self) -> None:
         workspace = self._workspace({"a.jpg": "scene"})
@@ -121,12 +141,12 @@ class RecommendationTests(unittest.TestCase):
         with closing(workspace.connect()) as connection:
             grouping_run = connection.execute("SELECT active_run_id FROM workspace_grouping WHERE id = 1").fetchone()[0]
             quality_score = connection.execute("SELECT quality_score FROM physical_file").fetchone()[0]
-        with patch("archive_index.indexing.recommendation.RECOMMENDATION_VERSION", "2"):
+        with patch("archive_index.indexing.recommendation.RECOMMENDATION_VERSION", "3"):
             build_recommendations(workspace)
         with closing(workspace.connect()) as connection:
             self.assertEqual(grouping_run, connection.execute("SELECT active_run_id FROM workspace_grouping WHERE id = 1").fetchone()[0])
             self.assertEqual(quality_score, connection.execute("SELECT quality_score FROM physical_file").fetchone()[0])
-            self.assertEqual(connection.execute("SELECT version FROM recommendation_run WHERE id = (SELECT active_run_id FROM workspace_recommendation WHERE id = 1)").fetchone()[0], "2")
+            self.assertEqual(connection.execute("SELECT version FROM recommendation_run WHERE id = (SELECT active_run_id FROM workspace_recommendation WHERE id = 1)").fetchone()[0], "3")
 
     def test_one_bad_cached_feature_does_not_abort_recommendations(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene"})

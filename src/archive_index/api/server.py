@@ -252,6 +252,16 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
             if group_result.cancelled:
                 return
+            recommendation_job_id = JobStore(workspace).create("recommendations")
+            with self._active_lock:
+                self._cancel_events[(handle, recommendation_job_id)] = cancel_event
+            job_ids.append(recommendation_job_id)
+            current_job_id = recommendation_job_id
+            recommendation_result = build_recommendations(
+                workspace, job_id=recommendation_job_id, cancel_event=cancel_event
+            )
+            if recommendation_result.cancelled:
+                return
         except Exception:
             LOGGER.exception("workspace grouping failed")
             try:
@@ -665,9 +675,18 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         raise InvalidRequest("media_type must be image or video")
     sort_by, direction = _sort_values(query)
     search = _first(query, "q", "").strip()
-    representatives_only = _first(query, "representatives", "").lower() in {"1", "true", "yes"}
-    recommended_only = _first(query, "recommended", "").lower() in {"1", "true", "yes"}
-    decision = _first(query, "decision", "").lower()
+    selection_filter = _first(query, "selection", "").lower()
+    if selection_filter and selection_filter not in {"all", "representatives", "recommended", "selected", "rejected", "undecided"}:
+        raise InvalidRequest("selection must be all, representatives, recommended, selected, rejected, or undecided")
+    representatives_only = (
+        selection_filter == "representatives"
+        or _first(query, "representatives", "").lower() in {"1", "true", "yes"}
+    )
+    recommended_only = (
+        selection_filter == "recommended"
+        or _first(query, "recommended", "").lower() in {"1", "true", "yes"}
+    )
+    decision = selection_filter if selection_filter in {"selected", "rejected", "undecided"} else _first(query, "decision", "").lower()
     if decision and decision not in {"undecided", "selected", "rejected"}:
         raise InvalidRequest("decision must be undecided, selected, or rejected")
     if len(search) > 200:
@@ -763,6 +782,7 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         "grouping_available": grouping_available,
         "recommended_only": recommended_only,
         "decision": decision or None,
+        "selection": selection_filter or ("representatives" if representatives_only else "recommended" if recommended_only else decision or "all"),
         "recommendation_run_id": recommendation_run_id,
     }
 
@@ -834,15 +854,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     response_groups = []
     for index, row in enumerate(group_rows, start=(page - 1) * page_size + 1):
         group_members = members_by_group[row["group_id"]]
-        ranked = sorted(
-            group_members,
-            key=lambda member: (
-                member["asset"]["quality_score"] is None,
-                -(member["asset"]["quality_score"] or 0),
-                member["member_order"],
-            ),
-        )
-        representative_id = ranked[0]["asset"]["asset_id"] if ranked else None
+        representative_id = row["representative_logical_asset_id"]
         response_groups.append(
             {
                 "group_id": row["group_id"],
@@ -879,42 +891,34 @@ def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
             return set(), False
         rows = connection.execute(
             """
-            SELECT sgm.group_id, sgm.logical_asset_id, sgm.member_order,
-                   MAX(pf.quality_score) AS quality_score
-            FROM strict_group_member AS sgm
-            LEFT JOIN physical_file AS pf ON pf.logical_asset_id = sgm.logical_asset_id
-            WHERE sgm.run_id = ?
-            GROUP BY sgm.group_id, sgm.logical_asset_id, sgm.member_order
+            SELECT representative_logical_asset_id
+            FROM strict_group
+            WHERE run_id = ?
             """,
             (active["active_run_id"],),
         ).fetchall()
     finally:
         connection.close()
-    by_group: dict[str, list] = {}
-    for row in rows:
-        by_group.setdefault(row["group_id"], []).append(row)
-    representatives = set()
-    for members in by_group.values():
-        representative = sorted(
-            members,
-            key=lambda row: (
-                row["quality_score"] is None,
-                -(row["quality_score"] or 0),
-                row["member_order"],
-                row["logical_asset_id"],
-            ),
-        )[0]
-        representatives.add(representative["logical_asset_id"])
-    return representatives, True
+    return {row["representative_logical_asset_id"] for row in rows}, True
 
 
 def _current_recommendations(workspace: Workspace) -> tuple[set[str], str | None]:
     connection = workspace.connect()
     try:
         active = connection.execute(
-            "SELECT active_run_id FROM workspace_recommendation WHERE id = 1"
+            """
+            SELECT wr.active_run_id, rr.source_grouping_run_id, wg.active_run_id AS grouping_run_id
+            FROM workspace_recommendation AS wr
+            LEFT JOIN recommendation_run AS rr ON rr.id = wr.active_run_id
+            LEFT JOIN workspace_grouping AS wg ON wg.id = 1
+            WHERE wr.id = 1
+            """
         ).fetchone()
-        if active is None or active["active_run_id"] is None:
+        if (
+            active is None
+            or active["active_run_id"] is None
+            or active["source_grouping_run_id"] != active["grouping_run_id"]
+        ):
             return set(), None
         rows = connection.execute(
             "SELECT logical_asset_id FROM asset_recommendation WHERE run_id = ? AND auto_recommended = 1",
@@ -930,13 +934,16 @@ def _recommendations(workspace: Workspace) -> dict[str, object]:
     try:
         active = connection.execute(
             """
-            SELECT rr.id, rr.algorithm, rr.version, rr.settings_json, rr.created_at, rr.completed_at
+            SELECT rr.id, rr.algorithm, rr.version, rr.settings_json,
+                   rr.source_grouping_run_id, rr.created_at, rr.completed_at,
+                   wg.active_run_id AS grouping_run_id
             FROM workspace_recommendation AS wr
             JOIN recommendation_run AS rr ON rr.id = wr.active_run_id
+            LEFT JOIN workspace_grouping AS wg ON wg.id = 1
             WHERE wr.id = 1
             """
         ).fetchone()
-        if active is None:
+        if active is None or active["source_grouping_run_id"] != active["grouping_run_id"]:
             return {"run_id": None, "available": False, "counts": {}}
         counts = {
             "assets": connection.execute(
@@ -966,6 +973,7 @@ def _recommendations(workspace: Workspace) -> dict[str, object]:
         "settings": _json_or_none(active["settings_json"]),
         "created_at": active["created_at"],
         "completed_at": active["completed_at"],
+        "source_grouping_run_id": active["source_grouping_run_id"],
         "counts": counts,
     }
 

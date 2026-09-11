@@ -81,14 +81,22 @@ class ApiTests(unittest.TestCase):
         status, js = _get_bytes(self.base_url, "/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"Strict groups", html)
-        self.assertIn(b"Selection", html)
+        self.assertNotIn(b">Selection<", html)
         self.assertIn(b"Recommended", html)
         self.assertIn(b"viewer-selection", html)
         self.assertIn(b"viewer-info", html)
         self.assertIn(b"viewer-stage", html)
         self.assertIn(b"quality-unsupported", js)
-        self.assertIn(b"Representative", js)
+        self.assertIn(b"representative", js)
+        self.assertIn(b"quality-chip", js)
+        self.assertIn(b"selection-button select", js)
+        self.assertNotIn(b">Clear<", js)
         self.assertIn(b"viewer-smooth", html)
+        self.assertIn(b"const progress = state.viewerZoom > 1", js)
+        self.assertIn(b'event.target === $("viewer-stage")', js)
+        self.assertIn(b'event.target === $("viewer-media")', js)
+        self.assertIn(b"qualityColor", js)
+        self.assertIn(b"technical-reading", js)
         self.assertIn(b"range-label-top", html)
         self.assertIn("aria-label=\"Previous page\"".encode(), html)
         self.assertNotIn(b">Previous<", html)
@@ -102,7 +110,7 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn(b">Apply<", html)
         self.assertNotIn(b"Open thumbnail", html)
         self.assertNotIn(b"scrollIntoView", html)
-        self.assertIn(b"representatives-only", html)
+        self.assertIn(b"selection-filter", html)
 
     def test_logical_asset_detail_exposes_physical_and_component_state(self) -> None:
         with closing(self.workspace.connect()) as connection:
@@ -254,6 +262,31 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(representatives["total"], 2)
         self.assertTrue(all(item["is_representative"] for item in representatives["items"]))
+
+    def test_group_rebuild_refreshes_recommendations_for_new_grouping_run(self) -> None:
+        extract_visual_features(self.workspace)
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE logical_asset SET capture_time = '2026-09-03T12:00:00+03:00', capture_time_kind = 'exif_offset'"
+            )
+            connection.execute("UPDATE physical_file SET quality_score = .8 WHERE media_type = 'image'")
+        status, payload = _post_json(self.base_url, "/api/groups/rebuild")
+        self.assertEqual(status, 202)
+        recommendation_job = None
+        for _ in range(100):
+            _, jobs = _get_json(self.base_url, "/api/jobs?limit=20")
+            recommendation_job = next((job for job in jobs["jobs"] if job["kind"] == "recommendations"), None)
+            if recommendation_job and recommendation_job["status"] in {"complete", "failed", "cancelled"}:
+                break
+            time.sleep(.1)
+        self.assertIsNotNone(recommendation_job)
+        self.assertEqual(recommendation_job["status"], "complete")
+        status, recommendations = _get_json(self.base_url, "/api/recommendations")
+        self.assertEqual((status, recommendations["available"]), (200, True))
+        with closing(self.workspace.connect()) as connection:
+            grouping_run = connection.execute("SELECT active_run_id FROM workspace_grouping WHERE id = 1").fetchone()[0]
+            source_run = connection.execute("SELECT source_grouping_run_id FROM recommendation_run WHERE id = (SELECT active_run_id FROM workspace_recommendation WHERE id = 1)").fetchone()[0]
+        self.assertEqual(source_run, grouping_run)
 
     def test_video_original_supports_safe_byte_ranges(self) -> None:
         with closing(self.workspace.connect()) as connection:

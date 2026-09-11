@@ -16,7 +16,7 @@ This file is the production handoff/specification for future coding agents. `Ear
 
 # Current project status
 
-The production foundation and current Phase 0–5 work are implemented outside `Early Testing/`:
+The production foundation and current Phase 0–7 work are implemented outside `Early Testing/`:
 
 1. Phase 0: production package and `uv` setup;
 2. Phase 1: workspace lifecycle and SQLite persistence;
@@ -24,9 +24,9 @@ The production foundation and current Phase 0–5 work are implemented outside `
 4. Phase 3: metadata, thumbnails, and persistent jobs;
 5. Phase 4: localhost workspace/gallery UI;
 6. Phase 5: fixed technical-quality baseline;
-7. subsequent UI/UX improvements, image viewer, workspace registry/picker, and video center-frame thumbnails.
+7. subsequent UI/UX improvements, image viewer, workspace registry/picker, video center-frame thumbnails, and the current selection/review workflow.
 
-The real Kadıköy validation workspace contains 1,369 images. Its production indexing and thumbnail performance checkpoint was completed and accepted; the current application uses reduced JPEG decoding and shared image processing where applicable. Phase 6 strict near-identical grouping is implemented and accepted for the Phase 7 review baseline. Its current correction uses versioned Pillow-only dHash, 16×16 normalized luminance, and 32×32 RGB histograms with a 10-second chronology window, complete-linkage membership, and fixed gates (dHash ≤ 8, luminance RMSE ≤ 0.16, RGB histogram L1 ≤ 0.18). Candidate diagnostics are available through `archive-index group-diagnostics` and app-owned JSON under `.archive-index/diagnostics/`. The UI includes all strict groups, representative markers, and a representative-only gallery filter. Phase 7 now adds versioned conservative automatic recommendations, persisted human decisions, selection filters, direct review controls, and shared-job rebuilds without changing group membership or the technical-quality algorithm. Original-media serving now supports safe single-range video requests; browser playback still depends on the source codec. Semantic embeddings/search, compression, OCR, faces, RAW/JPEG pairing, and semantic clustering remain later phases.
+The real Kadıköy validation workspace contains 1,369 images. Its production indexing and thumbnail performance checkpoint was completed and accepted; the current application uses reduced JPEG decoding and shared image processing where applicable. Phase 6 strict near-identical grouping is implemented with versioned Pillow-only dHash, 16×16 normalized luminance, and 32×32 RGB histograms. The current grouping rule is a special adjacent ≤0.5-second burst-chain path with a loose catastrophic-difference veto, plus the conservative ≤10-second complete-linkage path for slower relationships. Candidate diagnostics are available through `archive-index group-diagnostics` and app-owned JSON under `.archive-index/diagnostics/`. Phase 7 uses at most one automatic recommendation per strict group: the persisted representative is recommended only when its fixed technical-quality score is at least 0.60. Recommended implies Representative, but a representative is not necessarily recommended. Manual selected/rejected/undecided decisions are persisted separately and visually override, never erase, machine state. Selection is a workflow inside Gallery and Strict groups rather than a separate top-level view. Recommendation provenance records its source grouping run and stale results are not presented after grouping changes. Original-media serving supports safe single-range video requests; browser playback still depends on the source codec. HTTP Range support remains a deferred video-viewer concern, not a grouping requirement. Semantic embeddings/search, compression, OCR, faces, RAW/JPEG pairing, and semantic clustering remain later phases.
 
 ---
 
@@ -1233,7 +1233,7 @@ Then benchmark at least one lightweight learned/IQA alternative if practical.
 
 ## Phase 6 — strict near-identical grouping
 
-This is the current review gate before Phase 7. Large-video HTTP Range support for efficient playback/seeking remains a deferred video-viewer concern and is not a Phase 6 blocker.
+This phase is implemented and remains independently rebuildable. Large-video HTTP Range support for efficient playback/seeking remains a deferred video-viewer concern and is not a Phase 6 blocker.
 
 ### Goal
 
@@ -1251,6 +1251,9 @@ Implement the production selection-group definition independently of semantic se
 - persisted grouping algorithm/version/parameters;
 - group browse/review UI;
 - manual merge/split/correction mechanism can come after automatic results are validated.
+- adjacent capture gaps up to 0.5 seconds use a versioned catastrophic-difference veto and intentional temporal chaining;
+- slower relationships retain the ≤10-second visual complete-linkage rule;
+- videos are excluded.
 
 ### Benchmark against prototype
 
@@ -1301,7 +1304,7 @@ Turn strict groups + quality into a practical assisted-selection tool.
 - auto-preselection version/provenance;
 - usual one-per-group choice;
 - quality threshold for singleton/weak groups;
-- optional second/third candidate only when high-quality and sufficiently distinct;
+- maximum one automatic recommendation per strict group, and only for a current representative above the fixed quality threshold;
 - user toggle/select/deselect;
 - group review UI;
 - rank by quality;
@@ -1309,6 +1312,10 @@ Turn strict groups + quality into a practical assisted-selection tool.
 - global highest-selected / highest-quality views;
 - persistent manual overrides;
 - regeneration must not silently overwrite human decisions.
+
+The current implementation supersedes the optional second/third-candidate design above: automatic recommendation is maximum one current representative per strict group, subject to the fixed minimum quality threshold. Manual selection can still include multiple members of a group.
+
+Recommendation runs record their source grouping run. Recommended is a machine state, Representative is an organizational state, and Selected/Rejected are human decisions. The Gallery and Strict groups views share the same Select/Reject controls and effective-state presentation; there is no separate Selection tab.
 
 ### Important rule
 

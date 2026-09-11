@@ -24,7 +24,7 @@ class WorkspaceTests(unittest.TestCase):
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
 
             self.assertIsNotNone(info["workspace_id"])
-            self.assertEqual(version, 6)
+            self.assertEqual(version, 7)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -164,7 +164,7 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
                 }
-            self.assertEqual(version, 6)
+            self.assertEqual(version, 7)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)
@@ -197,6 +197,10 @@ class WorkspaceTests(unittest.TestCase):
                         ).fetchall()
                     }
                 )
+                self.assertIn(
+                    "source_grouping_run_id",
+                    {row[1] for row in connection.execute("PRAGMA table_info(recommendation_run)").fetchall()},
+                )
 
     def test_open_repairs_phase6_database_missing_selection_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -204,7 +208,7 @@ class WorkspaceTests(unittest.TestCase):
             workspace = Workspace.create(root)
             with closing(sqlite3.connect(workspace.database_path)) as connection:
                 connection.execute("ALTER TABLE logical_asset DROP COLUMN selection_updated_at")
-                connection.execute("PRAGMA user_version = 6")
+                connection.execute("PRAGMA user_version = 7")
                 connection.commit()
 
             Workspace.open(root)

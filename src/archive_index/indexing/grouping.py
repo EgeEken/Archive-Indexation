@@ -21,14 +21,19 @@ FEATURE_COMPONENT = "group_feature"
 FEATURE_ALGORITHM = "pillow-strict-group-features"
 FEATURE_VERSION = "3"
 GROUPING_ALGORITHM = "strict-temporal-complete-linkage"
-GROUPING_VERSION = "3"
+GROUPING_VERSION = "4"
 MAX_CAPTURE_SECONDS = 10.0
+BURST_MAX_CAPTURE_SECONDS = 0.5
 FEATURE_DECODE_SIZE = (160, 160)
 LUMA_FEATURE_SIZE = (16, 16)
 COLOR_FEATURE_SIZE = (32, 32)
 MAX_DHASH_DISTANCE = 8
 MAX_LUMA_RMSE = 0.16
 MAX_COLOR_HIST_DISTANCE = 0.18
+BURST_DHASH_VETO = 28
+BURST_LUMA_VETO = 0.85
+BURST_COLOR_HISTOGRAM_VETO = 0.60
+BURST_VETO_SIGNAL_COUNT = 2
 FEATURE_SETTINGS = {
     "decode_size": FEATURE_DECODE_SIZE,
     "luma_size": LUMA_FEATURE_SIZE,
@@ -43,6 +48,14 @@ GROUPING_SETTINGS = {
     "max_luma_rmse": MAX_LUMA_RMSE,
     "max_color_histogram_l1": MAX_COLOR_HIST_DISTANCE,
     "linkage": "all existing members must match",
+    "burst_max_capture_seconds": BURST_MAX_CAPTURE_SECONDS,
+    "burst_veto": {
+        "dhash_distance": BURST_DHASH_VETO,
+        "luma_rmse": BURST_LUMA_VETO,
+        "color_histogram_l1": BURST_COLOR_HISTOGRAM_VETO,
+        "required_signal_count": BURST_VETO_SIGNAL_COUNT,
+    },
+    "burst_linkage": "adjacent temporal chain with catastrophic-difference veto",
 }
 
 
@@ -83,6 +96,10 @@ class GroupingResult:
     cancelled: bool = False
     accepted_visual_pairs: int = 0
     rejected_temporal_candidates: int = 0
+    tier_a_burst_chains: int = 0
+    tier_a_pair_relations: int = 0
+    tier_a_veto_rejections: int = 0
+    tier_b_matches: int = 0
 
 
 def feature_provenance() -> tuple[str, str, dict[str, object]]:
@@ -195,6 +212,11 @@ def build_groups(
     no_timestamp = 0
     eligible = 0
     accepted_visual_pairs, rejected_temporal_candidates = _candidate_counts(records)
+    tier_a_pair_relations = 0
+    tier_a_veto_rejections = 0
+    tier_a_groups: set[int] = set()
+    tier_b_matches = 0
+    previous_by_semantics: dict[str, tuple[AssetRecord, list[AssetRecord]]] = {}
     try:
         for processed, record in enumerate(records, start=1):
             if cancel_event is not None and cancel_event.is_set():
@@ -204,6 +226,8 @@ def build_groups(
                     identifier, groups, eligible, no_timestamp, feature_failures,
                     True, 0.0, started, accepted_visual_pairs,
                     rejected_temporal_candidates,
+                    len(tier_a_groups), tier_a_pair_relations,
+                    tier_a_veto_rejections, tier_b_matches,
                 )
             if record.capture_value is None:
                 no_timestamp += 1
@@ -211,13 +235,34 @@ def build_groups(
             elif record.feature is None:
                 errors += 1
                 groups.append([record])
+                previous_by_semantics.pop(record.capture_semantics, None)
             else:
                 eligible += 1
                 active = active_by_semantics[record.capture_semantics]
                 active[:] = [group for group in active if _within_time(record, group[-1])]
-                assigned = _assign_record(groups, record, active)
+                previous = previous_by_semantics.get(record.capture_semantics)
+                burst_assigned = False
+                if previous is not None:
+                    previous_record, previous_group = previous
+                    if _burst_adjacent(previous_record, record):
+                        tier_a_pair_relations += 1
+                        if _burst_visual_match(previous_record.feature, record.feature):
+                            previous_group.append(record)
+                            tier_a_groups.add(id(previous_group))
+                            assigned = previous_group
+                            burst_assigned = True
+                        else:
+                            tier_a_veto_rejections += 1
+                if not burst_assigned:
+                    group_count = len(groups)
+                    assigned = _assign_record(groups, record, active)
+                    if len(groups) == group_count:
+                        tier_b_matches += 1
                 if assigned not in active:
                     active.append(assigned)
+                previous_by_semantics[record.capture_semantics] = (record, assigned)
+            if record.capture_value is None:
+                previous_by_semantics.pop(record.capture_semantics, None)
             if processed % 16 == 0:
                 store.checkpoint(identifier, processed, errors)
             if progress is not None:
@@ -228,6 +273,8 @@ def build_groups(
             identifier, groups, eligible, no_timestamp, feature_failures,
             False, 0.0, started, accepted_visual_pairs,
             rejected_temporal_candidates,
+            len(tier_a_groups), tier_a_pair_relations,
+            tier_a_veto_rejections, tier_b_matches,
         )
     except Exception:
         store.fail(identifier)
@@ -237,7 +284,8 @@ def build_groups(
 def _result(
     identifier, groups, eligible, no_timestamp, errors, cancelled,
     feature_seconds, started, accepted_visual_pairs=0,
-    rejected_temporal_candidates=0,
+    rejected_temporal_candidates=0, tier_a_burst_chains=0,
+    tier_a_pair_relations=0, tier_a_veto_rejections=0, tier_b_matches=0,
 ):
     sizes = tuple(sorted((len(group) for group in groups), reverse=True))
     spans = tuple(sorted((_group_span(group) for group in groups if len(group) > 1)))
@@ -246,6 +294,8 @@ def _result(
         sum(size > 1 for size in sizes), sum(size == 1 for size in sizes),
         sizes, spans, feature_seconds, time.perf_counter() - started, cancelled,
         accepted_visual_pairs, rejected_temporal_candidates,
+        tier_a_burst_chains, tier_a_pair_relations, tier_a_veto_rejections,
+        tier_b_matches,
     )
 
 
@@ -362,6 +412,29 @@ def _within_time(left: AssetRecord, right: AssetRecord) -> bool:
     )
 
 
+def _burst_adjacent(left: AssetRecord, right: AssetRecord) -> bool:
+    return (
+        left.capture_value is not None
+        and right.capture_value is not None
+        and left.capture_semantics == right.capture_semantics
+        and 0 <= right.capture_value - left.capture_value <= BURST_MAX_CAPTURE_SECONDS
+    )
+
+
+def _burst_visual_match(left: FeatureRecord | None, right: FeatureRecord | None) -> bool:
+    if left is None or right is None:
+        return False
+    metrics = _visual_metrics(left, right)
+    veto_signals = sum(
+        (
+            metrics["dhash_distance"] >= BURST_DHASH_VETO,
+            metrics["luma_rmse"] >= BURST_LUMA_VETO,
+            metrics["color_histogram_l1"] >= BURST_COLOR_HISTOGRAM_VETO,
+        )
+    )
+    return veto_signals < BURST_VETO_SIGNAL_COUNT
+
+
 def _visual_match(left: FeatureRecord | None, right: FeatureRecord | None, similarities: list[float] | None = None) -> bool:
     if left is None or right is None:
         return False
@@ -422,6 +495,18 @@ def _temporal_candidates(records: list[AssetRecord]):
                 yield left, right
 
 
+def _adjacent_temporal_candidates(records: list[AssetRecord]):
+    by_semantics: dict[str, list[AssetRecord]] = {"absolute": [], "local": []}
+    for record in records:
+        if record.capture_value is not None and record.feature is not None:
+            by_semantics[record.capture_semantics].append(record)
+    for candidates in by_semantics.values():
+        candidates.sort(key=_record_sort_key)
+        for left, right in zip(candidates, candidates[1:]):
+            if right.capture_value - left.capture_value <= BURST_MAX_CAPTURE_SECONDS:
+                yield left, right
+
+
 def grouping_diagnostics(workspace: Workspace, limit: int = 100) -> dict[str, object]:
     records = _asset_records(workspace)
     candidates = []
@@ -438,6 +523,18 @@ def grouping_diagnostics(workspace: Workspace, limit: int = 100) -> dict[str, ob
             }
         )
     rejected = [candidate for candidate in candidates if not candidate["visual_pass"]]
+    adjacent_pairs = {
+        (left.asset_id, right.asset_id)
+        for left, right in _adjacent_temporal_candidates(records)
+    }
+    burst_candidates = [
+        candidate for candidate in candidates
+        if (candidate["left_asset_id"], candidate["right_asset_id"]) in adjacent_pairs
+    ]
+    feature_by_asset = {record.asset_id: record.feature for record in records}
+    burst_vetoed = [candidate for candidate in burst_candidates if not _burst_visual_match(
+        feature_by_asset[candidate["left_asset_id"]], feature_by_asset[candidate["right_asset_id"]]
+    )]
     rejected.sort(
         key=lambda candidate: (
             -sum(candidate[key] for key in ("dhash_pass", "luma_pass", "color_pass")),
@@ -460,6 +557,13 @@ def grouping_diagnostics(workspace: Workspace, limit: int = 100) -> dict[str, ob
         "candidate_count": len(candidates),
         "accepted_visual_pair_count": sum(candidate["visual_pass"] for candidate in candidates),
         "rejected_temporal_candidate_count": len(rejected),
+        "tier_a_pair_relation_count": len(burst_candidates),
+        "tier_a_veto_rejection_count": len(burst_vetoed),
+        "tier_b_candidate_count": len(candidates) - len(burst_candidates),
+        "tier_b_visual_match_count": sum(
+            candidate["visual_pass"] for candidate in candidates
+            if (candidate["left_asset_id"], candidate["right_asset_id"]) not in adjacent_pairs
+        ),
         "candidates": candidates,
         "borderline_rejected": rejected[:max(0, limit)],
     }
@@ -539,6 +643,11 @@ def _activate_groups(workspace: Workspace, groups: list[list[AssetRecord]]) -> N
             """,
             (run_id, now),
         )
+        connection.execute(
+            "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+            (now,),
+        )
+        connection.execute("DELETE FROM recommendation_run")
         connection.execute("DELETE FROM grouping_run WHERE id <> ?", (run_id,))
 
 

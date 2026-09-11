@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -211,6 +211,10 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX asset_recommendation_asset_idx ON asset_recommendation(logical_asset_id)",
     ),
+    7: (
+        "ALTER TABLE recommendation_run ADD COLUMN source_grouping_run_id TEXT REFERENCES grouping_run(id)",
+        "CREATE INDEX recommendation_run_grouping_idx ON recommendation_run(source_grouping_run_id)",
+    ),
 }
 
 
@@ -237,10 +241,9 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
 
 
 def _repair_known_schema_drift(connection: sqlite3.Connection) -> None:
-    columns = {
-        row[1]
-        for row in connection.execute("PRAGMA table_info(logical_asset)").fetchall()
+    logical_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(logical_asset)").fetchall()
     }
-    if "selection_updated_at" not in columns:
+    if "selection_updated_at" not in logical_columns:
         with connection:
             connection.execute("ALTER TABLE logical_asset ADD COLUMN selection_updated_at TEXT")

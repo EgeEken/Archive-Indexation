@@ -11,25 +11,14 @@ from threading import Event
 
 from ..jobs.engine import JobProgress, JobStore
 from ..workspace import Workspace
-from .grouping import FEATURE_ALGORITHM, FEATURE_VERSION, _hamming, _rmse
+from .grouping import FEATURE_ALGORITHM, FEATURE_VERSION
 
-RECOMMENDATION_ALGORITHM = "strict-group-conservative-recommendation"
-RECOMMENDATION_VERSION = "1"
-SINGLETON_MIN_QUALITY = 0.60
-ADDITIONAL_MIN_QUALITY = 0.72
-MAX_RECOMMENDATIONS_PER_GROUP = 3
-DISTINCT_DHASH_DISTANCE = 5
-DISTINCT_LUMA_RMSE = 0.05
-DISTINCT_COLOR_HISTOGRAM_L1 = 0.06
-DISTINCT_SIGNAL_COUNT = 2
+RECOMMENDATION_ALGORITHM = "strict-group-representative-recommendation"
+RECOMMENDATION_VERSION = "2"
+MIN_RECOMMENDATION_QUALITY = 0.60
 RECOMMENDATION_SETTINGS = {
-    "singleton_min_quality": SINGLETON_MIN_QUALITY,
-    "additional_min_quality": ADDITIONAL_MIN_QUALITY,
-    "max_recommendations_per_group": MAX_RECOMMENDATIONS_PER_GROUP,
-    "distinct_dhash_distance": DISTINCT_DHASH_DISTANCE,
-    "distinct_luma_rmse": DISTINCT_LUMA_RMSE,
-    "distinct_color_histogram_l1": DISTINCT_COLOR_HISTOGRAM_L1,
-    "distinct_signal_count": DISTINCT_SIGNAL_COUNT,
+    "minimum_quality": MIN_RECOMMENDATION_QUALITY,
+    "maximum_recommendations_per_group": 1,
     "feature_algorithm": FEATURE_ALGORITHM,
     "feature_version": FEATURE_VERSION,
 }
@@ -49,6 +38,7 @@ class Candidate:
     member_order: int
     quality_score: float | None
     feature: VisualFeature | None
+    is_representative: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,8 +115,8 @@ def build_recommendations(
         settings = json.dumps(RECOMMENDATION_SETTINGS, sort_keys=True)
         with workspace.transaction() as connection:
             connection.execute(
-                "INSERT INTO recommendation_run(id, algorithm, version, settings_json, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (run_id, RECOMMENDATION_ALGORITHM, RECOMMENDATION_VERSION, settings, now, now),
+                "INSERT INTO recommendation_run(id, algorithm, version, settings_json, source_grouping_run_id, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, RECOMMENDATION_ALGORITHM, RECOMMENDATION_VERSION, settings, grouping_run_id, now, now),
             )
             connection.executemany(
                 """
@@ -166,8 +156,11 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
         rows = connection.execute(
             """
             SELECT sgm.group_id, sgm.logical_asset_id, sgm.member_order,
-                   pf.quality_score, vf.dhash, vf.luma_json, vf.color_hist_json
+                   pf.quality_score, vf.dhash, vf.luma_json, vf.color_hist_json,
+                   sg.representative_logical_asset_id
             FROM strict_group_member AS sgm
+            JOIN strict_group AS sg
+                ON sg.run_id = sgm.run_id AND sg.group_id = sgm.group_id
             JOIN logical_asset AS la ON la.id = sgm.logical_asset_id AND la.media_type = 'image'
             LEFT JOIN physical_file AS pf
                 ON pf.logical_asset_id = la.id AND pf.media_type = 'image' AND pf.is_online = 1
@@ -207,6 +200,7 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
                     asset_rows[0]["member_order"],
                     max((row["quality_score"] for row in asset_rows if row["quality_score"] is not None), default=None),
                     feature,
+                    asset_rows[0]["representative_logical_asset_id"] == asset_id,
                 )
             )
         result.append((group_id, sorted(candidates, key=lambda candidate: candidate.member_order)))
@@ -224,52 +218,23 @@ def _recommend_group(group_id: str, candidates: list[Candidate]) -> list[tuple[s
             candidate.asset_id,
         ),
     )
-    recommended: list[Candidate] = []
-    if len(ranked) == 1:
-        if _quality_pass(ranked[0], SINGLETON_MIN_QUALITY):
-            recommended.append(ranked[0])
-    elif ranked:
-        recommended.append(ranked[0])
-        for candidate in ranked[1:]:
-            if len(recommended) >= MAX_RECOMMENDATIONS_PER_GROUP:
-                break
-            if _quality_pass(candidate, ADDITIONAL_MIN_QUALITY) and all(
-                _meaningfully_distinct(candidate, previous) for previous in recommended
-            ):
-                recommended.append(candidate)
+    representative = next((candidate for candidate in ranked if candidate.is_representative), None)
+    recommended = [representative] if representative and _quality_pass(representative) else []
 
     recommended_ids = {candidate.asset_id for candidate in recommended}
     decisions = []
     for rank, candidate in enumerate(recommended, start=1):
-        reason = "singleton_quality_threshold" if len(ranked) == 1 else (
-            "strict_group_primary" if rank == 1 else "strict_group_distinct_additional"
-        )
+        reason = "representative_quality_threshold"
         decisions.append((group_id, candidate.asset_id, 1, rank, int(rank == 1), reason))
     for candidate in candidates:
         if candidate.asset_id not in recommended_ids:
-            reason = "below_singleton_quality" if len(ranked) == 1 else "not_distinct_or_quality"
+            reason = "below_recommendation_quality" if candidate.is_representative else "not_representative"
             decisions.append((group_id, candidate.asset_id, 0, None, 0, reason))
     return decisions
 
 
-def _quality_pass(candidate: Candidate, threshold: float) -> bool:
-    return candidate.quality_score is not None and candidate.quality_score >= threshold
-
-
-def _meaningfully_distinct(left: Candidate, right: Candidate) -> bool:
-    if left.feature is None or right.feature is None:
-        return False
-    dhash = _hamming(left.feature.dhash, right.feature.dhash)
-    luma = _rmse(left.feature.luma, right.feature.luma)
-    color = sum(abs(a - b) for a, b in zip(left.feature.color_hist, right.feature.color_hist))
-    signals = sum(
-        (
-            dhash >= DISTINCT_DHASH_DISTANCE,
-            luma >= DISTINCT_LUMA_RMSE,
-            color >= DISTINCT_COLOR_HISTOGRAM_L1,
-        )
-    )
-    return signals >= DISTINCT_SIGNAL_COUNT
+def _quality_pass(candidate: Candidate) -> bool:
+    return candidate.quality_score is not None and candidate.quality_score >= MIN_RECOMMENDATION_QUALITY
 
 
 def _result(identifier, run_id, groups, decisions, started, cancelled=False):
