@@ -427,6 +427,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(202, {"job_id": job_id})
                 return
+            if request.path == "/api/quality-provider":
+                provider = self._json_body().get("provider")
+                if not isinstance(provider, str):
+                    raise InvalidRequest("quality provider is required")
+                try:
+                    workspace.set_quality_provider(provider)
+                except WorkspaceError as error:
+                    raise InvalidRequest(str(error)) from error
+                self._send_json(200, {"quality_provider": workspace.quality_provider()})
+                return
             parts = request.path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "assets"] and parts[3] == "decision":
                 decision = self._json_body().get("decision")
@@ -744,6 +754,8 @@ def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
         "online_files": online,
         "offline_files": physical_files - online,
         "last_indexed": latest,
+        "quality_provider": workspace.quality_provider(),
+        "quality_providers": ["off", "lar-iqa"],
     }
 
 

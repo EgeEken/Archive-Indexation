@@ -24,13 +24,18 @@ The production foundation and current Phase 0–7 work are implemented outside `
 4. Phase 3: metadata, thumbnails, and persistent jobs;
 5. Phase 4: localhost workspace/gallery UI;
 6. Phase 5: fixed technical-quality baseline;
-7. subsequent UI/UX improvements, image viewer, workspace registry/picker, video center-frame thumbnails, and the current selection/review workflow.
+7. subsequent UI/UX improvements, image viewer, workspace registry/picker, video center-frame thumbnails, and the current selection/review workflow;
+8. Phase 7.5 optional learned image-quality provider integration: official LAR-IQA inference is available through mutually exclusive `quality-lar-cpu` and `quality-lar-cuda` extras, while the base application remains model-free and quality-off by default.
 
 The real Kadıköy validation workspace contains 1,369 images. Its production indexing and thumbnail performance checkpoint was completed and accepted; the current application uses reduced JPEG decoding and shared image processing where applicable. Phase 6 strict near-identical grouping is implemented with versioned Pillow-only dHash, 16×16 normalized luminance, and 32×32 RGB histograms. The current grouping rule is a special adjacent ≤0.5-second burst-chain path with a loose catastrophic-difference veto, plus the conservative ≤10-second complete-linkage path for slower relationships. Candidate diagnostics are available through `archive-index group-diagnostics` and app-owned JSON under `.archive-index/diagnostics/`. Phase 7 uses at most one automatic recommendation per strict group: the persisted representative is recommended only when its fixed technical-quality score is at least 0.60. Recommended implies Representative, but a representative is not necessarily recommended. Manual selected/rejected/undecided decisions are persisted separately and visually override, never erase, machine state. Selection is a workflow inside Gallery and Groups rather than a separate top-level view; Gallery and Groups share the same filtering, sorting, paging, effective-state tags, and Select/Reject actions. Recommendation provenance records its source grouping run and stale results are not presented after grouping changes. Existing workspaces open without an automatic re-index; Re-index is an explicit workspace action, while new folders opened through the home flow start indexing. The home has a recent-workspace registry, reliable Windows folder picker helper, safe recent-entry removal, and optional deletion of only the app-owned `.archive-index/` after confirmation. The viewer supports reusable Details side-panel inspection, Grouping deep links, cursor-centered image zoom, drag panning, and a Smooth pixel-rendering toggle; video playback keeps separate codec/thumbnail limitations and safe single-range serving. HTTP Range support remains a deferred video-viewer concern, not a grouping requirement. Semantic embeddings/search, compression, OCR, faces, RAW/JPEG pairing, and semantic clustering remain later phases.
 
-Index storage now uses a curated, normalized metadata policy: source media remains canonical for full EXIF, while SQLite stores only useful application fields and compact standard GPS scalars. Arbitrary binary EXIF, MakerNote, PrintImageMatching, and unknown vendor blobs must not be persisted or hex-encoded. Image and video thumbnail caches use 320px JPEG output at quality 50 with independently versioned provenance. SQLite compaction is an explicit maintenance operation (`archive-index compact <workspace>`), not part of every Re-index. The schema remains version 7; metadata component version 4 and thumbnail versions `pillow-jpeg-v2` / `ffmpeg-center-frame-jpeg-v2` invalidate only their own derived state. Visual-feature JSON remains unchanged for now; future large numeric embeddings must not be stored as JSON text, and transparent ZIP/unZIP of inactive indexes remains deferred.
+Index storage now uses a curated, normalized metadata policy: source media remains canonical for full EXIF, while SQLite stores only useful application fields and compact standard GPS scalars. Arbitrary binary EXIF, MakerNote, PrintImageMatching, and unknown vendor blobs must not be persisted or hex-encoded. Image and video thumbnail caches use 320px JPEG output at quality 50 with independently versioned provenance. SQLite compaction is an explicit maintenance operation (`archive-index compact <workspace>`), not part of every Re-index. The schema is version 8; metadata component version 4 and thumbnail versions `pillow-jpeg-v2` / `ffmpeg-center-frame-jpeg-v2` invalidate only their own derived state. Visual-feature JSON remains unchanged for now; future large numeric embeddings must not be stored as JSON text, and transparent ZIP/unZIP of inactive indexes remains deferred.
+
+Phase 7.5 quality is an optional provider choice stored per workspace. The active learned provider is the official LAR-IQA two-branch MobileNetV3-Large + KAN checkpoint (`lar-iqa-2branch-kan`, `AIM_Training_2branche_KAN-Head.pt`, SHA-256 `70c243d7324c76df43df8ab6a44eb535ee9f4f3acb928e5dfe9deb2bb3b7b0ab`) with the upstream RGB resize-384 authentic branch, center-crop-1280 synthetic branch, ImageNet normalization, and merged scalar output. Its versioned raw output and canonical [0,1] score are persisted without the old handcrafted component scores; videos remain unsupported. The checkpoint is installed explicitly with `archive-index model install lar-iqa` into the user model cache, never into a repository or workspace, and inference dependencies are optional (`uv sync --extra quality-lar-cpu` or `uv sync --extra quality-lar-cuda`). The two learned-quality extras use explicit official PyTorch indexes and are mutually exclusive; the CUDA extra pins the official Windows CUDA 12.8 wheels. Quality changes invalidate only quality state; recommendation/grouping state and manual decisions follow their existing provenance rules.
 
 Kadıköy storage validation on 1,369 images measured 124.62 MiB SQLite, 31,902 pages, 2,821 freelist pages, 102.47 MiB metadata JSON, 17.03 MiB thumbnails, and 146.10 MiB total `.archive-index` before cleanup. After the metadata/thumbnail rewrite, metadata was 0.88 MiB (675-byte average, 690-byte maximum), thumbnails were 8.34 MiB (6,388-byte average, 6,423-byte median, 14,601-byte maximum), SQLite was still 124.62 MiB with 28,799 freelist pages, and the total index was 137.44 MiB. After explicit compaction, SQLite was 11.88 MiB with 3,042 pages and zero freelist pages; the total `.archive-index` was 24.71 MiB and `PRAGMA integrity_check` returned `ok`.
+
+The initial LAR-IQA validation on the real workspaces produced scores for all 1,369 Kadıköy images and all 171 Filyos images with no failures. Kadıköy: min/median/mean/max `0.497/0.707/0.711/0.890`, p10/p25/p75/p90 `0.624/0.656/0.766/0.804`, and Spearman correlation with the former Pillow baseline `0.458`. Filyos: `0.500/0.716/0.706/0.798`, p10/p25/p75/p90 `0.633/0.677/0.745/0.762`, correlation `0.388`. CPU quality-only processing with cached features used the shared persistent job path and measured about 686 s Kadıköy and 89 s Filyos for the first run, then 6.6 s and 1.2 s cached reruns that reopened no source pixels; the official checkpoint was not silently downloaded.
 
 ---
 
@@ -1345,6 +1350,14 @@ Do not erase manual review when the recommendation algorithm changes.
 
 ---
 
+## Phase 7.5 — optional learned image-quality provider
+
+This phase is implemented. The base application keeps quality scoring off by default and remains usable without the neural dependencies. The mutually exclusive `quality-lar-cpu` and `quality-lar-cuda` extras run the official LAR-IQA two-branch MobileNetV3-Large + KAN inference path with fixed upstream preprocessing and a versioned checkpoint hash. Quality persists raw model output and a canonical [0,1] score; old Pillow component scores are retained only as a benchmark/migration helper. Videos have no quality score. Provider/version changes invalidate only quality state, and any downstream recommendation refresh preserves manual decisions.
+
+The checkpoint is installed explicitly with `archive-index model install lar-iqa` into the user model cache. It is not downloaded during ordinary indexing and is never copied into a workspace or repository. A future quality pass may evaluate calibration, mobile deployment, or a smaller model; Phase 8 must not assume LAR-IQA is the final model.
+
+---
+
 ## Phase 8 — semantic image embeddings and search
 
 ### Goal
@@ -1606,8 +1619,8 @@ These can initially remain manual/unknown rather than risking false associations
 
 ## Quality
 
-- fixed normalization/calibration strategy for the first truly workspace-comparable score;
-- whether/which lightweight learned IQA model provides enough value.
+- calibration of the LAR-IQA output for downstream subjective usefulness;
+- whether a smaller/mobile learned model should supplement or replace LAR-IQA later.
 
 ## Grouping
 

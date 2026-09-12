@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -215,6 +215,11 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE recommendation_run ADD COLUMN source_grouping_run_id TEXT REFERENCES grouping_run(id)",
         "CREATE INDEX recommendation_run_grouping_idx ON recommendation_run(source_grouping_run_id)",
     ),
+    8: (
+        "ALTER TABLE workspace_info ADD COLUMN quality_provider TEXT NOT NULL DEFAULT 'off'",
+        "UPDATE physical_file SET quality_raw_json = NULL, quality_components_json = NULL, quality_score = NULL, quality_algorithm = NULL, quality_version = NULL",
+        "UPDATE component_state SET status = 'pending', algorithm = NULL, version = NULL, input_fingerprint = NULL, started_at = NULL, completed_at = NULL, error_message = NULL WHERE component = 'quality'",
+    ),
 }
 
 
@@ -231,9 +236,15 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         applied_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with connection:
             for statement in MIGRATIONS[version]:
+                if (
+                    version == 8
+                    and statement.startswith("ALTER TABLE workspace_info ADD COLUMN quality_provider")
+                    and _has_column(connection, "workspace_info", "quality_provider")
+                ):
+                    continue
                 connection.execute(statement)
             connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (version, applied_at),
             )
             connection.execute(f"PRAGMA user_version = {version}")
@@ -247,3 +258,10 @@ def _repair_known_schema_drift(connection: sqlite3.Connection) -> None:
     if "selection_updated_at" not in logical_columns:
         with connection:
             connection.execute("ALTER TABLE logical_asset ADD COLUMN selection_updated_at TEXT")
+
+
+def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(
+        row[1] == column
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    )

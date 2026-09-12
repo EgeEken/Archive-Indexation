@@ -11,11 +11,17 @@ from unittest.mock import patch
 
 from PIL import ExifTags, Image
 
-from archive_index.indexing.media_pipeline import index_workspace, invalidate_component, list_problems
+from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace, invalidate_component, list_problems
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
 from archive_index.api.server import WorkspaceHTTPServer
+from archive_index.media.quality_provider import LegacyPillowProvider
+
+
+def index_workspace(workspace, *args, **kwargs):
+    kwargs.setdefault("quality_provider", LegacyPillowProvider())
+    return run_index_workspace(workspace, *args, **kwargs)
 
 
 class MediaPipelineTests(unittest.TestCase):

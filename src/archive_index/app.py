@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", default=8765, type=int, help="TCP port to bind")
     index = commands.add_parser("index", help="scan and process a workspace")
     index.add_argument("workspace", type=Path, help="workspace root")
+    index.add_argument("--quality-provider", choices=("off", "lar-iqa"), help="quality backend for this workspace")
+    index.add_argument("--quality-batch-size", choices=(1, 2, 4, 8, 16), type=int, default=1)
+    index.add_argument("--quality-preparation-workers", choices=(1, 2, 4, 8), type=int, default=8)
     compact = commands.add_parser("compact", help="compact a workspace index database")
     compact.add_argument("workspace", type=Path, help="workspace root")
     recommend = commands.add_parser("recommend", help="rebuild automatic recommendations")
@@ -52,6 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics = commands.add_parser("group-diagnostics", help="write strict-group candidate diagnostics")
     diagnostics.add_argument("workspace", type=Path, help="workspace root")
     diagnostics.add_argument("--limit", type=int, default=100, help="number of borderline rejected pairs to write")
+    model = commands.add_parser("model", help="manage optional inference models")
+    model_commands = model.add_subparsers(dest="model_command")
+    install = model_commands.add_parser("install", help="download an optional model")
+    install.add_argument("model_id", choices=("lar-iqa",), help="model to install")
     return parser
 
 
@@ -65,7 +72,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "index":
-        return _index_command(args.workspace)
+        return _index_command(
+            args.workspace,
+            args.quality_provider,
+            args.quality_batch_size,
+            args.quality_preparation_workers,
+        )
 
     if args.command == "compact":
         return _compact_command(args.workspace)
@@ -81,6 +93,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(destination)
         return 0
 
+    if args.command == "model" and args.model_command == "install":
+        return _model_install_command(args.model_id)
+
     if args.command in {None, "run", "serve"}:
         from .api.server import serve
         from .workspace import Workspace
@@ -95,7 +110,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _index_command(root: Path) -> int:
+def _index_command(
+    root: Path,
+    quality_provider: str | None = None,
+    quality_batch_size: int = 1,
+    quality_preparation_workers: int = 8,
+) -> int:
     from .indexing.media_pipeline import index_workspace
     from .indexing.grouping import build_groups, extract_visual_features
     from .indexing.recommendation import build_recommendations
@@ -104,6 +124,8 @@ def _index_command(root: Path) -> int:
     from .workspace import Workspace
 
     workspace = Workspace.open(root) if (root / ".archive-index").is_dir() else Workspace.create(root)
+    if quality_provider is not None:
+        workspace.set_quality_provider(quality_provider)
     JobStore(workspace).recover_interrupted()
 
     cancel_event = Event()
@@ -127,6 +149,9 @@ def _index_command(root: Path) -> int:
             workspace,
             cancel_event=cancel_event,
             progress=_progress_reporter("media"),
+            quality_provider=quality_provider,
+            quality_batch_size=quality_batch_size,
+            quality_preparation_workers=quality_preparation_workers,
         )
         if media_result.cancelled:
             return 130
@@ -208,6 +233,44 @@ def _compact_command(root: Path) -> int:
         f"integrity_check: {report['integrity_check']}"
     )
     return 0 if report["integrity_check"] == "ok" else 1
+
+
+def _model_install_command(model_id: str) -> int:
+    from urllib.request import Request, urlopen
+
+    from .media.quality_provider import (
+        LAR_IQA_CHECKPOINT_SHA256,
+        LAR_IQA_MODEL_FILENAME,
+        LAR_IQA_MODEL_ID,
+        LAR_IQA_OFFICIAL_FILE_ID,
+        _sha256,
+        default_model_path,
+    )
+
+    if model_id != "lar-iqa":
+        raise ValueError(f"unsupported model: {model_id}")
+    destination = default_model_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    url = (
+        "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
+        + LAR_IQA_OFFICIAL_FILE_ID
+    )
+    print(f"Downloading {LAR_IQA_MODEL_ID} to {destination}")
+    try:
+        request = Request(url, headers={"User-Agent": "Archive-Indexation/0.1"})
+        with urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+        if temporary.stat().st_size < 1024:
+            raise RuntimeError("model download was unexpectedly small")
+        if _sha256(temporary) != LAR_IQA_CHECKPOINT_SHA256:
+            raise RuntimeError("downloaded LAR-IQA checkpoint SHA-256 does not match the published model")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print(f"Installed {LAR_IQA_MODEL_FILENAME}")
+    return 0
 
 
 def _progress_reporter(label: str):

@@ -14,12 +14,18 @@ from unittest.mock import patch
 from PIL import Image
 
 from archive_index.api.server import WorkspaceHTTPServer, _pick_workspace_path
-from archive_index.indexing.media_pipeline import index_workspace
+from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
+from archive_index.media.quality_provider import LegacyPillowProvider
+
+
+def index_workspace(workspace, **kwargs):
+    kwargs.setdefault("quality_provider", LegacyPillowProvider())
+    return run_index_workspace(workspace, **kwargs)
 
 
 class ApiTests(unittest.TestCase):

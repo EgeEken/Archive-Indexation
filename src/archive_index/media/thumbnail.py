@@ -61,6 +61,7 @@ def generate_thumbnail(
             else load_reduced_image(source, size)
         )
         try:
+            image.thumbnail(size, Image.Resampling.LANCZOS)
             image.save(temporary, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
         finally:
             image.close()
@@ -90,6 +91,21 @@ def load_reduced_image(source: Path, size: tuple[int, int] = THUMBNAIL_SIZE) -> 
             if image.mode != "RGB":
                 image = image.convert("RGB")
             return image.copy()
+    except UnidentifiedImageError as error:
+        if source.suffix.casefold() in DECODER_GAP_EXTENSIONS:
+            raise UnsupportedDecoderError(
+                f"no image decoder is configured for {source.suffix.casefold()}"
+            ) from error
+        raise
+
+
+def load_full_image(source: Path) -> Image.Image:
+    try:
+        with Image.open(source) as image:
+            oriented = ImageOps.exif_transpose(image)
+            if oriented.mode != "RGB":
+                oriented = oriented.convert("RGB")
+            return oriented.copy()
     except UnidentifiedImageError as error:
         if source.suffix.casefold() in DECODER_GAP_EXTENSIONS:
             raise UnsupportedDecoderError(

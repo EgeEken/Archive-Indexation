@@ -9,10 +9,16 @@ from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-from archive_index.indexing.media_pipeline import index_workspace
+from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.quality import measure_quality, score_from_raw
 from archive_index.workspace import Workspace
+from archive_index.media.quality_provider import LegacyPillowProvider
+
+
+def index_workspace(workspace, *args, **kwargs):
+    kwargs.setdefault("quality_provider", LegacyPillowProvider())
+    return run_index_workspace(workspace, *args, **kwargs)
 
 
 class QualityTests(unittest.TestCase):
@@ -64,7 +70,7 @@ class QualityTests(unittest.TestCase):
             self.assertEqual((result.succeeded, result.errors), (1, 0))
             loader.assert_called_once()
 
-    def test_score_version_recomputes_from_raw_without_source_decode(self) -> None:
+    def test_quality_version_invalidates_only_quality(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
             root.mkdir()
@@ -75,12 +81,9 @@ class QualityTests(unittest.TestCase):
             self.assertEqual((first.succeeded, first.errors), (1, 0))
 
             from archive_index.indexing import media_pipeline
+            from archive_index.media import quality
 
-            with patch.object(media_pipeline, "QUALITY_SCORE_VERSION", "2"), patch.object(
-                media_pipeline,
-                "load_reduced_image",
-                side_effect=AssertionError("formula-only change decoded source"),
-            ):
+            with patch.object(quality, "QUALITY_SCORE_VERSION", "2"):
                 second = index_workspace(workspace, components=("quality",))
             self.assertEqual((second.succeeded, second.errors), (1, 0))
 

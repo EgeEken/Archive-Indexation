@@ -256,6 +256,7 @@ async function loadWorkspace() {
   $("workspace-crumb").textContent = data.name;
   $("workspace-current-path").textContent = data.path;
   $("workspace-summary").textContent = `${data.assets} assets · ${data.online_files} online · ${data.offline_files} offline`;
+  $("quality-provider").value = data.quality_provider || "off";
   const folders = await api("/api/folders");
   $("folder").innerHTML = `<option value="">All folders</option>` + folders.folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join("");
   $("folder").value = query.get("folder") || "";
@@ -453,12 +454,15 @@ function renderDetails(asset, options = {}) {
 }
 
 function renderQuality(file, showFilename) {
-  if (file.media_type === "video" || file.components?.quality?.status === "not_requested") return `<div class="quality-unsupported">Technical quality review is not supported for video yet.</div>`;
-  const score = file.quality_score == null ? "Unavailable" : Number(file.quality_score).toFixed(2);
-  const components = file.quality_components || {};
+  if (file.media_type === "video") return `<div class="quality-unsupported">Technical quality review is not supported for video yet.</div>`;
+  if (file.quality_score == null) {
+    const status = file.components?.quality?.status;
+    const message = status === "not_requested" ? "Technical quality scoring is off." : status === "failed" ? "Technical quality scoring failed for this image." : "Technical quality is unavailable.";
+    return `<div class="quality-unsupported">${message}</div>`;
+  }
+  const score = Number(file.quality_score).toFixed(2);
   const color = file.quality_score == null ? "#26333f" : qualityColor(file.quality_score);
-  const metrics = [["Focus", "focus"], ["Exposure", "exposure"], ["Contrast", "contrast"], ["Noise", "noise"]];
-  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div>${metrics.map(([label, key]) => { const number = components[key] == null ? null : Number(components[key]); const negative = key === "noise"; const display = negative && number != null ? 1 - number : number; return `<div class="metric"><span>${label}</span><div class="bar${negative ? " negative" : ""}"><span style="--value:${display == null ? 0 : Math.max(0, Math.min(100, display * 100))}%"></span></div><span>${display == null ? "—" : display.toFixed(2)}</span></div>`; }).join("")}</section>`;
+  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div></section>`;
 }
 
 function meterMarkup(label, value, position, endpoints) {
@@ -682,6 +686,21 @@ async function locateCurrentGroup() {
 $("workspace-form").addEventListener("submit", (event) => { event.preventDefault(); openWorkspace($("workspace-path").value.trim(), false); });
 $("browse-workspace").addEventListener("click", pickWorkspace);
 $("index").addEventListener("click", startIndex);
+$("quality-provider").addEventListener("change", async (event) => {
+  try {
+    await api("/api/quality-provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: event.target.value }),
+    });
+    $("status").textContent = event.target.value === "off"
+      ? "Quality scoring is off."
+      : "LAR-IQA selected. Re-index to calculate quality scores.";
+    await loadAssets();
+  } catch (error) {
+    $("status").textContent = error.message;
+  }
+});
 $("problems-button").addEventListener("click", showProblems);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));

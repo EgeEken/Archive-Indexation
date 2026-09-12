@@ -15,6 +15,7 @@ from .db.schema import apply_migrations
 
 INDEX_DIRECTORY = ".archive-index"
 DATABASE_FILENAME = "index.sqlite"
+QUALITY_PROVIDERS = frozenset({"off", "lar-iqa"})
 
 
 class WorkspaceError(ValueError):
@@ -83,8 +84,8 @@ class Workspace:
             connection.execute(
                 """
                 INSERT INTO workspace_info(
-                    id, workspace_id, created_at, updated_at, app_version
-                ) VALUES (1, ?, ?, ?, ?)
+                    id, workspace_id, created_at, updated_at, app_version, quality_provider
+                ) VALUES (1, ?, ?, ?, ?, 'off')
                 """,
                 (str(uuid.uuid4()), now, now, __version__),
             )
@@ -113,6 +114,45 @@ class Workspace:
 
     def connect(self) -> sqlite3.Connection:
         return connect(self.database_path)
+
+    def quality_provider(self) -> str:
+        connection = self.connect()
+        try:
+            value = connection.execute(
+                "SELECT quality_provider FROM workspace_info WHERE id = 1"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        return value
+
+    def set_quality_provider(self, provider: str) -> None:
+        if provider not in QUALITY_PROVIDERS:
+            raise WorkspaceError(f"unsupported quality provider: {provider}")
+        with self.transaction() as connection:
+            active = connection.execute(
+                "SELECT id FROM job WHERE status IN ('pending', 'running') LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                raise WorkspaceError("quality provider cannot change while a job is running")
+            connection.execute(
+                "UPDATE workspace_info SET quality_provider = ?, updated_at = ? WHERE id = 1",
+                (provider, _timestamp()),
+            )
+            connection.execute(
+                """
+                UPDATE component_state
+                SET status = 'pending', input_fingerprint = NULL,
+                    started_at = NULL, completed_at = NULL, error_message = NULL
+                WHERE component = 'quality'
+                """
+            )
+            connection.execute(
+                """
+                UPDATE physical_file
+                SET quality_raw_json = NULL, quality_components_json = NULL,
+                    quality_score = NULL, quality_algorithm = NULL, quality_version = NULL
+                """
+            )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

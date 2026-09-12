@@ -273,5 +273,64 @@ def run_items(
         raise
 
 
+def run_batches(
+    workspace: Workspace,
+    kind: str,
+    items: Iterable[object],
+    batch_worker: Callable[[list[object]], dict[str, object]],
+    *,
+    batch_size: int,
+    item_key: Callable[[object], str],
+    job_id: str | None = None,
+    cancel_event: Event | None = None,
+    progress: Callable[[JobProgress], None] | None = None,
+    physical_file_id: Callable[[object], str | None] | None = None,
+    relative_path: Callable[[object], str | None] | None = None,
+    stage: str | None = None,
+) -> JobRunResult:
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    item_list = list(items)
+    store = JobStore(workspace)
+    identifier = job_id or store.create(kind, len(item_list))
+    store.set_total(identifier, len(item_list))
+    if stage is not None:
+        store.set_stage(identifier, stage)
+    store.start(identifier)
+    processed = succeeded = errors = skipped = 0
+    try:
+        for start in range(0, len(item_list), batch_size):
+            batch = item_list[start : start + batch_size]
+            if cancel_event is not None and cancel_event.is_set():
+                store.checkpoint(identifier, processed, errors, skipped)
+                store.cancel(identifier, processed, errors, skipped)
+                return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
+            outcomes = batch_worker(batch)
+            for item in batch:
+                outcome = outcomes.get(item_key(item))
+                if isinstance(outcome, BaseException):
+                    errors += 1
+                    store.record_error(
+                        identifier,
+                        outcome,
+                        physical_file_id=physical_file_id(item) if physical_file_id else None,
+                        relative_path=relative_path(item) if relative_path else None,
+                    )
+                    LOGGER.warning("job %s failed for item: %s", identifier, outcome)
+                else:
+                    succeeded += 1
+                    if outcome == "skipped":
+                        skipped += 1
+                processed += 1
+                if progress is not None:
+                    progress(JobProgress(identifier, processed, len(item_list), item, stage or kind, errors, skipped))
+            store.checkpoint(identifier, processed, errors, skipped)
+        store.complete(identifier, processed, errors, skipped)
+        return JobRunResult(identifier, processed, succeeded, errors, False, skipped)
+    except Exception:
+        store.fail(identifier)
+        raise
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
