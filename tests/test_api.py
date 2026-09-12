@@ -20,7 +20,7 @@ from archive_index.indexing.recommendation import build_recommendations
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
-from archive_index.media.quality_provider import LegacyPillowProvider
+from archive_index.media.quality_provider import LegacyPillowProvider, OffQualityProvider
 
 
 def index_workspace(workspace, **kwargs):
@@ -63,6 +63,9 @@ class ApiTests(unittest.TestCase):
         status, images = _get_json(self.base_url, "/api/assets?media_type=image&page_size=1")
         self.assertEqual(status, 200)
         self.assertEqual((images["total"], len(images["items"]), images["has_next"]), (2, 1, True))
+        status, videos = _get_json(self.base_url, "/api/assets?media_type=video")
+        self.assertEqual(status, 200)
+        self.assertNotIn("processing", videos["items"][0]["issues"])
         status, ranked = _get_json(self.base_url, "/api/assets?sort=quality_desc")
         self.assertEqual(status, 200)
         self.assertIsNotNone(ranked["items"][0]["quality_score"])
@@ -112,6 +115,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"technical-reading", js)
         self.assertIn(b"recommended-card", js)
         self.assertIn(b"viewerClickSuppressed", js)
+        self.assertIn(b"bindBackdropClose", js)
+        self.assertIn(b"pressedOutside", js)
+        self.assertIn(b"model install lar-iqa", js)
+        self.assertNotIn(b'$("details").addEventListener("click"', js)
+        self.assertIn(b"#details .details-content", css)
         self.assertIn(b"focused-group .group-heading", css)
         self.assertIn(b"range-label-top", html)
         self.assertIn("aria-label=\"Previous page\"".encode(), html)
@@ -419,6 +427,11 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         Image.new("RGB", (80, 60), color=(100, 140, 200)).save(self.root / "photo.jpg")
         self.registry_path = base / "recent.json"
         self.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=self.registry_path)
+        self.quality_provider_patch = patch(
+            "archive_index.indexing.media_pipeline.create_quality_provider",
+            return_value=OffQualityProvider(),
+        )
+        self.quality_provider_patch.start()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
@@ -427,6 +440,7 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.quality_provider_patch.stop()
         self.temporary_directory.cleanup()
 
     def test_open_create_switch_and_remove_recent_workspace_without_server_restart(self) -> None:
@@ -451,7 +465,7 @@ class WorkspaceHomeApiTests(unittest.TestCase):
             time.sleep(0.1)
 
         status, summary = _get_json(self.base_url, f"/api/workspace?workspace={handle}")
-        self.assertEqual((status, summary["path"], summary["assets"]), (200, str(self.root), 1))
+        self.assertEqual((status, summary["path"], summary["assets"], summary["quality_provider"]), (200, str(self.root), 1, "lar-iqa"))
         status, reopened = _post_json(
             self.base_url,
             "/api/workspaces/open",
@@ -483,7 +497,7 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         status, opened = _post_json(self.base_url, "/api/workspaces/open", {"path": str(self.root)})
         self.assertEqual(status, 200)
         handle = opened["workspace"]["id"]
-        for _ in range(50):
+        for _ in range(300):
             _, jobs = _get_json(self.base_url, f"/api/jobs?workspace={handle}&limit=10")
             if not any(job["status"] in {"pending", "running"} for job in jobs["jobs"]):
                 break

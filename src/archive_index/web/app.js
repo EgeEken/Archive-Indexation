@@ -229,7 +229,6 @@ async function confirmWorkspaceRemoval(id) {
     $("remove-close").addEventListener("click", close);
     $("delete-index").addEventListener("click", () => finishWorkspaceRemoval(id, true));
     $("remove-link").addEventListener("click", () => finishWorkspaceRemoval(id, false));
-    dialog.onclick = (event) => { if (event.target === dialog) close(); };
   } catch (error) {
     $("home-status").textContent = error.message;
   }
@@ -412,6 +411,16 @@ function closeDialog(dialog) {
   if (!["viewer", "details", "problems-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
 }
 
+function bindBackdropClose(dialog) {
+  let pressedOutside = false;
+  dialog.addEventListener("pointerdown", (event) => { pressedOutside = event.target === dialog; });
+  dialog.addEventListener("pointerup", (event) => {
+    if (pressedOutside && event.target === dialog) closeDialog(dialog);
+    pressedOutside = false;
+  });
+  dialog.addEventListener("pointercancel", () => { pressedOutside = false; });
+}
+
 async function showDetails(assetId, context = { mode: "gallery", items: state.items, index: 0 }) {
   try {
     const asset = await api(`/api/assets/${encodeURIComponent(assetId)}`);
@@ -490,8 +499,15 @@ function renderTechnicalDetails(file) {
   return `<section class="section"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22), ["f/1", "f/22"]) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber), ["30 s", "1/8000 s"]) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000), ["ISO 40", "ISO 40000"]) : ""}${focal ? meterMarkup("Focal length", focal, logPosition(focalNumber, 10, 1000), ["10 mm", "1000 mm"]) : ""}</dl></section>`;
 }
 
+function componentProblemMessage(name, component) {
+  const error = component.error || component.status;
+  if (name === "quality" && error.includes("checkpoint is not installed")) return "LAR-IQA model is not installed. Run `uv run archive-index model install lar-iqa`, then re-index.";
+  if (name === "quality" && error.includes("requires one learned-quality extra")) return "LAR-IQA dependencies are not installed. Install the CPU or CUDA quality extra, then re-index.";
+  return error;
+}
+
 function renderComponentProblems(file) {
-  return ["metadata", "thumbnail", "quality"].flatMap((name) => { const component = file.components[name]; return component && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(component.error || component.status)}</p>`] : []; }).join("");
+  return ["metadata", "thumbnail", "quality"].flatMap((name) => { const component = file.components[name]; return component && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(componentProblemMessage(name, component))}</p>`] : []; }).join("");
 }
 
 function cameraValue(file) { const exif = file.metadata?.exif || {}; return [exif.Make, exif.Model].filter((value) => value != null && readable(value)).map(formatExif).filter((value, index, values) => values.indexOf(value) === index).join(" "); }
@@ -574,7 +590,6 @@ async function showProblems() {
     document.body.classList.add("modal-open");
     $("problems-close").addEventListener("click", () => closeDialog($("problems-dialog")));
     $("problems-index").addEventListener("click", async () => { closeDialog($("problems-dialog")); await startIndex(); });
-    $("problems-dialog").onclick = (event) => { if (event.target === $("problems-dialog")) closeDialog($("problems-dialog")); };
   } catch (error) {
     $("status").textContent = error.message;
   }
@@ -693,9 +708,12 @@ $("quality-provider").addEventListener("change", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider: event.target.value }),
     });
-    $("status").textContent = event.target.value === "off"
-      ? "Quality scoring is off."
-      : "LAR-IQA selected. Re-index to calculate quality scores.";
+    if (event.target.value === "lar-iqa") {
+      $("status").textContent = "Starting lightweight quality scoring…";
+      await startIndex();
+    } else {
+      $("status").textContent = "Quality scoring is off.";
+    }
     await loadAssets();
   } catch (error) {
     $("status").textContent = error.message;
@@ -712,7 +730,6 @@ $("viewer-next").addEventListener("click", () => moveViewer(1));
 $("viewer-info").addEventListener("click", () => toggleViewerInfo());
 $("viewer-grouping").addEventListener("click", locateCurrentGroup);
 $("viewer-smooth").addEventListener("change", (event) => { state.viewerSmooth = event.target.checked; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
-$("viewer").addEventListener("click", (event) => { if (event.target === $("viewer")) closeDialog($("viewer")); });
 $("viewer-stage").addEventListener("click", (event) => { if (state.viewerClickSuppressed) { state.viewerClickSuppressed = false; return; } if (["viewer-stage", "viewer-media-pane", "viewer-media"].includes(event.target.id)) closeDialog($("viewer")); });
 $("viewer-media-pane").addEventListener("wheel", (event) => {
   const media = $("viewer-media").querySelector("img.viewer-media");
@@ -752,9 +769,8 @@ $("viewer-media-pane").addEventListener("pointerdown", (event) => {
 });
 $("viewer-media-pane").addEventListener("pointermove", (event) => { if (!state.dragging) return; state.viewerPanX = state.dragPanX + event.clientX - state.dragStartX; state.viewerPanY = state.dragPanY + event.clientY - state.dragStartY; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
 ["pointerup", "pointercancel"].forEach((eventName) => $("viewer-media-pane").addEventListener(eventName, (event) => { if (!state.dragging) return; state.dragging = false; state.viewerClickSuppressed = true; setTimeout(() => { state.viewerClickSuppressed = false; }, 0); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); }));
-$("details").addEventListener("click", (event) => { if (event.target === $("details")) closeDialog($("details")); });
-$("remove-workspace-dialog").addEventListener("close", () => { $("remove-workspace-dialog").onclick = null; });
 ["viewer", "details", "problems-dialog", "remove-workspace-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "problems-dialog", "remove-workspace-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
+["viewer", "details", "problems-dialog", "remove-workspace-dialog"].forEach((id) => bindBackdropClose($(id)));
 window.addEventListener("resize", () => applyViewerTransform($("viewer-media").querySelector("img.viewer-media")));
 document.addEventListener("keydown", (event) => {
   if ($("details").open || $("problems-dialog").open || $("remove-workspace-dialog").open || ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;

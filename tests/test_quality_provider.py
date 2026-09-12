@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,6 +56,21 @@ class FakeProvider:
         if self.fail_name and self.prepared_calls == 1:
             raise RuntimeError("simulated provider failure")
         return [ProviderResult({"model_output": 0.73}, 0.73, None) for _ in images]
+
+
+class BatchSessionProvider(FakeProvider):
+    def __init__(self, workspace) -> None:
+        super().__init__()
+        self.workspace = workspace
+        self.session_status = None
+
+    @contextmanager
+    def batch_session(self):
+        with closing(self.workspace.connect()) as connection:
+            self.session_status = connection.execute(
+                "SELECT status FROM job ORDER BY created_at DESC, rowid DESC LIMIT 1"
+            ).fetchone()[0]
+        yield self
 
 
 class QualityProviderTests(unittest.TestCase):
@@ -179,6 +194,46 @@ class QualityProviderTests(unittest.TestCase):
 
             self.assertEqual((result.succeeded, result.skipped), (1, 1))
             self.assertEqual(cached_provider.preflight_calls, 0)
+
+    def test_quality_job_is_running_before_batch_session_initializes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (120, 80), "navy").save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            provider = BatchSessionProvider(workspace)
+
+            result = index_workspace(
+                workspace,
+                components=("quality",),
+                quality_provider=provider,
+                quality_batch_size=2,
+            )
+
+            self.assertEqual((result.errors, result.skipped, provider.session_status), (0, 0, "running"))
+
+    def test_unavailable_lar_batch_marks_items_failed_instead_of_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (120, 80), "navy").save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            result = index_workspace(
+                workspace,
+                components=("quality",),
+                quality_provider=LARIQAProvider(model_path=root / "missing.pt"),
+                quality_batch_size=2,
+            )
+
+            self.assertEqual((result.errors, result.skipped), (1, 0))
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status FROM component_state WHERE component = 'quality'"
+                ).fetchone()[0]
+            self.assertEqual(state, "failed")
 
     def test_provider_failure_isolated_to_one_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

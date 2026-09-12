@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -219,6 +219,9 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE workspace_info ADD COLUMN quality_provider TEXT NOT NULL DEFAULT 'off'",
         "UPDATE physical_file SET quality_raw_json = NULL, quality_components_json = NULL, quality_score = NULL, quality_algorithm = NULL, quality_version = NULL",
         "UPDATE component_state SET status = 'pending', algorithm = NULL, version = NULL, input_fingerprint = NULL, started_at = NULL, completed_at = NULL, error_message = NULL WHERE component = 'quality'",
+    ),
+    9: (
+        "UPDATE workspace_info SET quality_provider = 'lar-iqa' WHERE quality_provider = 'off'",
     ),
 }
 

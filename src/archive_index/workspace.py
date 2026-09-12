@@ -85,7 +85,7 @@ class Workspace:
                 """
                 INSERT INTO workspace_info(
                     id, workspace_id, created_at, updated_at, app_version, quality_provider
-                ) VALUES (1, ?, ?, ?, ?, 'off')
+                ) VALUES (1, ?, ?, ?, ?, 'lar-iqa')
                 """,
                 (str(uuid.uuid4()), now, now, __version__),
             )

@@ -15,6 +15,7 @@ from ..jobs.engine import JobProgress, JobRunResult, JobStore, run_batches, run_
 from ..media.metadata import UnsupportedDecoderError, extract_metadata
 from ..media.quality_provider import (
     QualityProvider,
+    QualityProviderUnavailable,
     create_quality_provider,
 )
 from ..media.thumbnail import (
@@ -899,6 +900,10 @@ def _index_quality_batches(
                 else:
                     for row, _ in pending:
                         outcomes[row["id"]] = None
+            except QualityProviderUnavailable as error:
+                for row, _ in pending:
+                    _mark_failed(workspace, row["id"], QUALITY_COMPONENT, error)
+                    outcomes[row["id"]] = error
             except Exception:
                 for row, fingerprint in pending:
                     try:
@@ -932,8 +937,27 @@ def _index_quality_batches(
         return result
     batch_session = getattr(provider, "batch_session", None)
     if batch_session is not None:
-        with batch_session() as session:
-            result = run(session.score_paths)
+        session_context = batch_session()
+        session = None
+        session_error = None
+
+        def lazy_score(paths):
+            nonlocal session, session_error
+            if session_error is not None:
+                raise session_error
+            if session is None:
+                try:
+                    session = session_context.__enter__()
+                except Exception as error:
+                    session_error = error
+                    raise
+            return session.score_paths(paths)
+
+        try:
+            result = run(lazy_score)
+        finally:
+            if session is not None:
+                session_context.__exit__(None, None, None)
         _merge_provider_timings(timings, provider)
         return result
     provider.preflight()
