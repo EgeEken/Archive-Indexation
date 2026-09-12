@@ -24,7 +24,7 @@ class RecommendationTests(unittest.TestCase):
     def test_singletons_use_conservative_quality_threshold(self) -> None:
         workspace = self._workspace({"good.jpg": "scene", "bad.jpg": "other"})
         self._set_times(workspace, {"good.jpg": "2026-09-03T12:00:00+03:00", "bad.jpg": "2026-09-03T12:01:00+03:00"})
-        self._set_quality(workspace, {"good.jpg": .60, "bad.jpg": .59})
+        self._set_quality(workspace, {"good.jpg": .70, "bad.jpg": .69})
         build_groups(workspace)
         result = build_recommendations(workspace)
         self.assertEqual((result.total_assets, result.auto_recommended, result.singleton_recommendations), (2, 1, 1))
@@ -66,7 +66,7 @@ class RecommendationTests(unittest.TestCase):
         with closing(workspace.connect()) as connection:
             decision = connection.execute("SELECT selection_state FROM logical_asset WHERE id = ?", (asset_id,)).fetchone()[0]
             version = connection.execute("SELECT version FROM recommendation_run WHERE id = (SELECT active_run_id FROM workspace_recommendation WHERE id = 1)").fetchone()[0]
-        self.assertEqual((first.auto_recommended, second.auto_recommended, decision, version), (1, 1, "rejected", "2"))
+        self.assertEqual((first.auto_recommended, second.auto_recommended, decision, version), (1, 1, "rejected", "3"))
 
     def test_group_rebuild_invalidates_old_recommendations_without_erasing_decision(self) -> None:
         workspace = self._workspace({"a.jpg": "scene"})
@@ -172,6 +172,7 @@ class RecommendationTests(unittest.TestCase):
                 ImageDraw.Draw(image).rectangle((35, 25, 170, 120), fill="red")
             image.save(root / name, format="JPEG")
         workspace = Workspace.create(root)
+        workspace.set_quality_provider("lar-iqa")
         scan(workspace)
         extract_visual_features(workspace)
         return workspace

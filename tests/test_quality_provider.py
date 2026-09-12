@@ -5,15 +5,18 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.quality_provider import (
+    OffQualityProvider,
     ProviderResult,
     QualityProviderUnavailable,
     LARIQAProvider,
+    default_quality_preparation_workers,
 )
 from archive_index.workspace import Workspace
 
@@ -56,6 +59,60 @@ class FakeProvider:
 
 
 class QualityProviderTests(unittest.TestCase):
+    def test_cpu_quality_preparation_default_is_two_workers(self) -> None:
+        with patch("torch.cuda.is_available", return_value=False):
+            self.assertEqual(default_quality_preparation_workers(), 2)
+        with patch("torch.cuda.is_available", return_value=True):
+            self.assertEqual(default_quality_preparation_workers(), 8)
+        with patch(
+            "archive_index.media.quality_provider.default_quality_preparation_workers",
+            return_value=2,
+        ):
+            self.assertEqual(LARIQAProvider(model_path=Path("missing.pt")).preparation_workers, 2)
+
+    def test_provider_off_preserves_cached_quality_and_recommendations_are_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (120, 80), "navy").save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            workspace.set_quality_provider("lar-iqa")
+            scan(workspace)
+            provider = FakeProvider()
+            index_workspace(workspace, components=("quality",), quality_provider=provider)
+
+            with closing(workspace.connect()) as connection:
+                before = connection.execute(
+                    "SELECT quality_score, quality_raw_json FROM physical_file"
+                ).fetchone()
+                state_before = connection.execute(
+                    "SELECT status, input_fingerprint FROM component_state WHERE component = 'quality'"
+                ).fetchone()
+
+            workspace.set_quality_provider("off")
+            result = index_workspace(workspace, components=("quality",), quality_provider=OffQualityProvider())
+            with closing(workspace.connect()) as connection:
+                after = connection.execute(
+                    "SELECT quality_score, quality_raw_json FROM physical_file"
+                ).fetchone()
+                state_after = connection.execute(
+                    "SELECT status, input_fingerprint FROM component_state WHERE component = 'quality'"
+                ).fetchone()
+                active_row = connection.execute(
+                    "SELECT active_run_id FROM workspace_recommendation WHERE id = 1"
+                ).fetchone()
+
+            self.assertEqual(result.skipped, 1)
+            self.assertEqual(tuple(before), tuple(after))
+            self.assertEqual(tuple(state_before), tuple(state_after))
+            self.assertTrue(active_row is None or active_row[0] is None)
+
+            workspace.set_quality_provider("lar-iqa")
+            cached_provider = FakeProvider()
+            resumed = index_workspace(workspace, components=("quality",), quality_provider=cached_provider)
+            self.assertEqual(resumed.skipped, 1)
+            self.assertEqual(cached_provider.preflight_calls, 0)
+
     def test_fake_provider_preflight_and_raw_canonical_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
@@ -98,6 +155,26 @@ class QualityProviderTests(unittest.TestCase):
 
             self.assertEqual((result.succeeded, result.errors), (1, 0))
             self.assertEqual((provider.path_calls, provider.image_calls, provider.prepared_calls), (0, 0, 1))
+
+    def test_cached_quality_does_not_preflight_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (120, 80), "navy").save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            index_workspace(workspace, components=("quality",), quality_provider=FakeProvider())
+            cached_provider = FakeProvider()
+
+            result = index_workspace(
+                workspace,
+                components=("quality",),
+                quality_provider=cached_provider,
+                quality_batch_size=4,
+            )
+
+            self.assertEqual((result.succeeded, result.skipped), (1, 1))
+            self.assertEqual(cached_provider.preflight_calls, 0)
 
     def test_provider_failure_isolated_to_one_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

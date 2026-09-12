@@ -9,13 +9,16 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
 from PIL import Image
 
-from ..jobs.engine import JobProgress, JobRunResult, JobStore, run_items
+from ..jobs.engine import JobProgress, JobRunResult, JobStore, run_batches
+from ..media.metadata import UnsupportedDecoderError
 from ..media.thumbnail import load_reduced_image
 from ..workspace import Workspace
+from ..timing import TimingRecorder, timed
 
 FEATURE_COMPONENT = "group_feature"
 FEATURE_ALGORITHM = "pillow-strict-group-features"
@@ -25,6 +28,8 @@ GROUPING_VERSION = "4"
 MAX_CAPTURE_SECONDS = 10.0
 BURST_MAX_CAPTURE_SECONDS = 0.5
 FEATURE_DECODE_SIZE = (160, 160)
+FEATURE_BATCH_SIZE = 32
+FEATURE_WORKERS = 8
 LUMA_FEATURE_SIZE = (16, 16)
 COLOR_FEATURE_SIZE = (32, 32)
 MAX_DHASH_DISTANCE = 8
@@ -112,6 +117,8 @@ def extract_visual_features(
     job_id: str | None = None,
     cancel_event: Event | None = None,
     progress: callable | None = None,
+    workers: int | None = None,
+    timings: TimingRecorder | None = None,
 ) -> JobRunResult:
     connection = workspace.connect()
     try:
@@ -120,75 +127,78 @@ def extract_visual_features(
         ).fetchall()
     finally:
         connection.close()
-    _prepare_feature_states(workspace, rows)
+    state_map = _prepare_feature_states(workspace, rows)
+    worker_count = workers or FEATURE_WORKERS
+    if worker_count < 1:
+        raise ValueError("feature worker count must be positive")
 
-    def worker(row):
-        state = _feature_state(workspace, row["id"])
+    def feature_task(row):
         fingerprint = _input_fingerprint(row)
-        if _feature_ready(state, row, fingerprint):
-            return "skipped"
-        source = workspace.absolute_path(row["relative_path"])
-        _mark_feature_running(workspace, row["id"])
+        decode_started = time.perf_counter()
         try:
-            image = load_reduced_image(source, FEATURE_DECODE_SIZE)
+            image = load_reduced_image(workspace.absolute_path(row["relative_path"]), FEATURE_DECODE_SIZE)
+            decode_seconds = time.perf_counter() - decode_started
+            calculation_started = time.perf_counter()
             try:
                 feature = _feature_from_image(row["id"], fingerprint, image)
             finally:
                 image.close()
-            now = _timestamp()
-            with workspace.transaction() as transaction:
-                transaction.execute(
-                    """
-                    INSERT INTO visual_feature(
-                        physical_file_id, algorithm, version, settings_json,
-                        input_fingerprint, dhash, luma_json, color_hist_json,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(physical_file_id) DO UPDATE SET
-                        algorithm = excluded.algorithm, version = excluded.version,
-                        settings_json = excluded.settings_json,
-                        input_fingerprint = excluded.input_fingerprint,
-                        dhash = excluded.dhash, luma_json = excluded.luma_json,
-                        color_hist_json = excluded.color_hist_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        row["id"], FEATURE_ALGORITHM, FEATURE_VERSION,
-                        json.dumps(FEATURE_SETTINGS, sort_keys=True), fingerprint,
-                        feature.dhash, json.dumps(feature.luma),
-                        json.dumps(feature.color_hist), now, now,
-                    ),
-                )
-                transaction.execute(
-                    """
-                    UPDATE component_state
-                    SET status = 'complete', algorithm = ?, version = ?,
-                        settings_json = ?, input_fingerprint = ?,
-                        completed_at = ?, error_message = NULL
-                    WHERE physical_file_id = ? AND component = ?
-                    """,
-                    (
-                        FEATURE_ALGORITHM, FEATURE_VERSION,
-                        json.dumps(FEATURE_SETTINGS, sort_keys=True), fingerprint,
-                        now, row["id"], FEATURE_COMPONENT,
-                    ),
-                )
+            return row, fingerprint, feature, None, decode_seconds, time.perf_counter() - calculation_started
         except Exception as error:
-            _mark_feature_failed(workspace, row["id"], error)
-            raise
+            return row, fingerprint, None, error, time.perf_counter() - decode_started, 0.0
 
-    return run_items(
-        workspace,
-        "visual_features",
-        rows,
-        worker,
-        job_id=job_id,
-        cancel_event=cancel_event,
-        progress=progress,
-        physical_file_id=lambda row: row["id"],
-        relative_path=lambda row: row["relative_path"],
-        stage="visual feature extraction",
-    )
+    def worker(batch) -> dict[str, object]:
+        outcomes: dict[str, object] = {}
+        pending = []
+        for row in batch:
+            fingerprint = _input_fingerprint(row)
+            if _feature_ready(state_map.get(row["id"]), row, fingerprint):
+                outcomes[row["id"]] = "skipped"
+            else:
+                pending.append(row)
+        if not pending:
+            return outcomes
+        _mark_feature_running_batch(workspace, pending)
+        results = list(pool.map(feature_task, pending))
+        for _, _, _, error, decode_seconds, calculation_seconds in results:
+            if timings is not None:
+                timings.add("features.decode", decode_seconds)
+                timings.add("features.calculation", calculation_seconds)
+        try:
+            with timed(timings, "features.persistence"):
+                _persist_feature_results(workspace, results)
+        except Exception:
+            for row, fingerprint, feature, error, _, _ in results:
+                try:
+                    _persist_feature_results(workspace, [(row, fingerprint, feature, error, 0.0, 0.0)])
+                except Exception as persist_error:
+                    outcomes[row["id"]] = persist_error
+                else:
+                    outcomes[row["id"]] = error
+        else:
+            for row, _, _, error, _, _ in results:
+                outcomes[row["id"]] = error if error is not None else None
+        return outcomes
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        result = run_batches(
+            workspace,
+            "visual_features",
+            rows,
+            worker,
+            batch_size=FEATURE_BATCH_SIZE,
+            item_key=lambda row: row["id"],
+            job_id=job_id,
+            cancel_event=cancel_event,
+            progress=progress,
+            physical_file_id=lambda row: row["id"],
+            relative_path=lambda row: row["relative_path"],
+            stage="visual feature extraction",
+        )
+    if timings is not None:
+        timings.add("features.total", time.perf_counter() - started)
+    return result
 
 
 def build_groups(
@@ -657,14 +667,21 @@ def choose_representative(group: list[AssetRecord]) -> AssetRecord:
     return sorted(group, key=_record_sort_key)[0]
 
 
-def _prepare_feature_states(workspace: Workspace, rows) -> None:
+def _prepare_feature_states(workspace: Workspace, rows) -> dict[str, object]:
+    row_ids = [row["id"] for row in rows]
+    state_map: dict[str, object] = {}
+    if not row_ids:
+        return state_map
+    placeholders = ",".join("?" for _ in row_ids)
     settings = json.dumps(FEATURE_SETTINGS, sort_keys=True)
     with workspace.transaction() as connection:
+        for state in connection.execute(
+            f"SELECT * FROM component_state WHERE physical_file_id IN ({placeholders}) AND component = ?",
+            [*row_ids, FEATURE_COMPONENT],
+        ).fetchall():
+            state_map[state["physical_file_id"]] = state
         for row in rows:
-            state = connection.execute(
-                "SELECT * FROM component_state WHERE physical_file_id = ? AND component = ?",
-                (row["id"], FEATURE_COMPONENT),
-            ).fetchone()
+            state = state_map.get(row["id"])
             fingerprint = _input_fingerprint(row)
             if state is None:
                 connection.execute(
@@ -681,6 +698,78 @@ def _prepare_feature_states(workspace: Workspace, rows) -> None:
                     """,
                     (FEATURE_ALGORITHM, FEATURE_VERSION, settings, row["id"], FEATURE_COMPONENT),
                 )
+        for state in connection.execute(
+            f"SELECT * FROM component_state WHERE physical_file_id IN ({placeholders}) AND component = ?",
+            [*row_ids, FEATURE_COMPONENT],
+        ).fetchall():
+            state_map[state["physical_file_id"]] = state
+    return state_map
+
+
+def _mark_feature_running_batch(workspace: Workspace, rows) -> None:
+    now = _timestamp()
+    with workspace.transaction() as connection:
+        for row in rows:
+            connection.execute(
+                """
+                UPDATE component_state
+                SET status = 'running', started_at = ?, completed_at = NULL, error_message = NULL
+                WHERE physical_file_id = ? AND component = ?
+                """,
+                (now, row["id"], FEATURE_COMPONENT),
+            )
+
+
+def _persist_feature_results(workspace: Workspace, results) -> None:
+    settings = json.dumps(FEATURE_SETTINGS, sort_keys=True)
+    now = _timestamp()
+    with workspace.transaction() as connection:
+        for row, fingerprint, feature, error, _, _ in results:
+            if error is not None:
+                status = "unsupported" if isinstance(error, UnsupportedDecoderError) else "failed"
+                connection.execute(
+                    """
+                    UPDATE component_state
+                    SET status = ?, completed_at = NULL, error_message = ?
+                    WHERE physical_file_id = ? AND component = ?
+                    """,
+                    (status, str(error), row["id"], FEATURE_COMPONENT),
+                )
+                continue
+            connection.execute(
+                """
+                INSERT INTO visual_feature(
+                    physical_file_id, algorithm, version, settings_json,
+                    input_fingerprint, dhash, luma_json, color_hist_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(physical_file_id) DO UPDATE SET
+                    algorithm = excluded.algorithm, version = excluded.version,
+                    settings_json = excluded.settings_json,
+                    input_fingerprint = excluded.input_fingerprint,
+                    dhash = excluded.dhash, luma_json = excluded.luma_json,
+                    color_hist_json = excluded.color_hist_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    row["id"], FEATURE_ALGORITHM, FEATURE_VERSION, settings,
+                    fingerprint, feature.dhash, json.dumps(feature.luma),
+                    json.dumps(feature.color_hist), now, now,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE component_state
+                SET status = 'complete', algorithm = ?, version = ?,
+                    settings_json = ?, input_fingerprint = ?, completed_at = ?,
+                    error_message = NULL
+                WHERE physical_file_id = ? AND component = ?
+                """,
+                (
+                    FEATURE_ALGORITHM, FEATURE_VERSION, settings, fingerprint,
+                    now, row["id"], FEATURE_COMPONENT,
+                ),
+            )
 
 
 def _feature_ready(state, row, fingerprint: str) -> bool:

@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
+from time import perf_counter
 
 from ..jobs.engine import JobStore
 from ..workspace import INDEX_DIRECTORY, Workspace
 from .media_types import media_type_for
+from ..timing import TimingRecorder, timed
 
 LOGGER = logging.getLogger(__name__)
 CHUNK_SIZE = 1024 * 1024
@@ -51,9 +53,11 @@ def scan(
     job_id: str | None = None,
     cancel_event: Event | None = None,
     progress: Callable[[ScanProgress], None] | None = None,
+    timings: TimingRecorder | None = None,
 ) -> ScanResult:
     """Update one workspace from its current filesystem state."""
 
+    started = perf_counter()
     job_store = JobStore(workspace)
     job_id = job_id or job_store.create("scan")
     job_store.start(job_id)
@@ -70,7 +74,8 @@ def scan(
     }
     try:
         job_store.set_stage(job_id, "discovery")
-        paths, discovery_issues = _discover_files(workspace)
+        with timed(timings, "scan.discovery"):
+            paths, discovery_issues = _discover_files(workspace)
         counts["discovered"] = len(paths)
         job_store.set_total(job_id, len(paths))
         for relative_path, error in discovery_issues:
@@ -104,7 +109,8 @@ def scan(
                 ):
                     counts["unchanged"] += 1
                 else:
-                    file_hash = hash_file(path)
+                    with timed(timings, "scan.hashing", 1):
+                        file_hash = hash_file(path)
                     counts["hashed"] += 1
                     media_type = media_type_for(path)
                     if existing is not None:
@@ -177,6 +183,8 @@ def scan(
         raise
     finally:
         connection.close()
+        if timings is not None:
+            timings.add("scan.total", perf_counter() - started)
 
 
 def hash_file(path: Path) -> str:

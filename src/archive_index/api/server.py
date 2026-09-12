@@ -24,6 +24,7 @@ from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
 from ..indexing.recommendation import build_recommendations
 from ..indexing.scanner import scan
+from ..timing import TimingRecorder
 from ..jobs.engine import JobStore
 from ..workspace import Workspace, WorkspaceError
 
@@ -199,8 +200,9 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
     ) -> None:
         job_ids = [job_id]
         current_job_id = job_id
+        timings = TimingRecorder()
         try:
-            scan_result = scan(workspace, job_id=job_id, cancel_event=cancel_event)
+            scan_result = scan(workspace, job_id=job_id, cancel_event=cancel_event, timings=timings)
             if scan_result.cancelled:
                 return
             media_job_id = JobStore(workspace).create("media_index")
@@ -208,17 +210,38 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 self._cancel_events[(handle, media_job_id)] = cancel_event
             job_ids.append(media_job_id)
             current_job_id = media_job_id
-            media_result = index_workspace(workspace, job_id=media_job_id, cancel_event=cancel_event)
+            media_result = index_workspace(
+                workspace,
+                components=("metadata", "thumbnail"),
+                job_id=media_job_id,
+                cancel_event=cancel_event,
+                timings=timings,
+            )
             if media_result.cancelled:
+                return
+            quality_job_id = JobStore(workspace).create("media_quality")
+            with self._active_lock:
+                self._cancel_events[(handle, quality_job_id)] = cancel_event
+            job_ids.append(quality_job_id)
+            current_job_id = quality_job_id
+            quality_result = index_workspace(
+                workspace,
+                components=("quality",),
+                job_id=quality_job_id,
+                cancel_event=cancel_event,
+                timings=timings,
+            )
+            if quality_result.cancelled:
                 return
             feature_job_id = JobStore(workspace).create("visual_features")
             with self._active_lock:
                 self._cancel_events[(handle, feature_job_id)] = cancel_event
             job_ids.append(feature_job_id)
             current_job_id = feature_job_id
-            feature_result = extract_visual_features(
-                workspace, job_id=feature_job_id, cancel_event=cancel_event
-            )
+            with timings.measure("visual_features.total"):
+                feature_result = extract_visual_features(
+                    workspace, job_id=feature_job_id, cancel_event=cancel_event, timings=timings
+                )
             if feature_result.cancelled:
                 return
             group_job_id = JobStore(workspace).create("grouping")
@@ -226,7 +249,8 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 self._cancel_events[(handle, group_job_id)] = cancel_event
             job_ids.append(group_job_id)
             current_job_id = group_job_id
-            group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
+            with timings.measure("grouping.total"):
+                group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
             if group_result.cancelled:
                 return
             recommendation_job_id = JobStore(workspace).create("recommendations")
@@ -234,9 +258,10 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 self._cancel_events[(handle, recommendation_job_id)] = cancel_event
             job_ids.append(recommendation_job_id)
             current_job_id = recommendation_job_id
-            recommendation_result = build_recommendations(
-                workspace, job_id=recommendation_job_id, cancel_event=cancel_event
-            )
+            with timings.measure("recommendations.total"):
+                recommendation_result = build_recommendations(
+                    workspace, job_id=recommendation_job_id, cancel_event=cancel_event
+                )
             if recommendation_result.cancelled:
                 return
         except Exception:
@@ -248,6 +273,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             except Exception:
                 LOGGER.exception("could not mark workspace job failed")
         finally:
+            LOGGER.info("workspace indexing timings: %s", timings.summary())
             with self._active_lock:
                 for active_job_id in job_ids:
                     self._cancel_events.pop((handle, active_job_id), None)

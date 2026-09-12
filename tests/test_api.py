@@ -37,6 +37,7 @@ class ApiTests(unittest.TestCase):
         _write_image(root / "nested" / "nested.jpg", (320, 240))
         (root / "clip.mp4").write_bytes(b"not a real video")
         self.workspace = Workspace.create(root)
+        self.workspace.set_quality_provider("lar-iqa")
         scan(self.workspace)
         index_workspace(self.workspace, components=("metadata", "thumbnail", "quality"))
         self.server = WorkspaceHTTPServer(("127.0.0.1", 0), self.workspace)

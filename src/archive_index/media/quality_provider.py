@@ -6,9 +6,10 @@ import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol, Sequence
 
 from PIL import Image, ImageOps
@@ -122,10 +123,12 @@ class LARIQAProvider:
         self,
         model_path: Path | None = None,
         *,
-        batch_size: int = 1,
+        batch_size: int | None = None,
         precision: str = "fp32",
-        preparation_workers: int = 8,
+        preparation_workers: int | None = None,
     ) -> None:
+        batch_size = batch_size or default_quality_batch_size()
+        preparation_workers = preparation_workers or default_quality_preparation_workers()
         if batch_size < 1:
             raise ValueError("quality batch size must be positive")
         if precision not in {"fp32", "fp16"}:
@@ -141,6 +144,7 @@ class LARIQAProvider:
         self._model = None
         self._device = None
         self.checkpoint_sha256: str | None = None
+        self.last_timings: dict[str, float] = {}
 
     @property
     def settings(self) -> dict[str, object]:
@@ -162,27 +166,16 @@ class LARIQAProvider:
         self._load()
 
     def score_paths(self, paths: Sequence[Path]) -> list[ProviderResult]:
-        self._load()
-        if not paths:
-            return []
+        with self.batch_session() as session:
+            return session.score_paths(paths)
 
-        batches = [paths[start : start + self.batch_size] for start in range(0, len(paths), self.batch_size)]
-        results: list[ProviderResult] = []
+    @contextmanager
+    def batch_session(self):
+        self._load()
+        self.last_timings = {}
         with ThreadPoolExecutor(max_workers=self.preparation_workers) as preparation_pool:
             with ThreadPoolExecutor(max_workers=1) as prefetch_pool:
-                future = prefetch_pool.submit(self._prepare_batch, preparation_pool, batches[0])
-                for index, batch_paths in enumerate(batches):
-                    prepared = future.result()
-                    if index + 1 < len(batches):
-                        future = prefetch_pool.submit(
-                            self._prepare_batch,
-                            preparation_pool,
-                            batches[index + 1],
-                        )
-                    authentic = [item[0] for item in prepared]
-                    synthetic = [item[1] for item in prepared]
-                    results.extend(self._score_tensors(authentic, synthetic))
-        return results
+                yield _LARIQABatchSession(self, preparation_pool, prefetch_pool)
 
     def score_images(self, images: Sequence[Image.Image]) -> list[ProviderResult]:
         self._load()
@@ -220,15 +213,25 @@ class LARIQAProvider:
 
     def _score_tensors(self, authentic, synthetic) -> list[ProviderResult]:
         torch = self._torch
+        transfer_started = perf_counter()
         authentic_batch = torch.stack(authentic).to(self._device)
         synthetic_batch = torch.stack(synthetic).to(self._device)
+        self.last_timings["quality.stack_and_transfer"] = (
+            self.last_timings.get("quality.stack_and_transfer", 0.0)
+            + perf_counter() - transfer_started
+        )
         autocast = (
             torch.autocast(device_type="cuda", dtype=torch.float16)
             if self.precision == "fp16" and self._device.type == "cuda"
             else nullcontext()
         )
+        model_started = perf_counter()
         with torch.inference_mode(), autocast:
             output = self._model(authentic_batch, synthetic_batch).reshape(-1).detach().cpu().tolist()
+        self.last_timings["quality.model_and_output"] = (
+            self.last_timings.get("quality.model_and_output", 0.0)
+            + perf_counter() - model_started
+        )
         results = []
         for value in output:
             if not isinstance(value, (int, float)) or value != value or value in {float("inf"), float("-inf")}:
@@ -320,8 +323,8 @@ def default_model_path() -> Path:
 def create_quality_provider(
     selection: str | QualityProvider | None,
     *,
-    batch_size: int = 1,
-    preparation_workers: int = 8,
+    batch_size: int | None = None,
+    preparation_workers: int | None = None,
 ) -> QualityProvider:
     if not isinstance(selection, str) and selection is not None:
         return selection
@@ -340,3 +343,60 @@ def _sha256(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def default_quality_batch_size() -> int:
+    try:
+        import torch
+    except ImportError:
+        return 4
+    return 16 if torch.cuda.is_available() else 4
+
+
+def default_quality_preparation_workers() -> int:
+    try:
+        import torch
+    except ImportError:
+        return 2
+    return 8 if torch.cuda.is_available() else 2
+
+
+class _LARIQABatchSession:
+    def __init__(self, provider, preparation_pool, prefetch_pool) -> None:
+        self.provider = provider
+        self.preparation_pool = preparation_pool
+        self.prefetch_pool = prefetch_pool
+
+    def score_paths(self, paths: Sequence[Path]) -> list[ProviderResult]:
+        if not paths:
+            return []
+        batches = [
+            paths[start : start + self.provider.batch_size]
+            for start in range(0, len(paths), self.provider.batch_size)
+        ]
+        results: list[ProviderResult] = []
+        future = self.prefetch_pool.submit(
+            self.provider._prepare_batch, self.preparation_pool, batches[0]
+        )
+        for index in range(len(batches)):
+            prepared_started = perf_counter()
+            prepared = future.result()
+            self.provider.last_timings["quality.preparation_wait"] = (
+                self.provider.last_timings.get("quality.preparation_wait", 0.0)
+                + perf_counter() - prepared_started
+            )
+            if index + 1 < len(batches):
+                future = self.prefetch_pool.submit(
+                    self.provider._prepare_batch,
+                    self.preparation_pool,
+                    batches[index + 1],
+                )
+            authentic = [item[0] for item in prepared]
+            synthetic = [item[1] for item in prepared]
+            inference_started = perf_counter()
+            results.extend(self.provider._score_tensors(authentic, synthetic))
+            self.provider.last_timings["quality.inference"] = (
+                self.provider.last_timings.get("quality.inference", 0.0)
+                + perf_counter() - inference_started
+            )
+        return results

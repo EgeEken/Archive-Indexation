@@ -14,8 +14,8 @@ from ..workspace import Workspace
 from .grouping import FEATURE_ALGORITHM, FEATURE_VERSION
 
 RECOMMENDATION_ALGORITHM = "strict-group-representative-recommendation"
-RECOMMENDATION_VERSION = "2"
-MIN_RECOMMENDATION_QUALITY = 0.60
+RECOMMENDATION_VERSION = "3"
+MIN_RECOMMENDATION_QUALITY = 0.70
 RECOMMENDATION_SETTINGS = {
     "minimum_quality": MIN_RECOMMENDATION_QUALITY,
     "maximum_recommendations_per_group": 1,
@@ -75,6 +75,14 @@ def build_recommendations(
     store.set_total(identifier, len(groups))
     store.set_stage(identifier, "recommendations")
     store.start(identifier)
+    if workspace.quality_provider() == "off":
+        with workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                (_timestamp(),),
+            )
+        store.complete(identifier, 0, 0)
+        return _result(identifier, None, groups, [], started)
     if grouping_run_id is None:
         store.complete(identifier, 0, 0)
         return _result(identifier, None, groups, [], started)

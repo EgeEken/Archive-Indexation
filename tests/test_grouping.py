@@ -149,6 +149,25 @@ class GroupingTests(unittest.TestCase):
             result = extract_visual_features(workspace)
         self.assertEqual((result.errors, result.skipped), (0, 1))
 
+    def test_parallel_feature_extraction_matches_serial_output(self) -> None:
+        workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene", "c.jpg": "other"})
+        with closing(workspace.connect()) as connection:
+            serial = connection.execute(
+                "SELECT physical_file_id, dhash, luma_json, color_hist_json FROM visual_feature ORDER BY physical_file_id"
+            ).fetchall()
+        with workspace.transaction() as connection:
+            connection.execute("DELETE FROM visual_feature")
+            connection.execute(
+                "UPDATE component_state SET status = 'pending', input_fingerprint = NULL WHERE component = 'group_feature'"
+            )
+        result = extract_visual_features(workspace, workers=4)
+        with closing(workspace.connect()) as connection:
+            parallel = connection.execute(
+                "SELECT physical_file_id, dhash, luma_json, color_hist_json FROM visual_feature ORDER BY physical_file_id"
+            ).fetchall()
+        self.assertEqual((result.errors, result.skipped), (0, 0))
+        self.assertEqual([tuple(row) for row in serial], [tuple(row) for row in parallel])
+
     def test_cancelled_rebuild_preserves_previous_run(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene"})
         self._set_times(workspace, {"a.jpg": "2026-09-03T12:00:00+03:00", "b.jpg": "2026-09-03T12:00:05+03:00"})

@@ -25,6 +25,65 @@ def index_workspace(workspace, *args, **kwargs):
 
 
 class MediaPipelineTests(unittest.TestCase):
+    def test_parallel_media_path_batches_thumbnail_work_and_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            for name in ("a.jpg", "b.jpg", "c.jpg"):
+                _write_image(root / name, size=(320, 240))
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            result = index_workspace(
+                workspace,
+                components=("metadata", "thumbnail"),
+                thumbnail_workers=2,
+            )
+
+            self.assertEqual((result.errors, result.skipped), (0, 0))
+            with closing(workspace.connect()) as connection:
+                statuses = connection.execute(
+                    "SELECT component, status FROM component_state ORDER BY physical_file_id, component"
+                ).fetchall()
+            self.assertEqual({(row[0], row[1]) for row in statuses}, {("metadata", "complete"), ("thumbnail", "complete")})
+
+    def test_parallel_media_path_isolates_one_thumbnail_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "good.jpg", size=(320, 240))
+            _write_image(root / "bad.jpg", size=(320, 240))
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            from archive_index.indexing import media_pipeline
+
+            real_generate = media_pipeline.generate_thumbnail
+
+            def fail_one(source, destination, size, prepared_image=None, media_type="image", **kwargs):
+                if source.name == "bad.jpg":
+                    raise OSError("simulated thumbnail failure")
+                return real_generate(source, destination, size, prepared_image, media_type, **kwargs)
+
+            with patch("archive_index.indexing.media_pipeline.generate_thumbnail", side_effect=fail_one):
+                result = index_workspace(
+                    workspace,
+                    components=("metadata", "thumbnail"),
+                    thumbnail_workers=2,
+                )
+
+            self.assertEqual((result.succeeded, result.errors), (1, 1))
+            with closing(workspace.connect()) as connection:
+                statuses = {
+                    (row[0], row[1]): row[2]
+                    for row in connection.execute(
+                        "SELECT physical_file.relative_path, component_state.component, component_state.status FROM physical_file JOIN component_state ON component_state.physical_file_id = physical_file.id"
+                    ).fetchall()
+                }
+            self.assertEqual(statuses[("good.jpg", "thumbnail")], "complete")
+            self.assertEqual(statuses[("bad.jpg", "thumbnail")], "failed")
+            self.assertEqual(statuses[("bad.jpg", "metadata")], "complete")
+
     def test_metadata_thumbnail_cache_and_invalidation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"

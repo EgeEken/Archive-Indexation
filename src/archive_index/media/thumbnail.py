@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .metadata import DECODER_GAP_EXTENSIONS, MetadataExtractionError, UnsupportedDecoderError
+from ..timing import TimingRecorder, timed
 
 THUMBNAIL_SIZE = (320, 320)
 IMAGE_THUMBNAIL_ALGORITHM = "pillow-reduced-jpeg"
@@ -49,25 +50,31 @@ def generate_thumbnail(
     size: tuple[int, int] = THUMBNAIL_SIZE,
     prepared_image: Image.Image | None = None,
     media_type: str = "image",
+    timings: TimingRecorder | None = None,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
     try:
-        image = (
-            prepared_image.copy()
-            if prepared_image is not None
-            else load_video_frame(source, size)
-            if media_type == "video"
-            else load_reduced_image(source, size)
-        )
+        if prepared_image is not None:
+            image = prepared_image.copy()
+        else:
+            with timed(timings, "thumbnail.decode"):
+                image = (
+                    load_video_frame(source, size)
+                    if media_type == "video"
+                    else load_reduced_image(source, size)
+                )
         try:
-            image.thumbnail(size, Image.Resampling.LANCZOS)
-            image.save(temporary, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
+            with timed(timings, "thumbnail.resize_encode"):
+                image.thumbnail(size, Image.Resampling.LANCZOS)
+                image.save(temporary, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
         finally:
             image.close()
-        with Image.open(temporary) as validation:
-            validation.verify()
-        os.replace(temporary, destination)
+        with timed(timings, "thumbnail.verify"):
+            with Image.open(temporary) as validation:
+                validation.verify()
+        with timed(timings, "thumbnail.finalize"):
+            os.replace(temporary, destination)
     except UnidentifiedImageError as error:
         if source.suffix.casefold() in DECODER_GAP_EXTENSIONS:
             raise UnsupportedDecoderError(

@@ -46,8 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
     index = commands.add_parser("index", help="scan and process a workspace")
     index.add_argument("workspace", type=Path, help="workspace root")
     index.add_argument("--quality-provider", choices=("off", "lar-iqa"), help="quality backend for this workspace")
-    index.add_argument("--quality-batch-size", choices=(1, 2, 4, 8, 16), type=int, default=1)
-    index.add_argument("--quality-preparation-workers", choices=(1, 2, 4, 8), type=int, default=8)
+    index.add_argument("--quality-batch-size", choices=(1, 2, 4, 8, 16), type=int)
+    index.add_argument("--quality-preparation-workers", choices=(1, 2, 4, 8), type=int)
+    index.add_argument("--thumbnail-workers", choices=(1, 2, 4, 8), type=int)
+    index.add_argument("--feature-workers", choices=(1, 2, 4, 8), type=int)
     compact = commands.add_parser("compact", help="compact a workspace index database")
     compact.add_argument("workspace", type=Path, help="workspace root")
     recommend = commands.add_parser("recommend", help="rebuild automatic recommendations")
@@ -77,6 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.quality_provider,
             args.quality_batch_size,
             args.quality_preparation_workers,
+            args.thumbnail_workers,
+            args.feature_workers,
         )
 
     if args.command == "compact":
@@ -113,13 +117,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _index_command(
     root: Path,
     quality_provider: str | None = None,
-    quality_batch_size: int = 1,
-    quality_preparation_workers: int = 8,
+    quality_batch_size: int | None = None,
+    quality_preparation_workers: int | None = None,
+    thumbnail_workers: int | None = None,
+    feature_workers: int | None = None,
 ) -> int:
     from .indexing.media_pipeline import index_workspace
     from .indexing.grouping import build_groups, extract_visual_features
     from .indexing.recommendation import build_recommendations
     from .indexing.scanner import scan
+    from .timing import TimingRecorder
     from .jobs.engine import JobStore
     from .workspace import Workspace
 
@@ -129,6 +136,7 @@ def _index_command(
     JobStore(workspace).recover_interrupted()
 
     cancel_event = Event()
+    timings = TimingRecorder()
     old_handler = signal.getsignal(signal.SIGINT)
 
     def request_cancel(signum, frame) -> None:
@@ -142,45 +150,65 @@ def _index_command(
             workspace,
             cancel_event=cancel_event,
             progress=_progress_reporter("scan"),
+            timings=timings,
         )
         if scan_result.cancelled:
             return 130
         media_result = index_workspace(
             workspace,
+            components=("metadata", "thumbnail"),
             cancel_event=cancel_event,
             progress=_progress_reporter("media"),
-            quality_provider=quality_provider,
-            quality_batch_size=quality_batch_size,
-            quality_preparation_workers=quality_preparation_workers,
+            thumbnail_workers=thumbnail_workers,
+            timings=timings,
         )
         if media_result.cancelled:
             return 130
-        feature_result = extract_visual_features(
+        quality_result = index_workspace(
             workspace,
+            components=("quality",),
             cancel_event=cancel_event,
-            progress=_progress_reporter("features"),
+            progress=_progress_reporter("quality"),
+            quality_provider=quality_provider,
+            quality_batch_size=quality_batch_size,
+            quality_preparation_workers=quality_preparation_workers,
+            timings=timings,
         )
+        if quality_result.cancelled:
+            return 130
+        with timings.measure("visual_features.total"):
+            feature_result = extract_visual_features(
+                workspace,
+                cancel_event=cancel_event,
+                progress=_progress_reporter("features"),
+                workers=feature_workers,
+                timings=timings,
+            )
         if feature_result.cancelled:
             return 130
-        grouping_result = build_groups(
-            workspace,
-            cancel_event=cancel_event,
-            progress=_progress_reporter("groups"),
-        )
-        recommendation_result = build_recommendations(
-            workspace,
-            cancel_event=cancel_event,
-            progress=_progress_reporter("recommendations"),
-        )
+        with timings.measure("grouping.total"):
+            grouping_result = build_groups(
+                workspace,
+                cancel_event=cancel_event,
+                progress=_progress_reporter("groups"),
+            )
+        with timings.measure("recommendations.total"):
+            recommendation_result = build_recommendations(
+                workspace,
+                cancel_event=cancel_event,
+                progress=_progress_reporter("recommendations"),
+            )
         if recommendation_result.cancelled:
             return 130
         print(
-            f"\nIndex complete: {media_result.succeeded} processed, "
-            f"{media_result.skipped} skipped, {media_result.errors} failed; "
+            f"\nIndex complete: {media_result.succeeded + quality_result.succeeded} processed, "
+            f"{media_result.skipped + quality_result.skipped} skipped, "
+            f"{media_result.errors + quality_result.errors} failed; "
             f"{grouping_result.multi_image_groups} multi-image groups; "
             f"{recommendation_result.auto_recommended} recommendations.",
             flush=True,
         )
+        LOGGER.info("indexing timings: %s", timings.summary())
         return 130 if media_result.cancelled else 0
     finally:
         signal.signal(signal.SIGINT, old_handler)

@@ -139,19 +139,8 @@ class Workspace:
                 (provider, _timestamp()),
             )
             connection.execute(
-                """
-                UPDATE component_state
-                SET status = 'pending', input_fingerprint = NULL,
-                    started_at = NULL, completed_at = NULL, error_message = NULL
-                WHERE component = 'quality'
-                """
-            )
-            connection.execute(
-                """
-                UPDATE physical_file
-                SET quality_raw_json = NULL, quality_components_json = NULL,
-                    quality_score = NULL, quality_algorithm = NULL, quality_version = NULL
-                """
+                "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                (_timestamp(),),
             )
 
     @contextmanager
