@@ -34,7 +34,7 @@ METADATA_ALGORITHM = "pillow-curated-exif-ffprobe"
 METADATA_VERSION = "4"
 COMPONENTS = frozenset({METADATA_COMPONENT, THUMBNAIL_COMPONENT, QUALITY_COMPONENT})
 MEDIA_BATCH_SIZE = 32
-THUMBNAIL_WORKERS = 8
+THUMBNAIL_WORKERS = 12
 
 
 def index_workspace(
@@ -68,6 +68,28 @@ def index_workspace(
             ).fetchall()
         finally:
             connection.close()
+
+    if selected_components == (QUALITY_COMPONENT,) and not provider.enabled:
+        with timed(timings, "quality.off_state_check"):
+            quality_state_current = _quality_off_state_current(workspace, rows)
+        if quality_state_current:
+            result = run_batches(
+                workspace,
+                "media_index",
+                rows,
+                lambda batch: {row["id"]: "skipped" for row in batch},
+                batch_size=MEDIA_BATCH_SIZE,
+                item_key=lambda row: row["id"],
+                job_id=job_id,
+                cancel_event=cancel_event,
+                progress=progress,
+                physical_file_id=lambda row: row["id"],
+                relative_path=lambda row: row["relative_path"],
+                stage="quality disabled",
+            )
+            if timings is not None:
+                timings.add("media.total", perf_counter() - started)
+            return result
 
     with timed(timings, "media.component_state_prep", len(rows)):
         state_map = _prepare_component_states(workspace, rows, selected_components, provider)
@@ -308,6 +330,34 @@ def _prepare_component_states(
         ).fetchall():
             state_map[(state["physical_file_id"], state["component"])] = state
     return state_map
+
+
+def _quality_off_state_current(workspace: Workspace, rows) -> bool:
+    row_ids = [row["id"] for row in rows]
+    if not row_ids:
+        return True
+    placeholders = ",".join("?" for _ in row_ids)
+    connection = workspace.connect()
+    try:
+        states = {
+            state["physical_file_id"]: state
+            for state in connection.execute(
+                f"SELECT * FROM component_state WHERE component = ? AND physical_file_id IN ({placeholders})",
+                [QUALITY_COMPONENT, *row_ids],
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    for row in rows:
+        state = states.get(row["id"])
+        if state is None or state["status"] in {"pending", "running", "failed"}:
+            return False
+        if state["status"] == "complete" and (
+            state["input_fingerprint"] != _input_fingerprint(row)
+            or row["quality_score"] is None
+        ):
+            return False
+    return True
 
 
 def _index_media_batches(

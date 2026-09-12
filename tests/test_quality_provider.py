@@ -90,7 +90,11 @@ class QualityProviderTests(unittest.TestCase):
                 ).fetchone()
 
             workspace.set_quality_provider("off")
-            result = index_workspace(workspace, components=("quality",), quality_provider=OffQualityProvider())
+            with patch(
+                "archive_index.indexing.media_pipeline._prepare_component_states",
+                side_effect=AssertionError("quality-off state preparation should be skipped"),
+            ):
+                result = index_workspace(workspace, components=("quality",), quality_provider=OffQualityProvider())
             with closing(workspace.connect()) as connection:
                 after = connection.execute(
                     "SELECT quality_score, quality_raw_json FROM physical_file"
