@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import mimetypes
@@ -20,12 +21,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..app_state import WorkspaceRegistry, workspace_id
+from ..configuration import default_configuration, normalize_configuration
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
 from ..indexing.recommendation import build_recommendations
 from ..indexing.scanner import scan
+from ..media.quality_provider import default_model_path
 from ..timing import TimingRecorder
 from ..jobs.engine import JobStore
+from ..planning import analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
 
 LOGGER = logging.getLogger(__name__)
@@ -96,13 +100,99 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         root = Path(path).expanduser().resolve(strict=False)
         indexed = (root / ".archive-index").is_dir()
         try:
-            workspace = Workspace.open(root) if indexed else Workspace.create(root)
+            workspace = Workspace.open(root) if indexed else None
         except (WorkspaceError, OSError) as error:
             raise InvalidRequest(str(error)) from error
+        if workspace is None:
+            try:
+                analysis = analyze_folder(root)
+            except (ValueError, OSError) as error:
+                raise InvalidRequest(str(error)) from error
+            return {
+                "workspace": None,
+                "job_id": None,
+                "setup": {
+                    "path": str(root),
+                    "indexed": False,
+                    "analysis": analysis,
+                    "configuration": default_configuration(),
+                },
+            }
         handle = self._register_workspace(workspace)
         self.registry.add(workspace)
-        job_id = self.start_indexing(handle) if not indexed else None
-        return {"workspace": _workspace_entry(handle, workspace, recent=True), "job_id": job_id}
+        return {"workspace": _workspace_entry(handle, workspace, recent=True), "job_id": None}
+
+    def analyze_workspace(self, path: str) -> dict[str, object]:
+        if not isinstance(path, str) or not path.strip():
+            raise InvalidRequest("a workspace folder path is required")
+        root = Path(path).expanduser().resolve(strict=False)
+        if not root.is_dir() or root.name.casefold() == ".archive-index":
+            raise InvalidRequest(f"folder is not available: {root}")
+        try:
+            analysis = analyze_folder(root)
+        except (ValueError, OSError) as error:
+            raise InvalidRequest(str(error)) from error
+        indexed = (root / ".archive-index").is_dir()
+        configuration = default_configuration()
+        handle = None
+        if indexed:
+            try:
+                workspace = Workspace.open(root)
+                handle = self._register_workspace(workspace)
+                configuration = workspace.configuration()
+            except (WorkspaceError, OSError) as error:
+                raise InvalidRequest(str(error)) from error
+        return {"path": str(root), "indexed": indexed, "workspace": handle, "analysis": analysis, "configuration": configuration}
+
+    def plan_workspace_configuration(
+        self,
+        path: str,
+        configuration: dict[str, object],
+        analysis: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        if not isinstance(path, str) or not path.strip():
+            raise InvalidRequest("a workspace folder path is required")
+        root = Path(path).expanduser().resolve(strict=False)
+        try:
+            normalized = normalize_configuration(configuration, root)
+            source_analysis = analysis if analysis is not None else analyze_folder(root)
+            if not isinstance(source_analysis, dict):
+                raise ValueError("analysis must be an object")
+            if source_analysis.get("path") != str(root):
+                raise ValueError("analysis does not belong to this workspace folder")
+            if not isinstance(source_analysis.get("root"), dict):
+                raise ValueError("analysis is incomplete")
+            plan = plan_from_analysis(source_analysis, normalized)
+            plan["quality_readiness"] = _quality_readiness(normalized["quality_provider"])
+        except (ValueError, OSError) as error:
+            raise InvalidRequest(str(error)) from error
+        return {"path": str(root), "configuration": normalized, "plan": plan}
+
+    def apply_workspace_configuration(
+        self,
+        configuration: dict[str, object],
+        *,
+        handle: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, object]:
+        if handle:
+            selected, workspace = self.resolve_workspace(handle)
+        else:
+            if not isinstance(path, str) or not path.strip():
+                raise InvalidRequest("a workspace folder path is required")
+            root = Path(path).expanduser().resolve(strict=False)
+            try:
+                workspace = Workspace.open(root) if (root / ".archive-index").is_dir() else Workspace.create(root)
+            except (WorkspaceError, OSError) as error:
+                raise InvalidRequest(str(error)) from error
+            selected = self._register_workspace(workspace)
+        try:
+            config = workspace.apply_configuration(configuration)
+        except (ValueError, WorkspaceError) as error:
+            raise InvalidRequest(str(error)) from error
+        self.registry.add(workspace)
+        job_id = self.start_indexing(selected)
+        return {"workspace": _workspace_entry(selected, workspace, recent=True), "configuration": config, "job_id": job_id}
 
     def remove_workspace(self, handle: str) -> bool:
         return self.registry.remove(handle)
@@ -380,6 +470,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             handle, workspace = self._workspace(query)
             if request.path == "/api/workspace":
                 self._send_json(200, _workspace_summary(workspace, handle))
+            elif request.path == "/api/workspace/configuration":
+                self._send_json(200, {"configuration": workspace.configuration()})
             elif request.path == "/api/folders":
                 self._send_json(200, {"folders": _folders(workspace)})
             elif request.path == "/api/assets":
@@ -400,6 +492,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(error)})
         except ResourceNotFound as error:
             self._send_json(404, {"error": str(error)})
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
         except Exception:
             LOGGER.exception("GET %s failed", request.path)
             self._send_json(500, {"error": "internal server error"})
@@ -413,6 +507,30 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if request.path == "/api/workspaces/open":
                 self._send_json(200, self.server.open_workspace(**self._json_body()))
+                return
+            if request.path == "/api/workspaces/analyze":
+                body = self._json_body()
+                self._send_json(200, self.server.analyze_workspace(body.get("path")))
+                return
+            if request.path == "/api/workspaces/plan":
+                body = self._json_body()
+                self._send_json(
+                    200,
+                    self.server.plan_workspace_configuration(
+                        body.get("path"), body.get("configuration"), body.get("analysis")
+                    ),
+                )
+                return
+            if request.path == "/api/workspaces/apply":
+                body = self._json_body()
+                self._send_json(
+                    202,
+                    self.server.apply_workspace_configuration(
+                        body.get("configuration"),
+                        handle=body.get("workspace"),
+                        path=body.get("path"),
+                    ),
+                )
                 return
             if request.path == "/api/workspaces/remove-info":
                 body = self._json_body()
@@ -463,6 +581,23 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     raise InvalidRequest(str(error)) from error
                 self._send_json(200, {"quality_provider": workspace.quality_provider()})
                 return
+            if request.path == "/api/workspace/configuration/plan":
+                body = self._json_body()
+                configuration = normalize_configuration(body.get("configuration"), workspace.root)
+                analysis = body.get("analysis")
+                if analysis is not None:
+                    if (
+                        not isinstance(analysis, dict)
+                        or analysis.get("path") != str(workspace.root)
+                        or not isinstance(analysis.get("root"), dict)
+                    ):
+                        raise InvalidRequest("analysis does not belong to this workspace folder")
+                    plan = plan_from_analysis(analysis, configuration)
+                    plan["quality_readiness"] = _quality_readiness(configuration["quality_provider"])
+                else:
+                    plan = _workspace_plan(workspace, configuration)
+                self._send_json(200, {"configuration": configuration, "plan": plan})
+                return
             parts = request.path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "assets"] and parts[3] == "decision":
                 decision = self._json_body().get("decision")
@@ -482,6 +617,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(error)})
         except ResourceNotFound as error:
             self._send_json(404, {"error": str(error)})
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
 
     def _workspace(self, query: Mapping[str, list[str]]) -> tuple[str, Workspace]:
         return self.server.resolve_workspace(_first(query, "workspace", ""))
@@ -523,7 +660,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 FROM physical_file AS pf
                 LEFT JOIN component_state AS cs
                     ON cs.physical_file_id = pf.id AND cs.component = 'thumbnail'
-                WHERE pf.logical_asset_id = ?
+                WHERE pf.logical_asset_id = ? AND pf.in_scope = 1
                 ORDER BY pf.is_online DESC, pf.id
                 """,
                 (asset_id,),
@@ -540,7 +677,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         connection = workspace.connect()
         try:
             row = connection.execute(
-                "SELECT status, output_path FROM component_state WHERE physical_file_id = ? AND component = 'thumbnail'",
+                """SELECT cs.status, cs.output_path
+                   FROM component_state AS cs
+                   JOIN physical_file AS pf ON pf.id = cs.physical_file_id AND pf.in_scope = 1
+                   WHERE cs.physical_file_id = ? AND cs.component = 'thumbnail'""",
                 (physical_id,),
             ).fetchone()
         finally:
@@ -560,11 +700,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         connection = workspace.connect()
         try:
             row = connection.execute(
-                "SELECT relative_path, is_online FROM physical_file WHERE id = ?", (physical_id,)
+                "SELECT relative_path, is_online, in_scope FROM physical_file WHERE id = ?", (physical_id,)
             ).fetchone()
         finally:
             connection.close()
-        if row is None or not row["is_online"]:
+        if row is None or not row["is_online"] or not row["in_scope"]:
             raise ResourceNotFound("original is offline")
         try:
             source = workspace.absolute_path(row["relative_path"])
@@ -764,9 +904,14 @@ def _workspace_entry(handle: str, workspace: Workspace, recent: bool) -> dict[st
 def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
     connection = workspace.connect()
     try:
-        assets = connection.execute("SELECT COUNT(*) FROM logical_asset").fetchone()[0]
-        physical_files = connection.execute("SELECT COUNT(*) FROM physical_file").fetchone()[0]
-        online = connection.execute("SELECT COUNT(*) FROM physical_file WHERE is_online = 1").fetchone()[0]
+        assets = connection.execute(
+            """SELECT COUNT(DISTINCT la.id) FROM logical_asset AS la
+               JOIN physical_file AS pf ON pf.logical_asset_id = la.id
+               WHERE pf.in_scope = 1"""
+        ).fetchone()[0]
+        physical_files = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1").fetchone()[0]
+        online = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1 AND is_online = 1").fetchone()[0]
+        out_of_scope = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 0").fetchone()[0]
         latest = connection.execute("SELECT MAX(finished_at) FROM job WHERE status = 'complete'").fetchone()[0]
     finally:
         connection.close()
@@ -779,9 +924,47 @@ def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
         "physical_files": physical_files,
         "online_files": online,
         "offline_files": physical_files - online,
+        "out_of_scope_files": out_of_scope,
         "last_indexed": latest,
         "quality_provider": workspace.quality_provider(),
         "quality_providers": ["off", "lar-iqa"],
+    }
+
+
+def _workspace_plan(workspace: Workspace, configuration: Mapping[str, object]) -> dict[str, object]:
+    analysis = analyze_folder(workspace.root)
+    plan = plan_from_analysis(analysis, dict(configuration))
+    plan["quality_readiness"] = _quality_readiness(configuration["quality_provider"])
+    return plan
+
+
+def _quality_readiness(provider: object) -> dict[str, object]:
+    if provider == "off":
+        return {"status": "off", "ready": True}
+    modules = ("torch", "torchvision", "timm", "efficient_kan")
+    try:
+        runtime_ready = all(importlib.util.find_spec(module) is not None for module in modules)
+    except (ImportError, ModuleNotFoundError):
+        runtime_ready = False
+    checkpoint_ready = default_model_path().is_file()
+    if runtime_ready and checkpoint_ready:
+        status = "ready"
+        message = "Runtime and checkpoint appear ready."
+    elif not runtime_ready and not checkpoint_ready:
+        status = "needs_setup"
+        message = "Install the LAR-IQA runtime and checkpoint before indexing."
+    elif not runtime_ready:
+        status = "runtime_missing"
+        message = "The LAR-IQA runtime is not installed in this environment."
+    else:
+        status = "checkpoint_missing"
+        message = "The LAR-IQA checkpoint is not installed."
+    return {
+        "status": status,
+        "ready": runtime_ready and checkpoint_ready,
+        "runtime_ready": runtime_ready,
+        "checkpoint_ready": checkpoint_ready,
+        "message": message,
     }
 
 
@@ -814,23 +997,28 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     representative_ids, grouping_available = _current_representatives(workspace)
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
 
-    clauses = ["1 = 1"]
+    clauses = [
+        "EXISTS (SELECT 1 FROM physical_file AS pf_scope "
+        "WHERE pf_scope.logical_asset_id = la.id AND pf_scope.in_scope = 1)"
+    ]
     params: list[object] = []
     if folder:
         escaped = _like_value(folder)
         clauses.append(
             "EXISTS (SELECT 1 FROM physical_file AS pf_folder "
             "WHERE pf_folder.logical_asset_id = la.id "
+            "AND pf_folder.in_scope = 1 "
             "AND (pf_folder.relative_path = ? OR pf_folder.relative_path LIKE ? ESCAPE '\\'))"
         )
         params.extend([folder, f"{escaped}/%"])
     if media_type:
-        clauses.append("EXISTS (SELECT 1 FROM physical_file AS pf_type WHERE pf_type.logical_asset_id = la.id AND pf_type.media_type = ?)")
+        clauses.append("EXISTS (SELECT 1 FROM physical_file AS pf_type WHERE pf_type.logical_asset_id = la.id AND pf_type.in_scope = 1 AND pf_type.media_type = ?)")
         params.append(media_type)
     if search:
         clauses.append(
             "EXISTS (SELECT 1 FROM physical_file AS pf_search "
             "WHERE pf_search.logical_asset_id = la.id "
+            "AND pf_search.in_scope = 1 "
             "AND LOWER(pf_search.filename) LIKE ? ESCAPE '\\')"
         )
         params.append(f"%{_like_value(search.casefold())}%")
@@ -865,9 +1053,9 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             f"""
             SELECT la.*,
                    (SELECT MAX(pf_quality.quality_score) FROM physical_file AS pf_quality
-                    WHERE pf_quality.logical_asset_id = la.id) AS quality_score,
+                    WHERE pf_quality.logical_asset_id = la.id AND pf_quality.in_scope = 1) AS quality_score,
                    (SELECT MIN(LOWER(pf_sort.filename)) FROM physical_file AS pf_sort
-                    WHERE pf_sort.logical_asset_id = la.id) AS filename_sort
+                    WHERE pf_sort.logical_asset_id = la.id AND pf_sort.in_scope = 1) AS filename_sort
             FROM logical_asset AS la
             WHERE {where}
             ORDER BY {order}
@@ -943,9 +1131,9 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             f"""
             SELECT sg.*,
                    (SELECT MAX(pf.quality_score) FROM physical_file AS pf
-                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_quality_score,
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_quality_score,
                    (SELECT MIN(LOWER(pf.filename)) FROM physical_file AS pf
-                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_filename
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_filename
             FROM strict_group AS sg
             WHERE sg.run_id = ? {condition}
             ORDER BY {order}
@@ -964,6 +1152,11 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 FROM strict_group_member AS sgm
                 JOIN logical_asset AS la ON la.id = sgm.logical_asset_id
                 WHERE sgm.run_id = ? AND sgm.group_id IN ({placeholders})
+                  AND EXISTS (
+                      SELECT 1 FROM physical_file AS pf_member
+                      WHERE pf_member.logical_asset_id = sgm.logical_asset_id
+                        AND pf_member.in_scope = 1
+                  )
                 ORDER BY sgm.group_id, sgm.member_order
                 """,
                 [active["id"], *group_ids],
@@ -994,7 +1187,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             {
                 "group_id": row["group_id"],
                 "label": f"Group {index}",
-                "member_count": row["member_count"],
+                "member_count": len(group_members),
                 "first_capture_time": row["first_capture_time"],
                 "representative_asset_id": representative_id,
                 "representative_quality_score": row["representative_quality_score"],
@@ -1041,7 +1234,11 @@ def _group_filters(workspace: Workspace, query: Mapping[str, list[str]]) -> dict
 
 
 def _group_query_parts(run_id: str, filters: Mapping[str, object]) -> tuple[str, list[object], str]:
-    clauses: list[str] = []
+    clauses: list[str] = [
+        "EXISTS (SELECT 1 FROM strict_group_member AS sgm_scope "
+        "JOIN physical_file AS pf_scope ON pf_scope.logical_asset_id = sgm_scope.logical_asset_id "
+        "WHERE sgm_scope.run_id = sg.run_id AND sgm_scope.group_id = sg.group_id AND pf_scope.in_scope = 1)"
+    ]
     params: list[object] = []
     search = filters["search"]
     folder = filters["folder"]
@@ -1049,7 +1246,7 @@ def _group_query_parts(run_id: str, filters: Mapping[str, object]) -> tuple[str,
     if search:
         clauses.append(
             "EXISTS (SELECT 1 FROM strict_group_member AS sgm_filter "
-            "JOIN physical_file AS pf_filter ON pf_filter.logical_asset_id = sgm_filter.logical_asset_id "
+             "JOIN physical_file AS pf_filter ON pf_filter.logical_asset_id = sgm_filter.logical_asset_id AND pf_filter.in_scope = 1 "
             "WHERE sgm_filter.run_id = sg.run_id AND sgm_filter.group_id = sg.group_id "
             "AND LOWER(pf_filter.filename) LIKE ? ESCAPE '\\')"
         )
@@ -1058,7 +1255,7 @@ def _group_query_parts(run_id: str, filters: Mapping[str, object]) -> tuple[str,
         escaped = _like_value(str(folder))
         clauses.append(
             "EXISTS (SELECT 1 FROM strict_group_member AS sgm_folder "
-            "JOIN physical_file AS pf_folder ON pf_folder.logical_asset_id = sgm_folder.logical_asset_id "
+             "JOIN physical_file AS pf_folder ON pf_folder.logical_asset_id = sgm_folder.logical_asset_id AND pf_folder.in_scope = 1 "
             "WHERE sgm_folder.run_id = sg.run_id AND sgm_folder.group_id = sg.group_id "
             "AND (pf_folder.relative_path = ? OR pf_folder.relative_path LIKE ? ESCAPE '\\'))"
         )
@@ -1085,10 +1282,10 @@ def _group_query_parts(run_id: str, filters: Mapping[str, object]) -> tuple[str,
     condition = f" AND {' AND '.join(clauses)}" if clauses else ""
     direction = filters["direction"]
     if filters["sort_by"] == "quality":
-        quality = "(SELECT MAX(pf_order.quality_score) FROM physical_file AS pf_order WHERE pf_order.logical_asset_id = sg.representative_logical_asset_id)"
+        quality = "(SELECT MAX(pf_order.quality_score) FROM physical_file AS pf_order WHERE pf_order.logical_asset_id = sg.representative_logical_asset_id AND pf_order.in_scope = 1)"
         order = f"CASE WHEN {quality} IS NULL THEN 1 ELSE 0 END, {quality} {direction}, sg.group_id"
     elif filters["sort_by"] == "filename":
-        filename = "(SELECT MIN(LOWER(pf_order.filename)) FROM physical_file AS pf_order WHERE pf_order.logical_asset_id = sg.representative_logical_asset_id)"
+        filename = "(SELECT MIN(LOWER(pf_order.filename)) FROM physical_file AS pf_order WHERE pf_order.logical_asset_id = sg.representative_logical_asset_id AND pf_order.in_scope = 1)"
         order = f"CASE WHEN {filename} IS NULL THEN 1 ELSE 0 END, {filename} {direction}, sg.group_id"
     else:
         order = f"CASE WHEN sg.first_capture_time IS NULL THEN 1 ELSE 0 END, sg.first_capture_time {direction}, sg.group_id"
@@ -1116,9 +1313,9 @@ def _locate_group(workspace: Workspace, query: Mapping[str, list[str]]) -> dict[
             f"""
             SELECT sg.group_id,
                    (SELECT MAX(pf.quality_score) FROM physical_file AS pf
-                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_quality_score,
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_quality_score,
                    (SELECT MIN(LOWER(pf.filename)) FROM physical_file AS pf
-                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id) AS representative_filename,
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_filename,
                    ROW_NUMBER() OVER (ORDER BY {order}) AS position
             FROM strict_group AS sg
             WHERE sg.run_id = ? {condition}
@@ -1386,8 +1583,9 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
                 "quality_score": row["quality_score"],
                 "quality_raw": _json_or_none(row["quality_raw_json"]),
                 "quality_components": _json_or_none(row["quality_components_json"]),
-                "original_url": _url(f"/api/files/{row['id']}/original", handle) if row["is_online"] else None,
-                "thumbnail_url": _url(f"/api/files/{row['id']}/thumbnail", handle) if row["thumbnail_status"] == "complete" and row["thumbnail_output_path"] and _valid_index_file(workspace, row["thumbnail_output_path"]) else None,
+                "original_url": _url(f"/api/files/{row['id']}/original", handle) if row["is_online"] and row["in_scope"] else None,
+                "thumbnail_url": _url(f"/api/files/{row['id']}/thumbnail", handle) if row["in_scope"] and row["thumbnail_status"] == "complete" and row["thumbnail_output_path"] and _valid_index_file(workspace, row["thumbnail_output_path"]) else None,
+                "in_scope": bool(row["in_scope"]),
                 "components": {
                     "metadata": _component_info(row, "metadata"),
                     "thumbnail": _component_info(row, "thumbnail"),
@@ -1445,7 +1643,7 @@ def _physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dic
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
-            WHERE pf.logical_asset_id IN ({placeholders})
+             WHERE pf.logical_asset_id IN ({placeholders}) AND pf.in_scope = 1
             ORDER BY pf.logical_asset_id, pf.is_online DESC, pf.relative_path
             """,
             asset_ids,
@@ -1494,7 +1692,7 @@ def _problems(workspace: Workspace, query: Mapping[str, list[str]]):
 def _folders(workspace: Workspace) -> list[str]:
     connection = workspace.connect()
     try:
-        paths = [row[0] for row in connection.execute("SELECT relative_path FROM physical_file")]
+        paths = [row[0] for row in connection.execute("SELECT relative_path FROM physical_file WHERE in_scope = 1")]
     finally:
         connection.close()
     folders: set[str] = set()

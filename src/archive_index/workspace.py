@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import __version__
+from .configuration import configuration_from_connection, default_configuration, save_configuration
 from .db.connection import connect
 from .db.schema import apply_migrations
 
@@ -89,6 +91,7 @@ class Workspace:
                 """,
                 (str(uuid.uuid4()), now, now, __version__),
             )
+            save_configuration(connection, default_configuration(), workspace_root)
             connection.commit()
         finally:
             connection.close()
@@ -100,6 +103,8 @@ class Workspace:
         workspace = cls(workspace_root)
         if not workspace.index_directory.is_dir():
             raise WorkspaceError(f"not an archive workspace: {workspace_root}")
+        if _is_reparse_point(workspace.index_directory):
+            raise WorkspaceError("the application index cannot be a symlink or reparse point")
         if not workspace.database_path.is_file():
             raise WorkspaceError(f"workspace database is missing: {workspace.database_path}")
 
@@ -118,9 +123,7 @@ class Workspace:
     def quality_provider(self) -> str:
         connection = self.connect()
         try:
-            value = connection.execute(
-                "SELECT quality_provider FROM workspace_info WHERE id = 1"
-            ).fetchone()[0]
+            value = configuration_from_connection(connection)["quality_provider"]
         finally:
             connection.close()
         return value
@@ -134,14 +137,57 @@ class Workspace:
             ).fetchone()
             if active is not None:
                 raise WorkspaceError("quality provider cannot change while a job is running")
-            connection.execute(
-                "UPDATE workspace_info SET quality_provider = ?, updated_at = ? WHERE id = 1",
-                (provider, _timestamp()),
-            )
+            config = configuration_from_connection(connection)
+            config["quality_provider"] = provider
+            save_configuration(connection, config, self.root)
             connection.execute(
                 "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
                 (_timestamp(),),
             )
+
+    def configuration(self) -> dict[str, object]:
+        connection = self.connect()
+        try:
+            return configuration_from_connection(connection)
+        finally:
+            connection.close()
+
+    def apply_configuration(self, value: dict[str, object]) -> dict[str, object]:
+        from .configuration import path_in_scope
+
+        with self.transaction() as connection:
+            active = connection.execute(
+                "SELECT id FROM job WHERE status IN ('pending', 'running') LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                raise WorkspaceError("workspace configuration cannot change while a job is running")
+            previous = configuration_from_connection(connection)
+            config = save_configuration(connection, value, self.root)
+            rows = connection.execute("SELECT id, relative_path FROM physical_file").fetchall()
+            for row in rows:
+                connection.execute(
+                    "UPDATE physical_file SET in_scope = ? WHERE id = ?",
+                    (int(path_in_scope(row["relative_path"], config)), row["id"]),
+                )
+            connection.execute(
+                "UPDATE workspace_info SET updated_at = ? WHERE id = 1",
+                (_timestamp(),),
+            )
+            scope_changed = any(
+                previous[name] != config[name]
+                for name in ("include_images", "include_videos", "image_extensions", "video_extensions", "folder_rules")
+            )
+            if scope_changed:
+                connection.execute(
+                    "UPDATE workspace_grouping SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                    (_timestamp(),),
+                )
+            if previous["quality_provider"] != config["quality_provider"] or scope_changed:
+                connection.execute(
+                    "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                    (_timestamp(),),
+                )
+            return config
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -205,3 +251,13 @@ class Workspace:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))

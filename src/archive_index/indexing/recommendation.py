@@ -171,7 +171,7 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
                 ON sg.run_id = sgm.run_id AND sg.group_id = sgm.group_id
             JOIN logical_asset AS la ON la.id = sgm.logical_asset_id AND la.media_type = 'image'
             LEFT JOIN physical_file AS pf
-                ON pf.logical_asset_id = la.id AND pf.media_type = 'image' AND pf.is_online = 1
+                ON pf.logical_asset_id = la.id AND pf.media_type = 'image' AND pf.is_online = 1 AND pf.in_scope = 1
             LEFT JOIN visual_feature AS vf
                 ON vf.physical_file_id = pf.id
                AND vf.algorithm = ? AND vf.version = ?

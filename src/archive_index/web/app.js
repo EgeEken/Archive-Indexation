@@ -26,11 +26,14 @@ const state = {
   groupRequest: 0,
   dragging: false,
   viewerClickSuppressed: false,
+  setup: null,
 };
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
 const labels = { offline: "Offline", unsupported: "Unsupported", failed: "Processing failed", processing: "Processing" };
 const reviewFilters = ["all", "representatives", "recommended", "selected", "rejected", "undecided"];
+const supportedImageExtensions = [".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg", ".jpg", ".jxl", ".nef", ".png", ".raf", ".rw2", ".webp"];
+const supportedVideoExtensions = [".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"];
 
 function apiPath(path) {
   if (!state.workspace || !path.startsWith("/api/") || path === "/api/workspaces") return path;
@@ -175,6 +178,8 @@ function renderCard(item, index) {
 async function loadHome() {
   $("home-view").classList.remove("hidden");
   $("workspace-view").classList.add("hidden");
+  $("setup-view").classList.add("hidden");
+  $("configure-workspace").classList.add("hidden");
   $("index").classList.add("hidden");
   $("problems-button").classList.add("hidden");
   $("workspace-crumb").classList.add("hidden");
@@ -186,10 +191,11 @@ async function loadHome() {
 
 async function openWorkspace(path, create) {
   try {
-    const response = await fetch("/api/workspaces/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, create }) });
+    const response = await fetch("/api/workspaces/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not open workspace");
-    location.href = `/?workspace=${encodeURIComponent(payload.workspace.id)}`;
+    if (payload.indexed && payload.workspace) location.href = `/?workspace=${encodeURIComponent(payload.workspace)}`;
+    else showSetup(payload);
   } catch (error) {
     $("home-status").textContent = error.message;
   }
@@ -204,6 +210,174 @@ async function pickWorkspace() {
   } catch (error) {
     $("home-status").textContent = error.message;
   }
+}
+
+function folderRule(path, configuration) {
+  const rules = Object.fromEntries((configuration.folder_rules || []).map((rule) => [rule.path.toLowerCase(), Boolean(rule.included)]));
+  const parts = path ? path.split("/") : [];
+  for (let index = parts.length; index >= 0; index -= 1) {
+    const value = rules[parts.slice(0, index).join("/").toLowerCase()];
+    if (value !== undefined) return value;
+  }
+  return true;
+}
+
+function folderRuleSetting(path, configuration) {
+  const rule = (configuration.folder_rules || []).find((candidate) => candidate.path.toLowerCase() === path.toLowerCase());
+  return rule ? (rule.included ? "include" : "exclude") : "inherit";
+}
+
+function setupExtensionCategory(extension) {
+  if (supportedVideoExtensions.includes(extension)) return "Video";
+  if ([".jpg", ".jpeg"].includes(extension)) return "JPEG";
+  if ([".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(extension)) return "RAW";
+  return "Other supported image";
+}
+
+function renderSetupFolder(node, configuration) {
+  const setting = folderRuleSetting(node.path, configuration);
+  const children = (node.children || []).map((child) => renderSetupFolder(child, configuration)).join("");
+  const label = node.path ? node.name : "Workspace root";
+  const counts = `${node.recognized_files || 0} supported · ${node.recursive_files || 0} files`;
+  const categories = Object.entries(node.categories || {}).map(([category, count]) => `<span class="scope-chip">${count} ${escapeHtml(category)}</span>`).join("");
+  const examples = (node.examples || []).map((example) => escapeHtml(example)).join(" · ");
+  return `<details class="folder-node"${node.path ? "" : " open"}><summary><span class="folder-choice"><span>${escapeHtml(label)}</span><select data-folder-path="${escapeHtml(node.path)}" aria-label="Scope for ${escapeHtml(label)}"><option value="inherit"${setting === "inherit" ? " selected" : ""}>Inherited</option><option value="include"${setting === "include" ? " selected" : ""}>Include</option><option value="exclude"${setting === "exclude" ? " selected" : ""}>Exclude</option></select></span><span class="muted">${counts}</span></summary>${node.error ? `<p class="error">${escapeHtml(node.error)}</p>` : ""}${categories ? `<div class="scope-chips">${categories}</div>` : ""}${examples ? `<div class="scope-examples">Examples: ${examples}</div>` : ""}${children ? `<div class="folder-children">${children}</div>` : ""}</details>`;
+}
+
+function setupExtensionsMarkup(configuration) {
+  const imageExtensions = configuration.image_extensions || [];
+  const videoExtensions = configuration.video_extensions || [];
+  const imageGroups = ["JPEG", "RAW", "Other supported image"].map((category) => {
+    const values = supportedImageExtensions.filter((extension) => setupExtensionCategory(extension) === category);
+    return `<div class="extension-group"><strong>${category}</strong><div class="extension-list">${values.map((extension) => `<label><input type="checkbox" data-extension="${extension}" data-extension-kind="image"${imageExtensions.includes(extension) ? " checked" : ""}> ${extension}</label>`).join("")}</div></div>`;
+  }).join("");
+  const video = supportedVideoExtensions.map((extension) => `<label><input type="checkbox" data-extension="${extension}" data-extension-kind="video"${videoExtensions.includes(extension) ? " checked" : ""}> ${extension}</label>`).join("");
+  return `<div class="scope-options"><label class="setup-toggle"><input id="setup-include-images" type="checkbox"${configuration.include_images ? " checked" : ""}> Include supported image files</label><div class="extension-groups">${imageGroups}</div><div class="extension-group"><strong>Video extensions</strong><div class="extension-list">${video}</div></div></div>`;
+}
+
+function setupPlan(configuration) {
+  const totals = { files: 0, bytes: 0, categories: {} };
+  const includeExtension = (extension) => {
+    if ((configuration.image_extensions || []).includes(extension)) return Boolean(configuration.include_images);
+    if ((configuration.video_extensions || []).includes(extension)) return Boolean(configuration.include_videos);
+    return false;
+  };
+  const visit = (node) => {
+    if (folderRule(node.path, configuration)) {
+      Object.entries(node.direct_extensions || {}).forEach(([extension, count]) => {
+        if (includeExtension(extension)) {
+          totals.files += count;
+          totals.bytes += node.direct_extension_bytes?.[extension] || 0;
+          const category = setupExtensionCategory(extension);
+          totals.categories[category] = (totals.categories[category] || 0) + count;
+        }
+      });
+    }
+    (node.children || []).forEach(visit);
+  };
+  visit(state.setup.analysis.root);
+  return totals;
+}
+
+function renderSetupPlanData(plan) {
+  const files = plan.selected_files ?? plan.files ?? 0;
+  const bytes = plan.selected_bytes ?? plan.bytes ?? 0;
+  const categories = plan.selected_categories ?? plan.categories ?? {};
+  const estimate = plan.estimated_seconds ? ` · roughly ${Math.max(1, Math.round(plan.estimated_seconds / 60))} min` : "";
+  const quality = state.setup.draftConfiguration.quality_provider === "lar-iqa"
+    ? `${plan.quality_image_count ?? 0} images need quality scoring${plan.quality_readiness?.ready ? " · runtime ready" : plan.quality_readiness?.message ? ` · ${plan.quality_readiness.message}` : ""}`
+    : "quality scoring off; existing scores are preserved";
+  $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>`;
+}
+
+function renderSetupPlan() {
+  renderSetupPlanData(setupPlan(state.setup.draftConfiguration));
+  $("setup-quality-note").textContent = state.setup.draftConfiguration.quality_provider === "lar-iqa" ? "Lightweight technical quality scoring will run after metadata and thumbnails; readiness is checked without loading the model." : "Technical quality scoring will be skipped; existing scores are preserved.";
+  const request = ++state.setup.planRequest;
+  fetch("/api/workspaces/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: state.setup.path, analysis: state.setup.analysis, configuration: state.setup.draftConfiguration }) })
+    .then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Could not plan workspace");
+      if (state.setup && request === state.setup.planRequest) renderSetupPlanData(payload.plan);
+    })
+    .catch(() => {});
+}
+
+function updateSetupConfiguration() {
+  const configuration = state.setup.draftConfiguration;
+  configuration.include_images = $("setup-include-images").checked;
+  configuration.include_videos = $("setup-include-videos").checked;
+  configuration.quality_provider = $("setup-quality-provider").value;
+  configuration.image_extensions = [...document.querySelectorAll('[data-extension-kind="image"]:checked')].map((input) => input.dataset.extension);
+  configuration.video_extensions = [...document.querySelectorAll('[data-extension-kind="video"]:checked')].map((input) => input.dataset.extension);
+  renderSetupPlan();
+}
+
+function bindSetupControls() {
+  $("setup-folder-tree").querySelectorAll("[data-folder-path]").forEach((input) => input.addEventListener("change", () => {
+    const path = input.dataset.folderPath;
+    state.setup.draftConfiguration.folder_rules = state.setup.draftConfiguration.folder_rules.filter((rule) => rule.path.toLowerCase() !== path.toLowerCase());
+    if (input.value !== "inherit") state.setup.draftConfiguration.folder_rules.push({ path, included: input.value === "include" });
+    renderSetupPlan();
+  }));
+  ["setup-include-images", "setup-include-videos", "setup-quality-provider"].forEach((id) => $(id).addEventListener("change", updateSetupConfiguration));
+  $("setup-type-options").querySelectorAll("[data-extension]").forEach((input) => input.addEventListener("change", updateSetupConfiguration));
+}
+
+function showSetup(payload) {
+  state.setup = {
+    path: payload.path,
+    indexed: Boolean(payload.indexed),
+    workspace: payload.workspace,
+    analysis: payload.analysis,
+    planRequest: 0,
+    draftConfiguration: JSON.parse(JSON.stringify(payload.configuration || {})),
+  };
+  $("home-view").classList.add("hidden");
+  $("workspace-view").classList.add("hidden");
+  $("setup-view").classList.remove("hidden");
+  $("index").classList.add("hidden");
+  $("configure-workspace").classList.add("hidden");
+  $("problems-button").classList.add("hidden");
+  $("workspace-crumb").classList.add("hidden");
+  $("setup-title").textContent = payload.indexed ? "Review workspace setup" : "Set up workspace";
+  $("setup-path").textContent = payload.path;
+  $("setup-include-videos").checked = Boolean(state.setup.draftConfiguration.include_videos);
+  $("setup-quality-provider").value = state.setup.draftConfiguration.quality_provider || "lar-iqa";
+  $("setup-folder-tree").innerHTML = renderSetupFolder(payload.analysis.root, state.setup.draftConfiguration);
+  $("setup-type-options").innerHTML = setupExtensionsMarkup(state.setup.draftConfiguration);
+  bindSetupControls();
+  renderSetupPlan();
+}
+
+async function configureWorkspace() {
+  try {
+    const workspace = await api("/api/workspace");
+    const response = await fetch("/api/workspaces/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: workspace.path }) });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Could not analyze workspace");
+    showSetup(payload);
+  } catch (error) {
+    $("status").textContent = error.message;
+  }
+}
+
+async function applySetup() {
+  try {
+    $("setup-apply").disabled = true;
+    const response = await fetch("/api/workspaces/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: state.setup.path, workspace: state.setup.workspace, configuration: state.setup.draftConfiguration }) });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Could not apply workspace setup");
+    location.href = `/?workspace=${encodeURIComponent(payload.workspace.id)}`;
+  } catch (error) {
+    $("setup-status").textContent = error.message;
+    $("setup-apply").disabled = false;
+  }
+}
+
+function cancelSetup() {
+  if (state.setup?.workspace) location.href = `/?workspace=${encodeURIComponent(state.setup.workspace)}`;
+  else { state.setup = null; loadHome().catch((error) => $("home-status").textContent = error.message); }
 }
 
 function formatBytes(value) {
@@ -248,14 +422,15 @@ async function finishWorkspaceRemoval(id, deleteIndex) {
 
 async function loadWorkspace() {
   $("home-view").classList.add("hidden");
+  $("setup-view").classList.add("hidden");
   $("workspace-view").classList.remove("hidden");
   $("index").classList.remove("hidden");
+  $("configure-workspace").classList.remove("hidden");
   $("workspace-crumb").classList.remove("hidden");
   const data = await api("/api/workspace");
   $("workspace-crumb").textContent = data.name;
   $("workspace-current-path").textContent = data.path;
   $("workspace-summary").textContent = `${data.assets} assets · ${data.online_files} online · ${data.offline_files} offline`;
-  $("quality-provider").value = data.quality_provider || "off";
   const folders = await api("/api/folders");
   $("folder").innerHTML = `<option value="">All folders</option>` + folders.folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join("");
   $("folder").value = query.get("folder") || "";
@@ -700,25 +875,10 @@ async function locateCurrentGroup() {
 
 $("workspace-form").addEventListener("submit", (event) => { event.preventDefault(); openWorkspace($("workspace-path").value.trim(), false); });
 $("browse-workspace").addEventListener("click", pickWorkspace);
+$("configure-workspace").addEventListener("click", configureWorkspace);
+$("setup-cancel").addEventListener("click", cancelSetup);
+$("setup-apply").addEventListener("click", applySetup);
 $("index").addEventListener("click", startIndex);
-$("quality-provider").addEventListener("change", async (event) => {
-  try {
-    await api("/api/quality-provider", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: event.target.value }),
-    });
-    if (event.target.value === "lar-iqa") {
-      $("status").textContent = "Starting lightweight quality scoring…";
-      await startIndex();
-    } else {
-      $("status").textContent = "Quality scoring is off.";
-    }
-    await loadAssets();
-  } catch (error) {
-    $("status").textContent = error.message;
-  }
-});
 $("problems-button").addEventListener("click", showProblems);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));

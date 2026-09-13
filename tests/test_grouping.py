@@ -65,6 +65,16 @@ class GroupingTests(unittest.TestCase):
         result = build_groups(workspace)
         self.assertEqual((result.total_groups, result.no_timestamp), (2, 1))
 
+    def test_out_of_scope_images_are_not_grouped(self) -> None:
+        workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene"})
+        configuration = workspace.configuration()
+        configuration["folder_rules"] = [{"path": "", "included": False}]
+        workspace.apply_configuration(configuration)
+
+        result = build_groups(workspace)
+
+        self.assertEqual((result.total_groups, result.eligible_images), (0, 0))
+
     def test_unknown_timezone_is_not_compared_as_utc(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene", "c.jpg": "scene"})
         with workspace.transaction() as connection:

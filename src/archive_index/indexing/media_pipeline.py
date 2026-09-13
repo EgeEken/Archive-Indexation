@@ -65,7 +65,7 @@ def index_workspace(
         connection = workspace.connect()
         try:
             rows = connection.execute(
-                "SELECT * FROM physical_file WHERE is_online = 1 ORDER BY relative_path"
+                "SELECT * FROM physical_file WHERE is_online = 1 AND in_scope = 1 ORDER BY relative_path"
             ).fetchall()
         finally:
             connection.close()

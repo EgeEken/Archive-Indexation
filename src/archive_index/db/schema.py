@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 11
+
+DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
+    ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
+    ".jpg", ".jxl", ".nef", ".png", ".raf", ".rw2", ".webp",
+}), separators=(",", ":"))
+DEFAULT_VIDEO_EXTENSIONS_JSON = json.dumps(sorted({
+    ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm",
+}), separators=(",", ":"))
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -223,6 +232,39 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     9: (
         "UPDATE workspace_info SET quality_provider = 'lar-iqa' WHERE quality_provider = 'off'",
     ),
+    10: (
+        "ALTER TABLE physical_file ADD COLUMN in_scope INTEGER NOT NULL DEFAULT 1 CHECK (in_scope IN (0, 1))",
+        """
+        CREATE TABLE workspace_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            quality_provider TEXT NOT NULL CHECK (quality_provider IN ('off', 'lar-iqa')),
+            include_images INTEGER NOT NULL DEFAULT 1 CHECK (include_images IN (0, 1)),
+            include_videos INTEGER NOT NULL DEFAULT 1 CHECK (include_videos IN (0, 1)),
+            image_extensions_json TEXT NOT NULL,
+            video_extensions_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE folder_scope_rule (
+            path TEXT PRIMARY KEY,
+            included INTEGER NOT NULL CHECK (included IN (0, 1))
+        )
+        """,
+        f"""
+        INSERT INTO workspace_config(
+            id, quality_provider, include_images, include_videos,
+            image_extensions_json, video_extensions_json, updated_at
+        )
+        SELECT 1, quality_provider, 1, 1,
+               '{DEFAULT_IMAGE_EXTENSIONS_JSON}',
+               '{DEFAULT_VIDEO_EXTENSIONS_JSON}', updated_at
+        FROM workspace_info WHERE id = 1
+        """,
+    ),
+    11: (
+        "ALTER TABLE workspace_config ADD COLUMN configuration_version INTEGER NOT NULL DEFAULT 1",
+    ),
 }
 
 
@@ -243,6 +285,36 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                     version == 8
                     and statement.startswith("ALTER TABLE workspace_info ADD COLUMN quality_provider")
                     and _has_column(connection, "workspace_info", "quality_provider")
+                ):
+                    continue
+                if (
+                    version == 10
+                    and statement.startswith("ALTER TABLE physical_file ADD COLUMN in_scope")
+                    and _has_column(connection, "physical_file", "in_scope")
+                ):
+                    continue
+                if (
+                    version == 10
+                    and statement.lstrip().startswith("CREATE TABLE workspace_config")
+                    and _has_table(connection, "workspace_config")
+                ):
+                    continue
+                if (
+                    version == 10
+                    and statement.lstrip().startswith("CREATE TABLE folder_scope_rule")
+                    and _has_table(connection, "folder_scope_rule")
+                ):
+                    continue
+                if (
+                    version == 10
+                    and statement.lstrip().startswith("INSERT INTO workspace_config")
+                    and connection.execute("SELECT 1 FROM workspace_config WHERE id = 1").fetchone() is not None
+                ):
+                    continue
+                if (
+                    version == 11
+                    and statement.startswith("ALTER TABLE workspace_config ADD COLUMN configuration_version")
+                    and _has_column(connection, "workspace_config", "configuration_version")
                 ):
                     continue
                 connection.execute(statement)
@@ -268,3 +340,10 @@ def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool
         row[1] == column
         for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
     )
+
+
+def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone() is not None

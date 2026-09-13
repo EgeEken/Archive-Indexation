@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from archive_index.api.server import WorkspaceHTTPServer, _pick_workspace_path
+from archive_index.api.server import WorkspaceHTTPServer, _pick_workspace_path, _quality_readiness
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
@@ -118,6 +118,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"bindBackdropClose", js)
         self.assertIn(b"pressedOutside", js)
         self.assertIn(b"model install lar-iqa", js)
+
         self.assertNotIn(b'$("details").addEventListener("click"', js)
         self.assertIn(b"#details .details-content", css)
         self.assertIn(b"focused-group .group-heading", css)
@@ -143,6 +144,26 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b'data-detail-thumbnail', js)
         self.assertIn(b'renderDetails(state.viewerDetail', js)
         self.assertIn(b'params.set("selection", state.selectionFilter)', js)
+
+    def test_configuration_plan_and_scoped_gallery(self) -> None:
+        status, configuration = _get_json(self.base_url, "/api/workspace/configuration")
+        self.assertEqual(status, 200)
+        draft = configuration["configuration"]
+        self.assertEqual(draft["configuration_version"], 1)
+        draft["include_videos"] = False
+        status, plan = _post_json(self.base_url, "/api/workspace/configuration/plan", {"configuration": draft})
+        self.assertEqual(status, 200)
+        self.assertEqual(plan["plan"]["selected_files"], 2)
+        invalid = dict(draft)
+        invalid["quality_provider"] = "future-provider"
+        status, error = _post_json(self.base_url, "/api/workspace/configuration/plan", {"configuration": invalid})
+        self.assertEqual(status, 400)
+        self.assertIn("quality_provider", error["error"])
+        self.workspace.apply_configuration(draft)
+        status, summary = _get_json(self.base_url, "/api/workspace")
+        self.assertEqual((status, summary["assets"], summary["out_of_scope_files"]), (200, 2, 1))
+        status, videos = _get_json(self.base_url, "/api/assets?media_type=video")
+        self.assertEqual((status, videos["total"]), (200, 0))
 
     def test_logical_asset_detail_exposes_physical_and_component_state(self) -> None:
         with closing(self.workspace.connect()) as connection:
@@ -436,6 +457,16 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
 
+    def test_quality_readiness_reports_ready_when_runtime_and_checkpoint_exist(self) -> None:
+        checkpoint = self.root / "checkpoint.pt"
+        checkpoint.touch()
+        with patch("archive_index.api.server.importlib.util.find_spec", return_value=object()), patch(
+            "archive_index.api.server.default_model_path", return_value=checkpoint
+        ):
+            readiness = _quality_readiness("lar-iqa")
+        self.assertEqual(readiness["status"], "ready")
+        self.assertTrue(readiness["ready"])
+
     def tearDown(self) -> None:
         self.server.shutdown()
         self.server.server_close()
@@ -452,9 +483,27 @@ class WorkspaceHomeApiTests(unittest.TestCase):
             "/api/workspaces/open",
             {"path": str(self.root)},
         )
-        self.assertEqual(status, 200)
-        handle = opened["workspace"]["id"]
-        self.assertIsNotNone(opened["job_id"])
+        self.assertEqual((status, opened["workspace"], opened["job_id"]), (200, None, None))
+        self.assertFalse((self.root / ".archive-index").exists())
+        status, planned = _post_json(
+            self.base_url,
+            "/api/workspaces/plan",
+            {
+                "path": str(self.root),
+                "analysis": opened["setup"]["analysis"],
+                "configuration": opened["setup"]["configuration"],
+            },
+        )
+        self.assertEqual((status, planned["plan"]["selected_files"]), (200, 1))
+        self.assertIn("quality_readiness", planned["plan"])
+        status, applied = _post_json(
+            self.base_url,
+            "/api/workspaces/apply",
+            {"path": str(self.root), "configuration": opened["setup"]["configuration"]},
+        )
+        self.assertEqual(status, 202)
+        handle = applied["workspace"]["id"]
+        self.assertIsNotNone(applied["job_id"])
         self.assertTrue((self.root / ".archive-index" / "index.sqlite").is_file())
 
         for _ in range(50):
@@ -495,8 +544,14 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         source = self.root / "photo.jpg"
         source_bytes = source.read_bytes()
         status, opened = _post_json(self.base_url, "/api/workspaces/open", {"path": str(self.root)})
-        self.assertEqual(status, 200)
-        handle = opened["workspace"]["id"]
+        self.assertEqual((status, opened["workspace"]), (200, None))
+        status, applied = _post_json(
+            self.base_url,
+            "/api/workspaces/apply",
+            {"path": str(self.root), "configuration": opened["setup"]["configuration"]},
+        )
+        self.assertEqual(status, 202)
+        handle = applied["workspace"]["id"]
         for _ in range(300):
             _, jobs = _get_json(self.base_url, f"/api/jobs?workspace={handle}&limit=10")
             if not any(job["status"] in {"pending", "running"} for job in jobs["jobs"]):

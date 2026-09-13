@@ -9,11 +9,36 @@ from pathlib import Path
 from uuid import uuid4
 
 from archive_index.db.schema import MIGRATIONS
+from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace, WorkspaceError, compact_database
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_configuration_persists_scope_without_deleting_indexed_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "photo.jpg").write_bytes(b"photo")
+            (root / "clip.mp4").write_bytes(b"video")
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            configuration = workspace.configuration()
+            self.assertEqual(configuration["configuration_version"], 1)
+            configuration["include_videos"] = False
+            workspace.apply_configuration(configuration)
+
+            with closing(workspace.connect()) as connection:
+                rows = connection.execute(
+                    "SELECT relative_path, in_scope FROM physical_file ORDER BY relative_path"
+                ).fetchall()
+            self.assertEqual([(row[0], row[1]) for row in rows], [("clip.mp4", 0), ("photo.jpg", 1)])
+            self.assertEqual(workspace.configuration()["include_videos"], False)
+            workspace.apply_configuration(workspace.configuration())
+            with closing(workspace.connect()) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM physical_file").fetchone()[0], 2)
+
     def test_create_and_reopen_preserves_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
@@ -26,7 +51,7 @@ class WorkspaceTests(unittest.TestCase):
 
             self.assertIsNotNone(info["workspace_id"])
             self.assertEqual(info["quality_provider"], "lar-iqa")
-            self.assertEqual(version, 9)
+            self.assertEqual(version, 11)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -228,7 +253,7 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
                 }
-            self.assertEqual(version, 9)
+            self.assertEqual(version, 11)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)
@@ -269,6 +294,16 @@ class WorkspaceTests(unittest.TestCase):
                 self.assertIn(
                     "source_grouping_run_id",
                     {row[1] for row in connection.execute("PRAGMA table_info(recommendation_run)").fetchall()},
+                )
+                self.assertIn(
+                    "configuration_version",
+                    {row[1] for row in connection.execute("PRAGMA table_info(workspace_config)").fetchall()},
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT configuration_version FROM workspace_config WHERE id = 1"
+                    ).fetchone()[0],
+                    1,
                 )
 
     def test_open_repairs_phase6_database_missing_selection_timestamp(self) -> None:

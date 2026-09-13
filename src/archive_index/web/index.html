@@ -10,6 +10,7 @@
   <header class="app-header">
     <div class="brand"><a href="/">Archive Indexation</a><span id="workspace-crumb" class="crumb hidden"></span></div>
     <nav>
+      <button id="configure-workspace" class="secondary hidden" type="button">Configure</button>
       <button id="index" class="primary-action hidden" type="button">Re-index</button>
       <button id="problems-button" class="secondary hidden" type="button">Problems <span id="problem-count"></span></button>
     </nav>
@@ -35,7 +36,6 @@
         <label>Sort by<select id="sort-by"><option value="capture_time">Capture time</option><option value="quality">Technical quality</option><option value="filename">Filename</option></select></label>
         <label>Direction<select id="direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select></label>
         <label>Page size<select id="page-size"><option value="60">60</option><option value="120">120</option><option value="180">180</option></select></label>
-        <label>Quality model<select id="quality-provider"><option value="off">Off</option><option value="lar-iqa">Lightweight LAR-IQA</option></select></label>
       </section>
       <div class="view-tabs" role="tablist" aria-label="Workspace views"><button id="gallery-view-toggle" class="secondary" type="button" role="tab">Gallery</button><button id="groups-view-toggle" class="secondary" type="button" role="tab">Groups</button></div>
       <section class="review-controls" aria-label="Review filters"><span class="review-label">Review:</span><div id="review-filter-buttons" class="review-filter-buttons" role="group" aria-label="Review filters"><button type="button" data-selection-filter="all">All</button><button type="button" data-selection-filter="representatives">Representatives</button><button type="button" data-selection-filter="recommended">Recommended</button><button type="button" data-selection-filter="selected">Selected</button><button type="button" data-selection-filter="rejected">Rejected</button><button type="button" data-selection-filter="undecided">Undecided</button></div></section>
@@ -45,6 +45,15 @@
       <section id="gallery" class="gallery" aria-live="polite"></section>
       <div id="pager-bottom" class="pager"><button id="previous-bottom" class="secondary" type="button" aria-label="Previous page">‹</button><div class="pager-info"><strong id="page-label-bottom"></strong><span id="range-label-bottom" class="pager-range"></span></div><button id="next-bottom" class="secondary" type="button" aria-label="Next page">›</button></div>
       <section id="groups-view" class="hidden" aria-live="polite"><div id="groups-status" class="status"></div><div id="groups-pager-top" class="pager"><button id="groups-previous-top" class="secondary" type="button" aria-label="Previous group page">‹</button><div class="pager-info"><strong id="groups-page-label-top"></strong><span id="groups-range-label-top" class="pager-range"></span></div><button id="groups-next-top" class="secondary" type="button" aria-label="Next group page">›</button></div><div id="groups-list"></div><div id="groups-pager-bottom" class="pager"><button id="groups-previous-bottom" class="secondary" type="button" aria-label="Previous group page">‹</button><div class="pager-info"><strong id="groups-page-label-bottom"></strong><span id="groups-range-label-bottom" class="pager-range"></span></div><button id="groups-next-bottom" class="secondary" type="button" aria-label="Next group page">›</button></div></section>
+    </section>
+
+    <section id="setup-view" class="hidden">
+      <div class="setup-header"><div><p class="eyebrow">Workspace setup</p><h1 id="setup-title">Configure workspace</h1><p id="setup-path" class="muted"></p></div><button id="setup-cancel" class="secondary" type="button">Cancel</button></div>
+      <div id="setup-status" class="status" role="status"></div>
+      <section class="setup-section panel"><h2>1. Files and scope</h2><p class="muted">Choose which folders and supported file types belong in this index. The application state folder is always excluded.</p><div id="setup-folder-tree" class="folder-tree"></div><div id="setup-type-options" class="type-options"></div></section>
+      <section class="setup-section panel"><h2>2. Video</h2><label class="setup-toggle"><input id="setup-include-videos" type="checkbox"> Include supported video files</label><p class="muted">Video files can be indexed and previewed where the installed tools support them. Video quality scoring is not available yet.</p></section>
+      <section class="setup-section panel"><h2>3. Quality</h2><label>Quality provider<select id="setup-quality-provider"><option value="lar-iqa">Lightweight LAR-IQA</option><option value="off">Off</option></select></label><p id="setup-quality-note" class="muted"></p></section>
+      <section class="setup-section panel"><h2>Plan</h2><div id="setup-plan" class="setup-plan"></div><div class="setup-actions"><button id="setup-apply" class="primary-action" type="button">Apply &amp; index</button></div></section>
     </section>
   </main>
 

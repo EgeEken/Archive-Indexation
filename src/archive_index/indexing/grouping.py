@@ -123,7 +123,7 @@ def extract_visual_features(
     connection = workspace.connect()
     try:
         rows = connection.execute(
-            "SELECT * FROM physical_file WHERE is_online = 1 AND media_type = 'image' ORDER BY relative_path"
+            "SELECT * FROM physical_file WHERE is_online = 1 AND in_scope = 1 AND media_type = 'image' ORDER BY relative_path"
         ).fetchall()
     finally:
         connection.close()
@@ -319,8 +319,8 @@ def _asset_records(workspace: Workspace) -> list[AssetRecord]:
                    vf.input_fingerprint, vf.dhash, vf.luma_json, vf.color_hist_json,
                    vf.algorithm AS feature_algorithm, vf.version AS feature_version
             FROM logical_asset AS la
-            LEFT JOIN physical_file AS pf
-                ON pf.logical_asset_id = la.id AND pf.media_type = 'image' AND pf.is_online = 1
+            JOIN physical_file AS pf
+                ON pf.logical_asset_id = la.id AND pf.media_type = 'image' AND pf.is_online = 1 AND pf.in_scope = 1
             LEFT JOIN visual_feature AS vf ON vf.physical_file_id = pf.id
             WHERE la.media_type = 'image'
             ORDER BY la.id, pf.relative_path

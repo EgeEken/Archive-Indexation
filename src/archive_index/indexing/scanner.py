@@ -16,6 +16,7 @@ from time import perf_counter
 
 from ..jobs.engine import JobStore
 from ..workspace import INDEX_DIRECTORY, Workspace
+from ..configuration import path_in_scope
 from .media_types import media_type_for
 from ..timing import TimingRecorder, timed
 
@@ -62,6 +63,7 @@ def scan(
     job_id = job_id or job_store.create("scan")
     job_store.start(job_id)
     connection = workspace.connect()
+    configuration = workspace.configuration()
     counts = {
         "discovered": 0,
         "added": 0,
@@ -101,6 +103,24 @@ def scan(
             try:
                 stat_result = path.stat()
                 existing = existing_by_path.get(relative_path)
+                if not path_in_scope(relative_path, configuration):
+                    if existing is not None:
+                        connection.execute(
+                            "UPDATE physical_file SET in_scope = 0, is_online = 1 WHERE id = ?",
+                            (existing["id"],),
+                        )
+                    counts["unchanged"] += 1
+                    connection.commit()
+                    if processed % 16 == 0:
+                        job_store.checkpoint(job_id, processed, counts["errors"])
+                    if progress is not None:
+                        progress(ScanProgress(processed, len(paths), relative_path, "scan", counts["errors"], 0))
+                    continue
+                if existing is not None:
+                    connection.execute(
+                        "UPDATE physical_file SET in_scope = 1 WHERE id = ?",
+                        (existing["id"],),
+                    )
                 if (
                     existing is not None
                     and existing["is_online"]
@@ -123,6 +143,7 @@ def scan(
                             stat_result.st_size,
                             stat_result.st_mtime_ns,
                             file_hash,
+                            True,
                         )
                         counts["changed"] += 1
                     else:
@@ -139,6 +160,7 @@ def scan(
                                 stat_result.st_size,
                                 stat_result.st_mtime_ns,
                                 file_hash,
+                                True,
                             )
                             counts["moved"] += 1
                         else:
@@ -150,6 +172,7 @@ def scan(
                                 stat_result.st_size,
                                 stat_result.st_mtime_ns,
                                 file_hash,
+                                True,
                             )
                             counts["added"] += 1
                 connection.commit()
@@ -241,6 +264,7 @@ def _insert_new(
     size_bytes: int,
     mtime_ns: int,
     file_hash: str,
+    in_scope: bool,
 ) -> None:
     now = _timestamp()
     asset_id = str(uuid.uuid4())
@@ -255,8 +279,8 @@ def _insert_new(
         """
         INSERT INTO physical_file(
             id, logical_asset_id, relative_path, filename, extension, media_type,
-            size_bytes, mtime_ns, sha256, is_online, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            size_bytes, mtime_ns, sha256, is_online, in_scope, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
@@ -268,6 +292,7 @@ def _insert_new(
             size_bytes,
             mtime_ns,
             file_hash,
+            int(in_scope),
             now,
             now,
         ),
@@ -283,6 +308,7 @@ def _update_existing(
     size_bytes: int,
     mtime_ns: int,
     file_hash: str,
+    in_scope: bool,
 ) -> None:
     changed_content = existing["sha256"] != file_hash
     now = _timestamp()
@@ -290,7 +316,7 @@ def _update_existing(
         """
         UPDATE physical_file
         SET relative_path = ?, filename = ?, extension = ?, media_type = ?,
-            size_bytes = ?, mtime_ns = ?, sha256 = ?, is_online = 1, updated_at = ?
+            size_bytes = ?, mtime_ns = ?, sha256 = ?, is_online = 1, in_scope = ?, updated_at = ?
         WHERE id = ?
         """,
         (
@@ -301,6 +327,7 @@ def _update_existing(
             size_bytes,
             mtime_ns,
             file_hash,
+            int(in_scope),
             now,
             existing["id"],
         ),
