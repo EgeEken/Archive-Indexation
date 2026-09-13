@@ -11,6 +11,8 @@ IMAGE_EXTENSIONS = frozenset(
     }
 )
 VIDEO_EXTENSIONS = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
+RAW_EXTENSIONS = frozenset({".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"})
+RENDERED_IMAGE_EXTENSIONS = IMAGE_EXTENSIONS - RAW_EXTENSIONS
 
 
 def media_type_for(path: Path) -> str | None:
@@ -20,3 +22,11 @@ def media_type_for(path: Path) -> str | None:
     if extension in VIDEO_EXTENSIONS:
         return "video"
     return None
+
+
+def is_raw_extension(extension: str) -> bool:
+    return extension.casefold() in RAW_EXTENSIONS
+
+
+def is_rendered_image_extension(extension: str) -> bool:
+    return extension.casefold() in RENDERED_IMAGE_EXTENSIONS

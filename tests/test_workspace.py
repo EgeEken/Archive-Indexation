@@ -51,7 +51,7 @@ class WorkspaceTests(unittest.TestCase):
 
             self.assertIsNotNone(info["workspace_id"])
             self.assertEqual(info["quality_provider"], "lar-iqa")
-            self.assertEqual(version, 11)
+            self.assertEqual(version, 12)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -253,7 +253,7 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
                 }
-            self.assertEqual(version, 11)
+            self.assertEqual(version, 12)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)

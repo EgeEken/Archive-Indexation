@@ -25,12 +25,15 @@ from ..configuration import default_configuration, normalize_configuration
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
 from ..indexing.recommendation import build_recommendations
+from ..indexing.reconciliation import reconcile_workspace
 from ..indexing.scanner import scan
 from ..media.quality_provider import default_model_path
+from ..media_types import is_raw_extension
 from ..timing import TimingRecorder
 from ..jobs.engine import JobStore
 from ..planning import analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
+from ..indexing.representations import preferred_physical
 
 LOGGER = logging.getLogger(__name__)
 MAX_PAGE_SIZE = 180
@@ -273,6 +276,25 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             thread.start()
             return job_id
 
+    def start_reconciliation(self, handle: str) -> str | None:
+        _, workspace = self.resolve_workspace(handle)
+        with self._active_lock:
+            thread = self._active_threads.get(handle)
+            if thread is not None and thread.is_alive():
+                return None
+            job_id = JobStore(workspace).create("reconciliation")
+            cancel_event = threading.Event()
+            self._cancel_events[(handle, job_id)] = cancel_event
+            thread = threading.Thread(
+                target=self._run_reconciliation_only,
+                args=(handle, workspace, job_id, cancel_event),
+                name=f"archive-index-reconciliation-{handle[:8]}",
+                daemon=True,
+            )
+            self._active_threads[handle] = thread
+            thread.start()
+            return job_id
+
     def cancel_job(self, handle: str, job_id: str) -> bool:
         with self._active_lock:
             event = self._cancel_events.get((handle, job_id))
@@ -308,6 +330,16 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 timings=timings,
             )
             if media_result.cancelled:
+                return
+            reconciliation_job_id = JobStore(workspace).create("reconciliation")
+            with self._active_lock:
+                self._cancel_events[(handle, reconciliation_job_id)] = cancel_event
+            job_ids.append(reconciliation_job_id)
+            current_job_id = reconciliation_job_id
+            reconciliation_result = reconcile_workspace(
+                workspace, job_id=reconciliation_job_id, cancel_event=cancel_event
+            )
+            if reconciliation_result.cancelled:
                 return
             quality_job_id = JobStore(workspace).create("media_quality")
             with self._active_lock:
@@ -445,6 +477,33 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 if self._active_threads.get(handle) is threading.current_thread():
                     self._active_threads.pop(handle, None)
 
+    def _run_reconciliation_only(
+        self,
+        handle: str,
+        workspace: Workspace,
+        reconciliation_job_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        try:
+            reconcile_workspace(
+                workspace,
+                job_id=reconciliation_job_id,
+                cancel_event=cancel_event,
+            )
+        except Exception:
+            LOGGER.exception("workspace reconciliation failed")
+            try:
+                row = JobStore(workspace).get(reconciliation_job_id)
+                if row is not None and row["status"] in {"pending", "running"}:
+                    JobStore(workspace).fail(reconciliation_job_id)
+            except Exception:
+                LOGGER.exception("could not mark reconciliation job failed")
+        finally:
+            with self._active_lock:
+                self._cancel_events.pop((handle, reconciliation_job_id), None)
+                if self._active_threads.get(handle) is threading.current_thread():
+                    self._active_threads.pop(handle, None)
+
 
 class ArchiveRequestHandler(BaseHTTPRequestHandler):
     server: WorkspaceHTTPServer
@@ -571,6 +630,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(202, {"job_id": job_id})
                 return
+            if request.path == "/api/reconciliation/rebuild":
+                job_id = self.server.start_reconciliation(handle)
+                if job_id is None:
+                    self._send_json(409, {"error": "a workspace job is already running"})
+                else:
+                    self._send_json(202, {"job_id": job_id})
+                return
             if request.path == "/api/quality-provider":
                 provider = self._json_body().get("provider")
                 if not isinstance(provider, str):
@@ -656,21 +722,26 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         try:
             rows = connection.execute(
                 """
-                SELECT pf.is_online, cs.status, cs.output_path
+                SELECT pf.*, cs.status AS thumbnail_status, cs.output_path AS thumbnail_output_path
                 FROM physical_file AS pf
                 LEFT JOIN component_state AS cs
                     ON cs.physical_file_id = pf.id AND cs.component = 'thumbnail'
                 WHERE pf.logical_asset_id = ? AND pf.in_scope = 1
-                ORDER BY pf.is_online DESC, pf.id
                 """,
                 (asset_id,),
             ).fetchall()
         finally:
             connection.close()
-        for row in rows:
-            if row["status"] == "complete" and row["output_path"]:
-                self._send_validated_thumbnail(workspace, row["output_path"])
-                return
+        available = [
+            row for row in rows
+            if row["thumbnail_status"] == "complete"
+            and row["thumbnail_output_path"]
+            and _valid_index_file(workspace, row["thumbnail_output_path"])
+        ]
+        candidate = preferred_physical(available, component="thumbnail")
+        if candidate is not None:
+            self._send_validated_thumbnail(workspace, candidate["thumbnail_output_path"])
+            return
         raise ResourceNotFound("thumbnail is not available")
 
     def _serve_thumbnail(self, workspace: Workspace, physical_id: str) -> None:
@@ -1497,15 +1568,20 @@ def _asset_summary(
     current_group_id: str | None = None,
 ) -> dict[str, object]:
     physical = _physical_rows(workspace, asset["id"]) if physical is None else physical
-    representative = sorted(
-        physical,
-        key=lambda row: (not bool(row["is_online"]), row["media_type"] != "image", row["relative_path"]),
-    )[0]
-    online = next((row for row in physical if row["is_online"]), None)
-    thumbnail = next(
-        (row for row in physical if row["thumbnail_status"] == "complete" and row["thumbnail_output_path"] and _valid_index_file(workspace, row["thumbnail_output_path"])),
-        None,
+    active_physical = [row for row in physical if row["in_scope"]] or physical
+    representative = preferred_physical(active_physical)
+    online = preferred_physical([row for row in active_physical if row["is_online"]])
+    thumbnail = preferred_physical(
+        [
+            row for row in active_physical
+            if row["thumbnail_status"] == "complete"
+            and row["thumbnail_output_path"]
+            and _valid_index_file(workspace, row["thumbnail_output_path"])
+        ],
+        component="thumbnail",
     )
+    if representative is None:
+        raise ResourceNotFound("asset has no physical representation")
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
@@ -1519,7 +1595,7 @@ def _asset_summary(
         "online_count": sum(bool(row["is_online"]) for row in physical),
         "thumbnail_url": _url(f"/api/assets/{asset['id']}/thumbnail", handle) if thumbnail else None,
         "original_url": _url(f"/api/files/{online['id']}/original", handle) if online else None,
-        "quality_score": max((row["quality_score"] for row in physical if row["quality_score"] is not None), default=None),
+        "quality_score": max((row["quality_score"] for row in active_physical if row["quality_score"] is not None), default=None),
         "issues": _asset_issues(physical),
         "is_representative": is_representative,
         "current_group_id": current_group_id,
@@ -1527,14 +1603,20 @@ def _asset_summary(
         "user_decision": asset["selection_state"],
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
+        "preferred_physical_id": representative["id"],
     }
 
 
 def _asset_issues(physical) -> list[str]:
     issues: list[str] = []
-    if not any(row["is_online"] for row in physical):
+    active = [row for row in physical if row["in_scope"]] or list(physical)
+    relevant = [
+        row for row in active
+        if row["media_type"] != "image" or not is_raw_extension(row["extension"])
+    ] or active
+    if not any(row["is_online"] for row in active):
         issues.append("offline")
-    statuses = [row[key] for row in physical for key in ("metadata_status", "thumbnail_status", "quality_component_status")]
+    statuses = [row[key] for row in relevant for key in ("metadata_status", "thumbnail_status", "quality_component_status")]
     if any(status in {"pending", "running"} for status in statuses):
         issues.append("processing")
     if any(status == "unsupported" for status in statuses):
@@ -1553,6 +1635,11 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
     if asset is None:
         raise ResourceNotFound("asset not found")
     physical = _physical_rows(workspace, asset_id)
+    preferred = preferred_physical(physical)
+    ordered_physical = ([preferred] if preferred is not None else []) + [
+        row for row in physical if preferred is None or row["id"] != preferred["id"]
+    ]
+    relationships = _current_relationships(workspace, [row["id"] for row in physical])
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
     current_group_id = _current_group_ids(workspace, [asset_id]).get(asset_id)
     return {
@@ -1573,6 +1660,9 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
                 "extension": row["extension"],
                 "media_type": row["media_type"],
                 "role": row["role"],
+                "is_preferred": preferred is not None and row["id"] == preferred["id"],
+                "relationships": relationships.get(row["id"], []),
+                "representation_label": _representation_label(row, relationships.get(row["id"], [])),
                 "size_bytes": row["size_bytes"],
                 "is_online": bool(row["is_online"]),
                 "width": row["width"],
@@ -1592,7 +1682,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
                     "quality": _component_info(row, "quality"),
                 },
             }
-            for row in physical
+            for row in ordered_physical
         ],
     }
 
@@ -1656,6 +1746,43 @@ def _physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dic
     return grouped
 
 
+def _current_relationships(workspace: Workspace, physical_ids: list[str]) -> dict[str, list[str]]:
+    if not physical_ids:
+        return {}
+    placeholders = ",".join("?" for _ in physical_ids)
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT pr.source_physical_file_id, pr.target_physical_file_id, pr.relationship_type
+            FROM physical_relationship AS pr
+            JOIN workspace_reconciliation AS wr ON wr.active_run_id = pr.run_id AND wr.id = 1
+            WHERE pr.source_physical_file_id IN ({placeholders})
+               OR pr.target_physical_file_id IN ({placeholders})
+            ORDER BY pr.relationship_type, pr.source_physical_file_id, pr.target_physical_file_id
+            """,
+            [*physical_ids, *physical_ids],
+        ).fetchall()
+    finally:
+        connection.close()
+    relationships: dict[str, list[str]] = {}
+    for row in rows:
+        label = "Exact duplicate" if row["relationship_type"] == "exact_duplicate" else "RAW/JPEG pair"
+        relationships.setdefault(row["source_physical_file_id"], []).append(label)
+        relationships.setdefault(row["target_physical_file_id"], []).append(label)
+    return {file_id: sorted(set(values)) for file_id, values in relationships.items()}
+
+
+def _representation_label(row, relationships: list[str]) -> str:
+    if row["role"] == "camera_raw":
+        return "RAW source"
+    if row["role"] == "camera_jpeg":
+        return "Camera JPEG"
+    if relationships:
+        return relationships[0]
+    return "Physical file"
+
+
 def _component_info(row, component: str) -> dict[str, object]:
     prefix = "quality_component_" if component == "quality" else f"{component}_"
     return {"status": row[f"{prefix}status"], "algorithm": row[f"{prefix}algorithm"], "version": row[f"{prefix}version"], "error": row[f"{prefix}error"]}
@@ -1684,9 +1811,38 @@ def _problems(workspace: Workspace, query: Mapping[str, list[str]]):
             """,
             (limit,),
         ).fetchall()
+        conflicts = connection.execute(
+            """
+            SELECT rc.id, rc.left_logical_asset_id, rc.right_logical_asset_id,
+                   rc.conflict_type, rc.message, rc.created_at,
+                   GROUP_CONCAT(DISTINCT pf.relative_path) AS paths
+            FROM reconciliation_conflict AS rc
+            JOIN workspace_reconciliation AS wr ON wr.active_run_id = rc.run_id AND wr.id = 1
+            LEFT JOIN physical_file AS pf
+              ON pf.logical_asset_id IN (rc.left_logical_asset_id, rc.right_logical_asset_id)
+            GROUP BY rc.id
+            ORDER BY rc.id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
     finally:
         connection.close()
-    return [_row_dict(row) for row in rows]
+    problems = [_row_dict(row) for row in rows]
+    problems.extend(
+        {
+            "id": f"reconciliation-{row['id']}",
+            "job_id": None,
+            "job_kind": "reconciliation",
+            "physical_file_id": None,
+            "relative_path": row["paths"],
+            "error_type": row["conflict_type"],
+            "message": row["message"],
+            "created_at": row["created_at"],
+            "retry_count": 0,
+        }
+        for row in conflicts
+    )
+    return sorted(problems, key=lambda problem: problem.get("created_at", ""), reverse=True)[:limit]
 
 
 def _folders(workspace: Workspace) -> list[str]:

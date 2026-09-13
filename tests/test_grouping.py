@@ -17,6 +17,7 @@ from archive_index.indexing.grouping import (
     extract_visual_features,
     grouping_diagnostics,
 )
+from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.workspace import Workspace
 
@@ -158,6 +159,16 @@ class GroupingTests(unittest.TestCase):
         with patch.object(grouping, "load_reduced_image", side_effect=AssertionError("decoded again")):
             result = extract_visual_features(workspace)
         self.assertEqual((result.errors, result.skipped), (0, 1))
+
+    def test_exact_copy_reuses_cached_feature_after_reconciliation(self) -> None:
+        workspace = self._workspace({"a.jpg": "scene"})
+        extract_visual_features(workspace)
+        (workspace.root / "copy.jpg").write_bytes((workspace.root / "a.jpg").read_bytes())
+        scan(workspace)
+        reconcile_workspace(workspace)
+        with patch.object(grouping, "load_reduced_image", side_effect=AssertionError("decoded duplicate")):
+            result = extract_visual_features(workspace)
+        self.assertEqual((result.errors, result.succeeded, result.skipped), (0, 1, 1))
 
     def test_parallel_feature_extraction_matches_serial_output(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene", "c.jpg": "other"})

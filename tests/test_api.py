@@ -17,6 +17,7 @@ from archive_index.api.server import WorkspaceHTTPServer, _pick_workspace_path, 
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
+from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
@@ -182,6 +183,24 @@ class ApiTests(unittest.TestCase):
         self.assertIsNotNone(physical["quality_score"])
         self.assertIsNotNone(physical["original_url"])
         self.assertIsNotNone(physical["thumbnail_url"])
+
+    def test_detail_exposes_multiple_physical_representations_and_preferred_view(self) -> None:
+        original = self.workspace.root / "root.jpg"
+        (self.workspace.root / "root-copy.jpg").write_bytes(original.read_bytes())
+        scan(self.workspace)
+        reconcile_workspace(self.workspace)
+        with closing(self.workspace.connect()) as connection:
+            asset_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+
+        status, detail = _get_json(self.base_url, f"/api/assets/{asset_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(detail["physical_files"]), 2)
+        self.assertEqual(sum(file["is_preferred"] for file in detail["physical_files"]), 1)
+        self.assertTrue(
+            all("Exact duplicate" in file["relationships"] for file in detail["physical_files"])
+        )
 
     def test_original_and_thumbnail_routes_do_not_accept_arbitrary_paths(self) -> None:
         with closing(self.workspace.connect()) as connection:

@@ -27,6 +27,8 @@ from ..media.thumbnail import (
 )
 from ..workspace import Workspace
 from ..timing import TimingRecorder, timed
+from .representations import preferred_physical
+from ..media_types import is_raw_extension
 
 METADATA_COMPONENT = "metadata"
 THUMBNAIL_COMPONENT = "thumbnail"
@@ -70,6 +72,8 @@ def index_workspace(
         finally:
             connection.close()
 
+    quality_rows = _quality_processing_rows(rows) if selected_components == (QUALITY_COMPONENT,) else rows
+
     if selected_components == (QUALITY_COMPONENT,) and not provider.enabled:
         with timed(timings, "quality.off_state_check"):
             quality_state_current = _quality_off_state_current(workspace, rows)
@@ -93,7 +97,13 @@ def index_workspace(
             return result
 
     with timed(timings, "media.component_state_prep", len(rows)):
-        state_map = _prepare_component_states(workspace, rows, selected_components, provider)
+        state_map = _prepare_component_states(
+            workspace,
+            rows,
+            selected_components,
+            provider,
+            quality_row_ids={row["id"] for row in quality_rows},
+        )
 
     effective_batch_size = getattr(provider, "batch_size", 1)
     if quality_batch_size is not None:
@@ -101,7 +111,7 @@ def index_workspace(
     if selected_components == (QUALITY_COMPONENT,) and provider.enabled and effective_batch_size > 1:
         result = _index_quality_batches(
             workspace,
-            rows,
+            quality_rows,
             provider,
             effective_batch_size,
             state_map,
@@ -141,7 +151,7 @@ def index_workspace(
             _provenance(QUALITY_COMPONENT, row["media_type"], provider)[1],
             provider,
         )
-        for row in rows
+        for row in quality_rows
     ):
         with timed(timings, "quality.preflight"):
             provider.preflight()
@@ -149,10 +159,11 @@ def index_workspace(
     def worker(row):
         return _process_file(workspace, row, selected_components, provider, state_map, timings)
 
+    processing_rows = quality_rows if selected_components == (QUALITY_COMPONENT,) else rows
     result = run_items(
         workspace,
         "media_index",
-        rows,
+        processing_rows,
         worker,
         job_id=job_id,
         cancel_event=cancel_event,
@@ -220,11 +231,30 @@ def list_problems(workspace: Workspace, job_id: str | None = None):
     return JobStore(workspace).list_errors(job_id)
 
 
+def _quality_processing_rows(rows):
+    selected: dict[str, object] = {}
+    videos = []
+    for row in rows:
+        if row["media_type"] == "video":
+            videos.append(row)
+        elif row["media_type"] == "image" and not is_raw_extension(row["extension"]):
+            asset_id = row["logical_asset_id"]
+            selected.setdefault(asset_id, row)
+    grouped: dict[str, list] = {}
+    for row in rows:
+        if row["media_type"] == "image" and not is_raw_extension(row["extension"]):
+            grouped.setdefault(row["logical_asset_id"], []).append(row)
+    for asset_id, asset_rows in grouped.items():
+        selected[asset_id] = preferred_physical(asset_rows, component=QUALITY_COMPONENT)
+    return [*selected.values(), *videos]
+
+
 def _prepare_component_states(
     workspace: Workspace,
     rows,
     components: tuple[str, ...],
     provider: QualityProvider,
+    quality_row_ids: set[str] | None = None,
 ) -> dict[tuple[str, str], object]:
     row_ids = [row["id"] for row in rows]
     state_map: dict[tuple[str, str], object] = {}
@@ -242,7 +272,12 @@ def _prepare_component_states(
             for component in components:
                 algorithm, version = _provenance(component, row["media_type"], provider)
                 state = state_map.get((row["id"], component))
-                if component == QUALITY_COMPONENT and not provider.enabled:
+                quality_not_processed = (
+                    component == QUALITY_COMPONENT
+                    and quality_row_ids is not None
+                    and row["id"] not in quality_row_ids
+                )
+                if component == QUALITY_COMPONENT and (not provider.enabled or quality_not_processed):
                     if (
                         state is not None
                         and state["status"] == "complete"
@@ -299,12 +334,11 @@ def _prepare_component_states(
                 ready = _state_ready(workspace, state, row, component, fingerprint, version, provider)
                 if ready:
                     continue
-                status = (
-                    "not_requested"
-                    if component == QUALITY_COMPONENT and row["media_type"] == "video"
-                    or component == QUALITY_COMPONENT and not provider.enabled
-                    else "pending"
-                )
+                status = "not_requested" if component == QUALITY_COMPONENT and (
+                    row["media_type"] == "video"
+                    or not provider.enabled
+                    or quality_not_processed
+                ) else "pending"
                 connection.execute(
                     """
                     UPDATE component_state

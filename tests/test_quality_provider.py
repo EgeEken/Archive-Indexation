@@ -308,6 +308,35 @@ class QualityProviderTests(unittest.TestCase):
                 ).fetchone()[0]
             self.assertEqual(status, "not_requested")
 
+    def test_serial_quality_path_leaves_raw_representations_not_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (120, 80), "navy").save(root / "photo.jpg")
+            (root / "photo.arw").write_bytes(b"not a real raw file")
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            result = index_workspace(
+                workspace,
+                components=("quality",),
+                quality_provider=FakeProvider(),
+                quality_batch_size=1,
+            )
+
+            self.assertEqual((result.succeeded, result.errors), (1, 0))
+            with closing(workspace.connect()) as connection:
+                status = connection.execute(
+                    """
+                    SELECT component_state.status
+                    FROM physical_file
+                    JOIN component_state ON component_state.physical_file_id = physical_file.id
+                    WHERE physical_file.extension = '.arw'
+                      AND component_state.component = 'quality'
+                    """
+                ).fetchone()[0]
+            self.assertEqual(status, "not_requested")
+
     def test_quality_version_recomputes_only_quality(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"

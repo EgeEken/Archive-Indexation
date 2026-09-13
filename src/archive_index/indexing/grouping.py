@@ -19,6 +19,8 @@ from ..media.metadata import UnsupportedDecoderError
 from ..media.thumbnail import load_reduced_image
 from ..workspace import Workspace
 from ..timing import TimingRecorder, timed
+from ..media_types import is_raw_extension
+from .representations import preferred_physical
 
 FEATURE_COMPONENT = "group_feature"
 FEATURE_ALGORITHM = "pillow-strict-group-features"
@@ -123,10 +125,19 @@ def extract_visual_features(
     connection = workspace.connect()
     try:
         rows = connection.execute(
-            "SELECT * FROM physical_file WHERE is_online = 1 AND in_scope = 1 AND media_type = 'image' ORDER BY relative_path"
+            """
+            SELECT pf.*, cs.status AS group_feature_status
+            FROM physical_file AS pf
+            LEFT JOIN component_state AS cs
+              ON cs.physical_file_id = pf.id AND cs.component = ?
+            WHERE pf.is_online = 1 AND pf.in_scope = 1 AND pf.media_type = 'image'
+            ORDER BY pf.relative_path
+            """,
+            (FEATURE_COMPONENT,),
         ).fetchall()
     finally:
         connection.close()
+    rows = _feature_processing_rows(rows)
     state_map = _prepare_feature_states(workspace, rows)
     worker_count = workers or FEATURE_WORKERS
     if worker_count < 1:
@@ -315,6 +326,7 @@ def _asset_records(workspace: Workspace) -> list[AssetRecord]:
             """
             SELECT la.id AS asset_id, la.capture_time, la.capture_time_kind,
                    pf.id AS physical_file_id, pf.filename, pf.relative_path,
+                   pf.extension, pf.role,
                    pf.quality_score,
                    vf.input_fingerprint, vf.dhash, vf.luma_json, vf.color_hist_json,
                    vf.algorithm AS feature_algorithm, vf.version AS feature_version
@@ -333,15 +345,17 @@ def _asset_records(workspace: Workspace) -> list[AssetRecord]:
     for row in rows:
         by_asset.setdefault(row["asset_id"], []).append(row)
     for asset_id, asset_rows in by_asset.items():
-        base = asset_rows[0]
+        usable_rows = [row for row in asset_rows if not is_raw_extension(row["extension"])] or asset_rows
+        base = preferred_physical(usable_rows)
+        selected_base = next((row for row in usable_rows if row["physical_file_id"] == base["physical_file_id"]), base)
         selected = next(
             (
-                row for row in asset_rows
+                row for row in usable_rows
                 if row["physical_file_id"] and row["dhash"]
                 and row["feature_algorithm"] == FEATURE_ALGORITHM
                 and row["feature_version"] == FEATURE_VERSION
             ),
-            base,
+            selected_base,
         )
         feature = None
         if selected["physical_file_id"] and selected["dhash"] and selected["feature_algorithm"] == FEATURE_ALGORITHM and selected["feature_version"] == FEATURE_VERSION:
@@ -357,6 +371,17 @@ def _asset_records(workspace: Workspace) -> list[AssetRecord]:
         ))
     records.sort(key=_record_sort_key)
     return records
+
+
+def _feature_processing_rows(rows):
+    by_asset: dict[str, list] = {}
+    for row in rows:
+        by_asset.setdefault(row["logical_asset_id"], []).append(row)
+    selected = []
+    for asset_rows in by_asset.values():
+        rendered = [row for row in asset_rows if not is_raw_extension(row["extension"])]
+        selected.append(preferred_physical(rendered or asset_rows, component=FEATURE_COMPONENT))
+    return sorted(selected, key=lambda row: row["relative_path"])
 
 
 def _record_sort_key(record: AssetRecord):

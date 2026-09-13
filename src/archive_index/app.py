@@ -54,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     compact.add_argument("workspace", type=Path, help="workspace root")
     recommend = commands.add_parser("recommend", help="rebuild automatic recommendations")
     recommend.add_argument("workspace", type=Path, help="workspace root")
+    reconcile = commands.add_parser("reconcile", help="consolidate duplicate and paired media records")
+    reconcile.add_argument("workspace", type=Path, help="workspace root")
     diagnostics = commands.add_parser("group-diagnostics", help="write strict-group candidate diagnostics")
     diagnostics.add_argument("workspace", type=Path, help="workspace root")
     diagnostics.add_argument("--limit", type=int, default=100, help="number of borderline rejected pairs to write")
@@ -88,6 +90,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "recommend":
         return _recommend_command(args.workspace)
+
+    if args.command == "reconcile":
+        return _reconcile_command(args.workspace)
 
     if args.command == "group-diagnostics":
         from .indexing.grouping import write_grouping_diagnostics
@@ -125,6 +130,7 @@ def _index_command(
     from .indexing.media_pipeline import index_workspace
     from .indexing.grouping import build_groups, extract_visual_features
     from .indexing.recommendation import build_recommendations
+    from .indexing.reconciliation import reconcile_workspace
     from .indexing.scanner import scan
     from .timing import TimingRecorder
     from .jobs.engine import JobStore
@@ -163,6 +169,13 @@ def _index_command(
             timings=timings,
         )
         if media_result.cancelled:
+            return 130
+        reconciliation_result = reconcile_workspace(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("reconciliation"),
+        )
+        if reconciliation_result.cancelled:
             return 130
         quality_result = index_workspace(
             workspace,
@@ -237,6 +250,40 @@ def _recommend_command(root: Path) -> int:
         )
         print(
             f"\nRecommendation rebuild complete: {result.auto_recommended} recommendations.",
+            flush=True,
+        )
+        return 130 if result.cancelled else 0
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
+
+
+def _reconcile_command(root: Path) -> int:
+    from .indexing.reconciliation import reconcile_workspace
+    from .jobs.engine import JobStore
+    from .workspace import Workspace
+
+    workspace = Workspace.open(root)
+    JobStore(workspace).recover_interrupted()
+    cancel_event = Event()
+    old_handler = signal.getsignal(signal.SIGINT)
+
+    def request_cancel(signum, frame) -> None:
+        cancel_event.set()
+        print("\nCancellation requested; finishing reconciliation...", flush=True)
+
+    signal.signal(signal.SIGINT, request_cancel)
+    try:
+        result = reconcile_workspace(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("reconciliation"),
+        )
+        print(
+            f"\nReconciliation complete: {result.logical_assets_before} -> "
+            f"{result.logical_assets_after} logical assets, "
+            f"{result.exact_duplicate_files} exact duplicates, "
+            f"{result.raw_jpeg_pairs} RAW/JPEG pairs, "
+            f"{result.conflicts} conflicts.",
             flush=True,
         )
         return 130 if result.cancelled else 0

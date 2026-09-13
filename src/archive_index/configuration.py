@@ -6,9 +6,8 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from .media_types import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+from .media_types import IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS
 
-RAW_EXTENSIONS = frozenset({".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"})
 JPEG_EXTENSIONS = frozenset({".jpeg", ".jpg"})
 CONFIGURATION_VERSION = 1
 

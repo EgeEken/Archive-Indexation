@@ -634,7 +634,17 @@ function renderDetails(asset, options = {}) {
   const thumbnail = options.showThumbnail && first.thumbnail_url ? `<button class="detail-thumbnail" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer"><img src="${first.thumbnail_url}" alt=""></button>` : "";
   const header = options.viewerPanel ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>` : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted">${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Capture time unavailable")}</div></div><button id="details-close" class="secondary" type="button">Close</button></div>`;
   const overview = `<section><h3>Overview</h3><div class="overview-grid"><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd><dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")}</dd></dl>${thumbnail}</div></section>`;
-  return `<div class="details-content">${header}${overview}${renderTechnicalDetails(first)}${asset.physical_files.map((file, index) => renderQuality(file, asset.physical_files.length > 1 && index > 0)).join("")}${asset.physical_files.map(renderComponentProblems).join("")}</div>`;
+  return `<div class="details-content">${header}${overview}${renderRepresentations(asset)}${renderTechnicalDetails(first)}${asset.physical_files.map((file, index) => renderQuality(file, asset.physical_files.length > 1 && index > 0)).join("")}${asset.physical_files.map(renderComponentProblems).join("")}</div>`;
+}
+
+function renderRepresentations(asset) {
+  if ((asset.physical_files || []).length < 2) return "";
+  const rows = asset.physical_files.map((file) => {
+    const state = file.is_online ? (file.is_preferred ? "Preferred view" : "Available") : "Offline";
+    const relation = (file.relationships || []).join(" · ");
+    return `<div class="representation-row"><div><strong>${escapeHtml(file.filename)}</strong><div class="muted">${escapeHtml(file.representation_label || "Physical file")}${relation ? ` · ${escapeHtml(relation)}` : ""}</div></div><span class="muted">${escapeHtml(state)} · ${escapeHtml(formatBytes(file.size_bytes))}</span><div class="muted representation-path">${escapeHtml(file.relative_path || "")}</div></div>`;
+  }).join("");
+  return `<section class="section"><h3>Representations</h3><div class="representations">${rows}</div></section>`;
 }
 
 function renderQuality(file, showFilename) {

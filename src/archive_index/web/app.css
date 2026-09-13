@@ -183,6 +183,10 @@
 .removal-dialog { min-width: min(34rem, calc(100vw - 2rem)); }
 .removal-actions { display: flex; justify-content: space-between; align-items: end; gap: .7rem; margin-top: 1.4rem; }
 .file-card { border-top: 0; }
+.representations { display: grid; gap: .45rem; }
+.representation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .15rem .8rem; padding: .55rem .65rem; border: 1px solid #303841; border-radius: .4rem; background: #1a2026; }
+.representation-row strong { overflow-wrap: anywhere; }
+.representation-path { grid-column: 1 / -1; overflow-wrap: anywhere; font-size: .78rem; }
 #details { width: min(860px, calc(100% - 2rem)); padding: 0; border-radius: .9rem; }
 #details .details-content { padding: 1.7rem 1.9rem; }
 #details .dialog-header { margin-bottom: 1.35rem; }

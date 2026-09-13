@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -264,6 +264,53 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     11: (
         "ALTER TABLE workspace_config ADD COLUMN configuration_version INTEGER NOT NULL DEFAULT 1",
+    ),
+    12: (
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_run (
+            id TEXT PRIMARY KEY,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS workspace_reconciliation (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active_run_id TEXT REFERENCES reconciliation_run(id),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS physical_relationship (
+            run_id TEXT NOT NULL REFERENCES reconciliation_run(id) ON DELETE CASCADE,
+            source_physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            target_physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            relationship_type TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, source_physical_file_id, target_physical_file_id, relationship_type)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS physical_relationship_target_idx ON physical_relationship(target_physical_file_id)",
+        """
+        CREATE TABLE IF NOT EXISTS reconciliation_conflict (
+            id INTEGER PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES reconciliation_run(id) ON DELETE CASCADE,
+            left_logical_asset_id TEXT REFERENCES logical_asset(id) ON DELETE SET NULL,
+            right_logical_asset_id TEXT REFERENCES logical_asset(id) ON DELETE SET NULL,
+            conflict_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, left_logical_asset_id, right_logical_asset_id, conflict_type)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS reconciliation_conflict_run_idx ON reconciliation_conflict(run_id)",
     ),
 }
 
