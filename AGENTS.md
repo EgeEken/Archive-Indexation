@@ -1439,6 +1439,68 @@ For strict duplicate grouping, semantic text embeddings are not automatically th
 
 ---
 
+## Phase 9.2 — Workspace browser UX/search polish
+
+This is the next active phase. The accepted production interface remains a standard-library localhost server with vanilla HTML/CSS/JavaScript. Do not start Phase 10 or replace the current search/model architecture without evidence. The following decisions are the target for the next UI pass; they are documented here before implementation and are not yet implemented unless stated elsewhere above.
+
+### Workspace shell
+
+- Keep the fixed top app bar visible while scrolling.
+- The left side contains `Archive Indexation` (return to the workspace/home menu), the current workspace name, and a small Explorer action for the workspace root.
+- The center navigation is `Gallery`, `Groupings`, and `Cloud Map`; Cloud Map is currently a placeholder stating that it is not implemented.
+- The right side contains `Configure` and `Re-index`.
+- Remove the top-level Problems button and move diagnostics into Configure.
+- Remove the separate workspace asset-count/path line below the app bar.
+- Opening or switching workspaces must not require restarting the server.
+
+### Sidebar and unified search
+
+The left filter sidebar is fixed during Gallery/Groupings/Cloud Map browsing, collapsible with a small reopen control, and preserves its state and each view's scroll position across view changes, sidebar toggles, and viewer/details dialogs.
+
+Use one unified search field for filename and semantic search. Filename matching updates immediately; semantic search starts after roughly 500 ms debounce. Filename matches rank ahead of semantic-only matches and ignore the semantic threshold. Show a semantic score when one exists, but never invent one. Typing switches sorting to Search descending; clearing the field returns to Time descending. Filename search continues to work when embeddings or the model are unavailable. The helper below the field should report states such as ready/provider, searching, result counts, re-index required, model missing, or failure with compact success/active/error colors.
+
+The semantic threshold is a persisted UI setting from 0.0 to 1.0, defaulting to 0.20, and applies only to semantic results. Sort uses buttons for Time, Quality, and Search plus one ascending/descending arrow. Search descending orders filename matches before higher similarity; ascending reverses that ordering. Empty search behaves as Time sort.
+
+Folders are represented by a compact summary row. Clicking it opens a workspace folder-tree modal with checked folders, nested selection, intuitive parent/child and indeterminate behavior, and bottom-right Select all/Deselect all actions. The full tree does not remain permanently in the sidebar. Also provide compact filters for Auto Review (`All`, `Representative`, `Recommended`), Manual Review (`All`, `Undecided`, `Selected`, `Rejected`), Type (`All`, `Images`, `Videos`), and Layout (`All`, `Horizontal`, `Vertical`), plus one Clear filters action.
+
+The recommendation threshold is a persisted 0.0–1.0 control with the current baseline at 0.70. Adjusting it recomputes derived recommendations immediately without re-indexing. It remains at most one recommendation per image group and still requires the representative to meet the threshold. Manual decisions are independent and must never be changed by thresholds, filters, search, or automatic processing.
+
+### Gallery and review actions
+
+Replace explicit pagination and page-size controls with continuous/infinite scrolling that loads ahead of the viewport while keeping the rendered DOM bounded/windowed. Use square thumbnails and always show a compact capture timestamp. Search metadata and tags appear below thumbnails, never over the image. Do not show JPEG/format tags. Representative, Recommended, Filename match, and Similarity metadata are conditional; no active search means no search tags.
+
+Every card always has `Select | Reject` actions. Undecided actions are muted; Selected and Rejected use saturated green/red active styling, desaturate the opposite action, and toggle back to Undecided when clicked again. Clicking the opposite action changes the decision directly. Manual Selected/Rejected state is not represented as a separate gallery metadata tag.
+
+Contextual empty states should be centered and explain the active condition, such as no media matching filters, no results above the semantic threshold, embeddings not indexed, or no selected videos in the chosen folders.
+
+### Viewer, Find Similar, and details
+
+The fullscreen image/video viewer keeps consistent controls with centered Select/Reject actions. Image actions are `Find similar`, `See group`, `Show in Explorer`, `Info`, and `Close`; existing zoom, Smooth, keyboard navigation, outside-click, and safe media-serving behavior must remain intact.
+
+Find Similar must not replace the normal Gallery. It opens a contextual similar-images section from the viewer, initially showing six highest-ranked results and adding six per Load more. Show raw similarity below each result, exclude the source, preserve filters, and use a separate internal image-similarity messaging threshold rather than the text-search threshold. The first six ranked results are shown regardless of that messaging threshold.
+
+Details remains a modal. Its thumbnail opens the viewer; use a small Explorer icon beside the path rather than large viewer/Explorer buttons. Order sections as Overview, Technical details, Overall technical quality, and compact Representations. Do not show `Source: rendered image`, raw JSON, or alarming representation-level RAW warnings when a preferred JPEG is healthy. Representation rows should show media type, filename, size, preferred status, Explorer action, and muted paths.
+
+Technical details order is Camera, Lens, Focal length, Aperture, Shutter speed, ISO. Measurement tracks are visual and non-interactive, with ticks, markers, helper labels, and logarithmic context. Focal-length display context ends around 600 mm; values above it clamp visually with a red overflow marker while retaining the accurate numeric value.
+
+### Groups and Configure
+
+Groupings keep singleton groups visible. Videos behave as singleton groups; do not display an unsupported-video-grouping warning or add multi-video grouping. With Type = All, image groups and singleton video groups coexist under the selected sort/filter state; Type = Videos shows one singleton group per video.
+
+Configure is the home for diagnostics and semantic model management. OpenCLIP and SigLIP2 must show installed/not-installed state, model size, install action, active provider, and embedding readiness. Installation remains explicit with no silent download. If embeddings are absent or stale after installation, say `Re-index required` and provide an obvious re-index path.
+
+### Search performance and progress
+
+The next phase must instrument the observed warm semantic-query latency of roughly three seconds. Prefer reusing a provider/model session, caching the query text embedding, caching the ranked result set for the current query/provider/filter signature, and slicing infinite-scroll batches from that result set. Safe model idle eviction is acceptable; do not change the embedding model or exact cosine architecture without evidence.
+
+Long-running jobs should expose the current sub-stage, current/total work, percentage, rate, elapsed time, and meaningful ETA. Embedding progress counts vectors: one JPEG is one vector and a sampled video contributes one unit per frame. The known duplicate transient video decode between quality and embeddings remains deferred.
+
+### Deferred backlog
+
+Record but do not implement in Phase 9.2: Phase 10 compressed representations in the Representations section; synchronized original-vs-compressed zoom comparison; lightweight RAW-preview exposure adjustment; Cloud Map/vector-space visualization; and deeper hardware/decode adaptability work.
+
+---
+
 ## Phase 10 — compression pipeline
 
 ### Goal
