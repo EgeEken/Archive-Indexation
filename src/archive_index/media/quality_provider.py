@@ -179,10 +179,15 @@ class LARIQAProvider:
 
     def score_images(self, images: Sequence[Image.Image]) -> list[ProviderResult]:
         self._load()
+        preparation_started = perf_counter()
         prepared: list[Image.Image] = []
         for image in images:
             oriented = ImageOps.exif_transpose(image).convert("RGB")
             prepared.append(oriented)
+        self.last_timings["quality.orientation_rgb"] = (
+            self.last_timings.get("quality.orientation_rgb", 0.0)
+            + perf_counter() - preparation_started
+        )
         try:
             return self.score_prepared_images(prepared)
         finally:
@@ -193,11 +198,22 @@ class LARIQAProvider:
         self._load()
         torch = self._torch
         transforms = self._transforms
+        authentic_started = perf_counter()
         authentic = []
-        synthetic = []
         for image in images:
             authentic.append(transforms.authentic(image))
+        self.last_timings["quality.authentic_preprocessing"] = (
+            self.last_timings.get("quality.authentic_preprocessing", 0.0)
+            + perf_counter() - authentic_started
+        )
+        synthetic_started = perf_counter()
+        synthetic = []
+        for image in images:
             synthetic.append(transforms.synthetic(image))
+        self.last_timings["quality.synthetic_preprocessing"] = (
+            self.last_timings.get("quality.synthetic_preprocessing", 0.0)
+            + perf_counter() - synthetic_started
+        )
         return self._score_tensors(authentic, synthetic)
 
     def _prepare_batch(self, preparation_pool, paths):

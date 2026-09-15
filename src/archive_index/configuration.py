@@ -10,6 +10,9 @@ from .media_types import IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS
 
 JPEG_EXTENSIONS = frozenset({".jpeg", ".jpg"})
 CONFIGURATION_VERSION = 1
+VIDEO_SAMPLING_DEFAULT_FPS = 2.0
+VIDEO_SAMPLING_DEFAULT_MIN_FRAMES = 2
+VIDEO_SAMPLING_DEFAULT_MAX_FRAMES = 32
 
 
 def default_configuration() -> dict[str, object]:
@@ -21,6 +24,9 @@ def default_configuration() -> dict[str, object]:
         "video_extensions": sorted(VIDEO_EXTENSIONS),
         "folder_rules": [],
         "quality_provider": "lar-iqa",
+        "video_sampling_fps": VIDEO_SAMPLING_DEFAULT_FPS,
+        "video_sampling_min_frames": VIDEO_SAMPLING_DEFAULT_MIN_FRAMES,
+        "video_sampling_max_frames": VIDEO_SAMPLING_DEFAULT_MAX_FRAMES,
     }
 
 
@@ -39,9 +45,26 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
         "video_extensions": _extensions(value.get("video_extensions", defaults["video_extensions"]), VIDEO_EXTENSIONS, "video_extensions"),
         "quality_provider": value.get("quality_provider", defaults["quality_provider"]),
         "folder_rules": _folder_rules(value.get("folder_rules", []), root),
+        "video_sampling_fps": _positive_float(
+            value.get("video_sampling_fps", defaults["video_sampling_fps"]),
+            "video_sampling_fps",
+            maximum=60.0,
+        ),
+        "video_sampling_min_frames": _positive_int(
+            value.get("video_sampling_min_frames", defaults["video_sampling_min_frames"]),
+            "video_sampling_min_frames",
+            maximum=256,
+        ),
+        "video_sampling_max_frames": _positive_int(
+            value.get("video_sampling_max_frames", defaults["video_sampling_max_frames"]),
+            "video_sampling_max_frames",
+            maximum=256,
+        ),
     }
     if result["quality_provider"] not in {"off", "lar-iqa"}:
         raise ValueError("quality_provider must be off or lar-iqa")
+    if result["video_sampling_min_frames"] > result["video_sampling_max_frames"]:
+        raise ValueError("video_sampling_min_frames must not exceed video_sampling_max_frames")
     return result
 
 
@@ -63,6 +86,9 @@ def configuration_from_connection(connection) -> dict[str, object]:
         "video_extensions": json.loads(row["video_extensions_json"]),
         "quality_provider": row["quality_provider"],
         "folder_rules": rules,
+        "video_sampling_fps": row["video_sampling_fps"],
+        "video_sampling_min_frames": row["video_sampling_min_frames"],
+        "video_sampling_max_frames": row["video_sampling_max_frames"],
     })
 
 
@@ -74,7 +100,8 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
         INSERT INTO workspace_config(
             id, quality_provider, include_images, include_videos,
             image_extensions_json, video_extensions_json, configuration_version, updated_at
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            , video_sampling_fps, video_sampling_min_frames, video_sampling_max_frames
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             quality_provider = excluded.quality_provider,
             include_images = excluded.include_images,
@@ -82,6 +109,9 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             image_extensions_json = excluded.image_extensions_json,
             video_extensions_json = excluded.video_extensions_json,
             configuration_version = excluded.configuration_version,
+            video_sampling_fps = excluded.video_sampling_fps,
+            video_sampling_min_frames = excluded.video_sampling_min_frames,
+            video_sampling_max_frames = excluded.video_sampling_max_frames,
             updated_at = excluded.updated_at
         """,
         (
@@ -92,6 +122,9 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             json.dumps(config["video_extensions"], separators=(",", ":")),
             CONFIGURATION_VERSION,
             now,
+            config["video_sampling_fps"],
+            config["video_sampling_min_frames"],
+            config["video_sampling_max_frames"],
         ),
     )
     connection.execute("DELETE FROM folder_scope_rule")
@@ -141,6 +174,18 @@ def media_category(extension: str) -> str:
 def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be boolean")
+    return value
+
+
+def _positive_float(value: object, name: str, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 or value > maximum:
+        raise ValueError(f"{name} must be greater than 0 and at most {maximum}")
+    return float(value)
+
+
+def _positive_int(value: object, name: str, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > maximum:
+        raise ValueError(f"{name} must be an integer from 1 to {maximum}")
     return value
 
 

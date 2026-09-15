@@ -28,6 +28,7 @@ from ..media.thumbnail import (
 from ..workspace import Workspace
 from ..timing import TimingRecorder, timed
 from .representations import preferred_physical
+from .video_quality import VIDEO_QUALITY_ALGORITHM, VIDEO_QUALITY_VERSION
 from ..media_types import is_raw_extension
 
 METADATA_COMPONENT = "metadata"
@@ -1193,6 +1194,8 @@ def _provenance(
         return METADATA_ALGORITHM, METADATA_VERSION
     if component == THUMBNAIL_COMPONENT:
         return thumbnail_provenance(media_type or "image")[:2]
+    if media_type == "video":
+        return VIDEO_QUALITY_ALGORITHM, VIDEO_QUALITY_VERSION
     provider = provider or create_quality_provider(None)
     return provider.algorithm, provider.version
 

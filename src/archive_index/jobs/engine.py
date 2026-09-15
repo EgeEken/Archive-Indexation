@@ -258,6 +258,10 @@ def run_items(
                 )
                 LOGGER.warning("job %s failed for item: %s", identifier, error)
             else:
+                if outcome == "cancelled":
+                    store.checkpoint(identifier, processed, errors, skipped)
+                    store.cancel(identifier, processed, errors, skipped)
+                    return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
                 succeeded += 1
                 if outcome == "skipped":
                     skipped += 1

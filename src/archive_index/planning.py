@@ -45,6 +45,13 @@ def plan_from_analysis(analysis: dict[str, object], configuration: dict[str, obj
         "selected_extensions": totals["extensions"],
         "quality_image_count": image_count if configuration.get("quality_provider") == "lar-iqa" else 0,
         "video_count": video_count,
+        "video_sampling": {
+            "target_fps": configuration["video_sampling_fps"],
+            "min_frames": configuration["video_sampling_min_frames"],
+            "max_frames": configuration["video_sampling_max_frames"],
+            "exact_sample_count": None,
+            "note": "Exact frame count is determined from each video's probed duration during indexing.",
+        },
         "estimated_seconds": estimated_seconds,
         "estimate_note": "Rough estimate; actual time depends on the local machine, media decoders, and model readiness.",
     }

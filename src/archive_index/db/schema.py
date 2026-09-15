@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -312,6 +312,57 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX IF NOT EXISTS reconciliation_conflict_run_idx ON reconciliation_conflict(run_id)",
     ),
+    13: (
+        "ALTER TABLE workspace_config ADD COLUMN video_sampling_fps REAL NOT NULL DEFAULT 2.0",
+        "ALTER TABLE workspace_config ADD COLUMN video_sampling_min_frames INTEGER NOT NULL DEFAULT 2",
+        "ALTER TABLE workspace_config ADD COLUMN video_sampling_max_frames INTEGER NOT NULL DEFAULT 32",
+        """
+        CREATE TABLE IF NOT EXISTS video_sample_run (
+            id TEXT PRIMARY KEY,
+            physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            sampler_algorithm TEXT NOT NULL,
+            sampler_version TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            duration_seconds REAL NOT NULL,
+            requested_count INTEGER NOT NULL,
+            successful_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            aggregate_algorithm TEXT NOT NULL,
+            aggregate_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_message TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS video_sample_run_file_idx ON video_sample_run(physical_file_id, created_at)",
+        """
+        CREATE TABLE IF NOT EXISTS video_sample (
+            run_id TEXT NOT NULL REFERENCES video_sample_run(id) ON DELETE CASCADE,
+            physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            sample_index INTEGER NOT NULL,
+            requested_timestamp REAL NOT NULL,
+            extraction_status TEXT NOT NULL DEFAULT 'pending',
+            quality_status TEXT NOT NULL DEFAULT 'pending',
+            quality_raw_json TEXT,
+            quality_score REAL,
+            error_message TEXT,
+            PRIMARY KEY (run_id, sample_index),
+            UNIQUE (run_id, physical_file_id, sample_index)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS video_sample_file_idx ON video_sample(physical_file_id, run_id, sample_index)",
+        """
+        CREATE TABLE IF NOT EXISTS workspace_video_sample (
+            physical_file_id TEXT PRIMARY KEY REFERENCES physical_file(id) ON DELETE CASCADE,
+            active_run_id TEXT NOT NULL REFERENCES video_sample_run(id)
+        )
+        """,
+    ),
+    14: (
+        "ALTER TABLE video_sample ADD COLUMN actual_timestamp REAL",
+        "ALTER TABLE video_sample ADD COLUMN timestamp_error_seconds REAL",
+    ),
 }
 
 
@@ -362,6 +413,18 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                     version == 11
                     and statement.startswith("ALTER TABLE workspace_config ADD COLUMN configuration_version")
                     and _has_column(connection, "workspace_config", "configuration_version")
+                ):
+                    continue
+                if (
+                    version == 13
+                    and statement.startswith("ALTER TABLE workspace_config ADD COLUMN")
+                    and _has_column(connection, "workspace_config", statement.split()[5])
+                ):
+                    continue
+                if (
+                    version == 14
+                    and statement.startswith("ALTER TABLE video_sample ADD COLUMN")
+                    and _has_column(connection, "video_sample", statement.split()[5])
                 ):
                     continue
                 connection.execute(statement)

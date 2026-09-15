@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from ..app_state import WorkspaceRegistry, workspace_id
 from ..configuration import default_configuration, normalize_configuration
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
+from ..indexing.video_quality import index_video_quality, video_quality_details
 from ..indexing.recommendation import build_recommendations
 from ..indexing.reconciliation import reconcile_workspace
 from ..indexing.scanner import scan
@@ -354,6 +356,18 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 timings=timings,
             )
             if quality_result.cancelled:
+                return
+            video_quality_job_id = JobStore(workspace).create("video_quality")
+            with self._active_lock:
+                self._cancel_events[(handle, video_quality_job_id)] = cancel_event
+            job_ids.append(video_quality_job_id)
+            current_job_id = video_quality_job_id
+            video_quality_result = index_video_quality(
+                workspace,
+                job_id=video_quality_job_id,
+                cancel_event=cancel_event,
+            )
+            if video_quality_result.cancelled:
                 return
             feature_job_id = JobStore(workspace).create("visual_features")
             with self._active_lock:
@@ -962,7 +976,14 @@ def _delete_owned_index(workspace: Workspace) -> None:
     if index_directory.resolve(strict=False) != expected or not index_directory.is_dir() or index_directory.is_symlink():
         raise InvalidRequest("the app-owned index location could not be verified")
     _index_size_bytes(index_directory)
-    shutil.rmtree(index_directory)
+    for attempt in range(10):
+        try:
+            shutil.rmtree(index_directory)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
 
 
 def _workspace_entry(handle: str, workspace: Workspace, recent: bool) -> dict[str, object]:
@@ -1673,6 +1694,8 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
                 "quality_score": row["quality_score"],
                 "quality_raw": _json_or_none(row["quality_raw_json"]),
                 "quality_components": _json_or_none(row["quality_components_json"]),
+                "video_quality": video_quality_details(workspace, row["id"])
+                if row["media_type"] == "video" else None,
                 "original_url": _url(f"/api/files/{row['id']}/original", handle) if row["is_online"] and row["in_scope"] else None,
                 "thumbnail_url": _url(f"/api/files/{row['id']}/thumbnail", handle) if row["in_scope"] and row["thumbnail_status"] == "complete" and row["thumbnail_output_path"] and _valid_index_file(workspace, row["thumbnail_output_path"]) else None,
                 "in_scope": bool(row["in_scope"]),
