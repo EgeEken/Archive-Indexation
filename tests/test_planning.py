@@ -4,8 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from archive_index.configuration import default_configuration
+from archive_index.indexing.reconciliation import reconcile_workspace
+from archive_index.indexing.scanner import scan
 from archive_index.planning import analyze_folder, plan_from_analysis
+from archive_index.workspace import Workspace
 
 
 class PlanningTests(unittest.TestCase):
@@ -54,6 +59,23 @@ class PlanningTests(unittest.TestCase):
             index_root.mkdir()
             with self.assertRaises(ValueError):
                 analyze_folder(index_root)
+
+    def test_existing_reconciled_raw_jpeg_is_counted_once_for_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (100, 80), "navy").save(root / "image.jpg")
+            (root / "image.arw").write_bytes(b"raw")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            reconcile_workspace(workspace)
+            configuration = workspace.configuration()
+            configuration["raw_quality_provider"] = "lar-iqa"
+            plan = plan_from_analysis(analyze_folder(root), configuration, workspace)
+
+            self.assertEqual(plan["quality_rendered_image_count"], 1)
+            self.assertEqual(plan["quality_raw_candidate_count"], 0)
+            self.assertEqual(plan["quality_image_count"], 1)
 
 
 if __name__ == "__main__":

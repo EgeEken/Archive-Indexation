@@ -286,8 +286,15 @@ def index_video_quality(
     quality_batch_size: int | None = None,
     timings: dict[str, float] | None = None,
 ) -> JobRunResult:
+    configuration = workspace.configuration()
     provider = create_quality_provider(
-        workspace.quality_provider() if quality_provider is None else quality_provider,
+        (
+            workspace.quality_provider()
+            if configuration["video_quality_enabled"] and quality_provider is None
+            else "off"
+            if quality_provider is None
+            else quality_provider
+        ),
         batch_size=quality_batch_size,
     )
     connection = workspace.connect()
@@ -297,6 +304,8 @@ def index_video_quality(
         ).fetchall()
     finally:
         connection.close()
+    algorithm, version, settings = video_quality_provenance(provider, configuration)
+    _ensure_quality_states(workspace, rows, algorithm, version, settings, provider.enabled)
     if not provider.enabled:
         return run_items(
             workspace,
@@ -311,9 +320,6 @@ def index_video_quality(
             stage="video quality disabled",
         )
 
-    configuration = workspace.configuration()
-    algorithm, version, settings = video_quality_provenance(provider, configuration)
-    _ensure_quality_states(workspace, rows, algorithm, version, settings)
     pending = [
         row for row in rows
         if not _video_state_ready(workspace, row, algorithm, version, settings)
@@ -622,8 +628,12 @@ def _video_state_ready(workspace, row, algorithm, version, settings) -> bool:
         ).fetchone()
     finally:
         connection.close()
-    if state is None or state["status"] == "unsupported":
-        return state is not None and state["status"] == "unsupported"
+    if state is None:
+        return False
+    if provider_is_disabled(algorithm):
+        return state["status"] in {"not_requested", "unsupported", "complete"}
+    if state["status"] == "unsupported":
+        return True
     return bool(
         state["status"] == "complete"
         and state["algorithm"] == algorithm
@@ -637,7 +647,7 @@ def _video_state_ready(workspace, row, algorithm, version, settings) -> bool:
     )
 
 
-def _ensure_quality_states(workspace, rows, algorithm, version, settings):
+def _ensure_quality_states(workspace, rows, algorithm, version, settings, enabled=True):
     settings_json = json.dumps(settings, ensure_ascii=False, sort_keys=True)
     with workspace.transaction() as connection:
         for row in rows:
@@ -645,11 +655,20 @@ def _ensure_quality_states(workspace, rows, algorithm, version, settings):
                 """
                 INSERT INTO component_state(
                     physical_file_id, component, status, algorithm, version, settings_json
-                ) VALUES (?, 'quality', 'pending', ?, ?, ?)
+                ) VALUES (?, 'quality', ?, ?, ?, ?)
                 ON CONFLICT(physical_file_id, component) DO NOTHING
                 """,
-                (row["id"], algorithm, version, settings_json),
+                (row["id"], "pending" if enabled else "not_requested", algorithm, version, settings_json),
             )
+            if not enabled:
+                connection.execute(
+                    "UPDATE component_state SET status = CASE WHEN status = 'complete' THEN status ELSE 'not_requested' END, algorithm = ?, version = ?, settings_json = ?, started_at = NULL, error_message = NULL WHERE physical_file_id = ? AND component = 'quality'",
+                    (algorithm, version, settings_json, row["id"]),
+                )
+
+
+def provider_is_disabled(algorithm: str) -> bool:
+    return algorithm == "quality-off"
 
 
 def _video_input_fingerprint(row, duration) -> str:

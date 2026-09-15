@@ -121,12 +121,31 @@ class Workspace:
         return connect(self.database_path)
 
     def quality_provider(self) -> str:
+        return self.rendered_quality_provider()
+
+    def rendered_quality_provider(self) -> str:
         connection = self.connect()
         try:
-            value = configuration_from_connection(connection)["quality_provider"]
+            value = configuration_from_connection(connection)["rendered_quality_provider"]
         finally:
             connection.close()
         return value
+
+    def raw_quality_provider(self) -> str:
+        connection = self.connect()
+        try:
+            value = configuration_from_connection(connection)["raw_quality_provider"]
+        finally:
+            connection.close()
+        return value
+
+    def video_quality_enabled(self) -> bool:
+        connection = self.connect()
+        try:
+            value = configuration_from_connection(connection)["video_quality_enabled"]
+        finally:
+            connection.close()
+        return bool(value)
 
     def set_quality_provider(self, provider: str) -> None:
         if provider not in QUALITY_PROVIDERS:
@@ -138,6 +157,7 @@ class Workspace:
             if active is not None:
                 raise WorkspaceError("quality provider cannot change while a job is running")
             config = configuration_from_connection(connection)
+            config["rendered_quality_provider"] = provider
             config["quality_provider"] = provider
             save_configuration(connection, config, self.root)
             connection.execute(
@@ -175,14 +195,25 @@ class Workspace:
             )
             scope_changed = any(
                 previous[name] != config[name]
-                for name in ("include_images", "include_videos", "image_extensions", "video_extensions", "folder_rules")
+                for name in (
+                    "include_rendered_images",
+                    "include_raw",
+                    "include_videos",
+                    "image_extensions",
+                    "video_extensions",
+                    "folder_rules",
+                )
+            )
+            quality_changed = any(
+                previous[name] != config[name]
+                for name in ("rendered_quality_provider", "raw_quality_provider")
             )
             if scope_changed:
                 connection.execute(
                     "UPDATE workspace_grouping SET active_run_id = NULL, updated_at = ? WHERE id = 1",
                     (_timestamp(),),
                 )
-            if previous["quality_provider"] != config["quality_provider"] or scope_changed:
+            if scope_changed or quality_changed:
                 connection.execute(
                     "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
                     (_timestamp(),),

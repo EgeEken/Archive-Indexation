@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .metadata import DECODER_GAP_EXTENSIONS, MetadataExtractionError, UnsupportedDecoderError
+from .raw_preview import RAW_PREVIEW_ALGORITHM, RAW_PREVIEW_VERSION, extract_embedded_preview
 from ..timing import TimingRecorder, timed
 
 THUMBNAIL_SIZE = (320, 320)
@@ -17,11 +18,13 @@ IMAGE_THUMBNAIL_ALGORITHM = "pillow-reduced-jpeg"
 IMAGE_THUMBNAIL_VERSION = "pillow-jpeg-v2"
 VIDEO_THUMBNAIL_ALGORITHM = "ffmpeg-center-frame-jpeg"
 VIDEO_THUMBNAIL_VERSION = "ffmpeg-center-frame-jpeg-v2"
+RAW_THUMBNAIL_ALGORITHM = "rawpy-preview-jpeg"
+RAW_THUMBNAIL_VERSION = "rawpy-preview-jpeg-v1"
 THUMBNAIL_JPEG_QUALITY = 50
 THUMBNAIL_VERSION = IMAGE_THUMBNAIL_VERSION
 
 
-def thumbnail_provenance(media_type: str) -> tuple[str, str, dict[str, object]]:
+def thumbnail_provenance(media_type: str, extension: str | None = None) -> tuple[str, str, dict[str, object]]:
     if media_type == "video":
         return (
             VIDEO_THUMBNAIL_ALGORITHM,
@@ -29,6 +32,18 @@ def thumbnail_provenance(media_type: str) -> tuple[str, str, dict[str, object]]:
             {
                 "pipeline": "ffprobe-duration+ffmpeg-center-frame",
                 "selection": "center_frame",
+                "size": THUMBNAIL_SIZE,
+                "jpeg_quality": THUMBNAIL_JPEG_QUALITY,
+            },
+        )
+    if extension and extension.casefold() in {".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"}:
+        return (
+            RAW_THUMBNAIL_ALGORITHM,
+            RAW_THUMBNAIL_VERSION,
+            {
+                "pipeline": "rawpy-embedded-preview",
+                "preview_algorithm": RAW_PREVIEW_ALGORITHM,
+                "preview_version": RAW_PREVIEW_VERSION,
                 "size": THUMBNAIL_SIZE,
                 "jpeg_quality": THUMBNAIL_JPEG_QUALITY,
             },
@@ -119,6 +134,10 @@ def load_full_image(source: Path) -> Image.Image:
                 f"no image decoder is configured for {source.suffix.casefold()}"
             ) from error
         raise
+
+
+def load_raw_preview(source: Path) -> Image.Image:
+    return extract_embedded_preview(source).image
 
 
 def load_video_frame(source: Path, size: tuple[int, int] = THUMBNAIL_SIZE) -> Image.Image:

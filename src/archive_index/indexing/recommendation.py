@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from threading import Event
 
 from ..jobs.engine import JobProgress, JobStore
+from ..media_types import is_raw_extension
 from ..workspace import Workspace
 from .grouping import FEATURE_ALGORITHM, FEATURE_VERSION
 
@@ -75,7 +76,11 @@ def build_recommendations(
     store.set_total(identifier, len(groups))
     store.set_stage(identifier, "recommendations")
     store.start(identifier)
-    if workspace.quality_provider() == "off":
+    configuration = workspace.configuration()
+    if (
+        configuration["rendered_quality_provider"] == "off"
+        and configuration["raw_quality_provider"] == "off"
+    ):
         with workspace.transaction() as connection:
             connection.execute(
                 "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
@@ -164,7 +169,7 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
         rows = connection.execute(
             """
             SELECT sgm.group_id, sgm.logical_asset_id, sgm.member_order,
-                   pf.quality_score, vf.dhash, vf.luma_json, vf.color_hist_json,
+                   pf.quality_score, pf.extension, vf.dhash, vf.luma_json, vf.color_hist_json,
                    sg.representative_logical_asset_id
             FROM strict_group_member AS sgm
             JOIN strict_group AS sg
@@ -206,7 +211,7 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
                     group_id,
                     asset_id,
                     asset_rows[0]["member_order"],
-                    max((row["quality_score"] for row in asset_rows if row["quality_score"] is not None), default=None),
+                    _quality_score(asset_rows),
                     feature,
                     asset_rows[0]["representative_logical_asset_id"] == asset_id,
                 )
@@ -214,6 +219,16 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
         result.append((group_id, sorted(candidates, key=lambda candidate: candidate.member_order)))
     result.sort(key=lambda group: (group[1][0].member_order if group[1] else 0, group[0]))
     return active["active_run_id"], result
+
+
+def _quality_score(rows) -> float | None:
+    rendered = [
+        row["quality_score"] for row in rows
+        if row["quality_score"] is not None and not is_raw_extension(row["extension"])
+    ]
+    if rendered:
+        return max(rendered)
+    return max((row["quality_score"] for row in rows if row["quality_score"] is not None), default=None)
 
 
 def _recommend_group(group_id: str, candidates: list[Candidate]) -> list[tuple[str, int, int | None, int, str]]:

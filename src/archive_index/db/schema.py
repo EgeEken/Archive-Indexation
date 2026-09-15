@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -363,6 +363,14 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE video_sample ADD COLUMN actual_timestamp REAL",
         "ALTER TABLE video_sample ADD COLUMN timestamp_error_seconds REAL",
     ),
+    15: (
+        "ALTER TABLE workspace_config ADD COLUMN include_rendered_images INTEGER NOT NULL DEFAULT 1 CHECK (include_rendered_images IN (0, 1))",
+        "ALTER TABLE workspace_config ADD COLUMN include_raw INTEGER NOT NULL DEFAULT 1 CHECK (include_raw IN (0, 1))",
+        "ALTER TABLE workspace_config ADD COLUMN rendered_quality_provider TEXT NOT NULL DEFAULT 'lar-iqa' CHECK (rendered_quality_provider IN ('off', 'lar-iqa'))",
+        "ALTER TABLE workspace_config ADD COLUMN raw_quality_provider TEXT NOT NULL DEFAULT 'off' CHECK (raw_quality_provider IN ('off', 'lar-iqa'))",
+        "ALTER TABLE workspace_config ADD COLUMN video_quality_enabled INTEGER NOT NULL DEFAULT 1 CHECK (video_quality_enabled IN (0, 1))",
+        "UPDATE workspace_config SET include_rendered_images = include_images, include_raw = include_images, rendered_quality_provider = quality_provider, raw_quality_provider = 'off', video_quality_enabled = CASE WHEN quality_provider = 'lar-iqa' THEN 1 ELSE 0 END, configuration_version = 2 WHERE id = 1",
+    ),
 }
 
 
@@ -425,6 +433,12 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                     version == 14
                     and statement.startswith("ALTER TABLE video_sample ADD COLUMN")
                     and _has_column(connection, "video_sample", statement.split()[5])
+                ):
+                    continue
+                if (
+                    version == 15
+                    and statement.startswith("ALTER TABLE workspace_config ADD COLUMN")
+                    and _has_column(connection, "workspace_config", statement.split()[5])
                 ):
                     continue
                 connection.execute(statement)

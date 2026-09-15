@@ -15,6 +15,42 @@ from archive_index.workspace import Workspace, WorkspaceError, compact_database
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_configuration_separates_media_scope_and_quality_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "photo.jpg").write_bytes(b"photo")
+            (root / "photo.arw").write_bytes(b"raw")
+            (root / "clip.mp4").write_bytes(b"video")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            config = workspace.configuration()
+            config.update(
+                {
+                    "include_rendered_images": False,
+                    "include_raw": True,
+                    "video_quality_enabled": False,
+                    "rendered_quality_provider": "off",
+                    "raw_quality_provider": "lar-iqa",
+                }
+            )
+            workspace.apply_configuration(config)
+            saved = workspace.configuration()
+            self.assertEqual(
+                (saved["include_rendered_images"], saved["include_raw"], saved["video_quality_enabled"]),
+                (False, True, False),
+            )
+            self.assertEqual(
+                (saved["rendered_quality_provider"], saved["raw_quality_provider"]),
+                ("off", "lar-iqa"),
+            )
+            with closing(workspace.connect()) as connection:
+                scope = {
+                    row["relative_path"]: row["in_scope"]
+                    for row in connection.execute("SELECT relative_path, in_scope FROM physical_file").fetchall()
+                }
+            self.assertEqual(scope, {"photo.jpg": 0, "photo.arw": 1, "clip.mp4": 1})
+
     def test_configuration_persists_scope_without_deleting_indexed_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
@@ -25,7 +61,7 @@ class WorkspaceTests(unittest.TestCase):
             scan(workspace)
 
             configuration = workspace.configuration()
-            self.assertEqual(configuration["configuration_version"], 1)
+            self.assertEqual(configuration["configuration_version"], 2)
             configuration["include_videos"] = False
             workspace.apply_configuration(configuration)
 
@@ -51,7 +87,7 @@ class WorkspaceTests(unittest.TestCase):
 
             self.assertIsNotNone(info["workspace_id"])
             self.assertEqual(info["quality_provider"], "lar-iqa")
-            self.assertEqual(version, 14)
+            self.assertEqual(version, 15)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -253,7 +289,7 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
                 }
-            self.assertEqual(version, 14)
+            self.assertEqual(version, 15)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)
@@ -303,7 +339,20 @@ class WorkspaceTests(unittest.TestCase):
                     connection.execute(
                         "SELECT configuration_version FROM workspace_config WHERE id = 1"
                     ).fetchone()[0],
-                    1,
+                    2,
+                )
+                self.assertTrue(
+                    {
+                        "include_rendered_images",
+                        "include_raw",
+                        "rendered_quality_provider",
+                        "raw_quality_provider",
+                        "video_quality_enabled",
+                    }
+                    <= {
+                        row[1]
+                        for row in connection.execute("PRAGMA table_info(workspace_config)").fetchall()
+                    }
                 )
 
     def test_open_repairs_phase6_database_missing_selection_timestamp(self) -> None:

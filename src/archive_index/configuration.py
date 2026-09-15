@@ -9,7 +9,7 @@ from pathlib import Path
 from .media_types import IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS
 
 JPEG_EXTENSIONS = frozenset({".jpeg", ".jpg"})
-CONFIGURATION_VERSION = 1
+CONFIGURATION_VERSION = 2
 VIDEO_SAMPLING_DEFAULT_FPS = 2.0
 VIDEO_SAMPLING_DEFAULT_MIN_FRAMES = 2
 VIDEO_SAMPLING_DEFAULT_MAX_FRAMES = 32
@@ -18,11 +18,16 @@ VIDEO_SAMPLING_DEFAULT_MAX_FRAMES = 32
 def default_configuration() -> dict[str, object]:
     return {
         "configuration_version": CONFIGURATION_VERSION,
+        "include_rendered_images": True,
+        "include_raw": True,
         "include_images": True,
         "include_videos": True,
         "image_extensions": sorted(IMAGE_EXTENSIONS),
         "video_extensions": sorted(VIDEO_EXTENSIONS),
         "folder_rules": [],
+        "rendered_quality_provider": "lar-iqa",
+        "raw_quality_provider": "off",
+        "video_quality_enabled": True,
         "quality_provider": "lar-iqa",
         "video_sampling_fps": VIDEO_SAMPLING_DEFAULT_FPS,
         "video_sampling_min_frames": VIDEO_SAMPLING_DEFAULT_MIN_FRAMES,
@@ -35,15 +40,42 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
     if not isinstance(value, Mapping):
         raise ValueError("configuration must be an object")
     version = value.get("configuration_version", CONFIGURATION_VERSION)
-    if version != CONFIGURATION_VERSION:
+    if version not in {1, CONFIGURATION_VERSION}:
         raise ValueError(f"unsupported configuration version: {version}")
+    legacy_include_images = _bool(value.get("include_images", defaults["include_images"]), "include_images")
+    legacy_quality_provider = value.get("quality_provider", defaults["quality_provider"])
+    include_rendered_images = _bool(
+        value.get("include_rendered_images", legacy_include_images),
+        "include_rendered_images",
+    )
+    include_raw = _bool(value.get("include_raw", legacy_include_images), "include_raw")
+    rendered_quality_provider = value.get("rendered_quality_provider", legacy_quality_provider)
+    if version == 1 and "quality_provider" in value:
+        rendered_quality_provider = legacy_quality_provider
+    raw_quality_provider = value.get("raw_quality_provider", defaults["raw_quality_provider"])
+    video_quality_enabled = _bool(
+        value.get("video_quality_enabled", legacy_quality_provider == "lar-iqa"),
+        "video_quality_enabled",
+    )
+    compatibility_quality_provider = rendered_quality_provider
+    if (
+        version == CONFIGURATION_VERSION
+        and "quality_provider" in value
+        and value.get("quality_provider") not in {"off", "lar-iqa"}
+    ):
+        compatibility_quality_provider = value.get("quality_provider")
     result = {
         "configuration_version": CONFIGURATION_VERSION,
-        "include_images": _bool(value.get("include_images", defaults["include_images"]), "include_images"),
+        "include_rendered_images": include_rendered_images,
+        "include_raw": include_raw,
+        "include_images": include_rendered_images or include_raw,
         "include_videos": _bool(value.get("include_videos", defaults["include_videos"]), "include_videos"),
         "image_extensions": _extensions(value.get("image_extensions", defaults["image_extensions"]), IMAGE_EXTENSIONS, "image_extensions"),
         "video_extensions": _extensions(value.get("video_extensions", defaults["video_extensions"]), VIDEO_EXTENSIONS, "video_extensions"),
-        "quality_provider": value.get("quality_provider", defaults["quality_provider"]),
+        "rendered_quality_provider": rendered_quality_provider,
+        "raw_quality_provider": raw_quality_provider,
+        "video_quality_enabled": video_quality_enabled,
+        "quality_provider": compatibility_quality_provider,
         "folder_rules": _folder_rules(value.get("folder_rules", []), root),
         "video_sampling_fps": _positive_float(
             value.get("video_sampling_fps", defaults["video_sampling_fps"]),
@@ -61,8 +93,9 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
             maximum=256,
         ),
     }
-    if result["quality_provider"] not in {"off", "lar-iqa"}:
-        raise ValueError("quality_provider must be off or lar-iqa")
+    for name in ("rendered_quality_provider", "raw_quality_provider", "quality_provider"):
+        if result[name] not in {"off", "lar-iqa"}:
+            raise ValueError(f"{name} must be off or lar-iqa")
     if result["video_sampling_min_frames"] > result["video_sampling_max_frames"]:
         raise ValueError("video_sampling_min_frames must not exceed video_sampling_max_frames")
     return result
@@ -80,11 +113,14 @@ def configuration_from_connection(connection) -> dict[str, object]:
     ]
     return normalize_configuration({
         "configuration_version": row["configuration_version"],
-        "include_images": bool(row["include_images"]),
+        "include_rendered_images": bool(row["include_rendered_images"]),
+        "include_raw": bool(row["include_raw"]),
         "include_videos": bool(row["include_videos"]),
         "image_extensions": json.loads(row["image_extensions_json"]),
         "video_extensions": json.loads(row["video_extensions_json"]),
-        "quality_provider": row["quality_provider"],
+        "rendered_quality_provider": row["rendered_quality_provider"],
+        "raw_quality_provider": row["raw_quality_provider"],
+        "video_quality_enabled": bool(row["video_quality_enabled"]),
         "folder_rules": rules,
         "video_sampling_fps": row["video_sampling_fps"],
         "video_sampling_min_frames": row["video_sampling_min_frames"],
@@ -99,9 +135,11 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
         """
         INSERT INTO workspace_config(
             id, quality_provider, include_images, include_videos,
-            image_extensions_json, video_extensions_json, configuration_version, updated_at
-            , video_sampling_fps, video_sampling_min_frames, video_sampling_max_frames
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            image_extensions_json, video_extensions_json, configuration_version, updated_at,
+            video_sampling_fps, video_sampling_min_frames, video_sampling_max_frames,
+            include_rendered_images, include_raw, rendered_quality_provider,
+            raw_quality_provider, video_quality_enabled
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             quality_provider = excluded.quality_provider,
             include_images = excluded.include_images,
@@ -112,10 +150,15 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             video_sampling_fps = excluded.video_sampling_fps,
             video_sampling_min_frames = excluded.video_sampling_min_frames,
             video_sampling_max_frames = excluded.video_sampling_max_frames,
+            include_rendered_images = excluded.include_rendered_images,
+            include_raw = excluded.include_raw,
+            rendered_quality_provider = excluded.rendered_quality_provider,
+            raw_quality_provider = excluded.raw_quality_provider,
+            video_quality_enabled = excluded.video_quality_enabled,
             updated_at = excluded.updated_at
         """,
         (
-            config["quality_provider"],
+            config["rendered_quality_provider"],
             int(config["include_images"]),
             int(config["include_videos"]),
             json.dumps(config["image_extensions"], separators=(",", ":")),
@@ -125,6 +168,11 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             config["video_sampling_fps"],
             config["video_sampling_min_frames"],
             config["video_sampling_max_frames"],
+            int(config["include_rendered_images"]),
+            int(config["include_raw"]),
+            config["rendered_quality_provider"],
+            config["raw_quality_provider"],
+            int(config["video_quality_enabled"]),
         ),
     )
     connection.execute("DELETE FROM folder_scope_rule")
@@ -151,8 +199,10 @@ def path_in_scope(relative_path: str, config: Mapping[str, object]) -> bool:
     if not nearest:
         return False
     extension = Path(relative_path).suffix.casefold()
+    if extension in RAW_EXTENSIONS:
+        return bool(config.get("include_raw", config.get("include_images"))) and extension in config.get("image_extensions", ())
     if extension in IMAGE_EXTENSIONS:
-        return bool(config.get("include_images")) and extension in config.get("image_extensions", ())
+        return bool(config.get("include_rendered_images", config.get("include_images"))) and extension in config.get("image_extensions", ())
     if extension in VIDEO_EXTENSIONS:
         return bool(config.get("include_videos")) and extension in config.get("video_extensions", ())
     return False

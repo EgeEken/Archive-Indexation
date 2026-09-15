@@ -6,8 +6,8 @@ import os
 import stat
 from pathlib import Path
 
-from .configuration import media_category
-from .media_types import media_type_for
+from .configuration import media_category, path_in_scope
+from .media_types import is_raw_extension, is_rendered_image_extension, media_type_for
 from .workspace import INDEX_DIRECTORY
 
 MAX_EXAMPLES = 5
@@ -31,19 +31,28 @@ def analyze_folder(root: str | Path) -> dict[str, object]:
     return {"root": tree, "totals": totals, "path": str(workspace_root)}
 
 
-def plan_from_analysis(analysis: dict[str, object], configuration: dict[str, object]) -> dict[str, object]:
+def plan_from_analysis(
+    analysis: dict[str, object], configuration: dict[str, object], workspace=None
+) -> dict[str, object]:
     totals = {"files": 0, "bytes": 0, "recognized_files": 0, "recognized_bytes": 0, "categories": {}, "extensions": {}}
     _accumulate_plan(analysis["root"], configuration, totals, "")
-    image_count = sum(totals["categories"].get(category, 0) for category in ("jpeg", "raw", "other_image"))
+    rendered_image_count = sum(totals["categories"].get(category, 0) for category in ("jpeg", "other_image"))
+    raw_count = totals["categories"].get("raw", 0)
+    raw_quality_count = raw_count if configuration.get("raw_quality_provider") == "lar-iqa" else 0
+    quality_image_count = (
+        rendered_image_count if configuration.get("rendered_quality_provider", configuration.get("quality_provider")) == "lar-iqa" else 0
+    ) + raw_quality_count
     video_count = totals["categories"].get("video", 0)
-    seconds_per_image = 0.12 if configuration.get("quality_provider") == "lar-iqa" else 0.04
-    estimated_seconds = round(image_count * seconds_per_image + video_count * 0.08, 1)
-    return {
+    estimated_seconds = round(quality_image_count * 0.12 + video_count * 0.08, 1)
+    plan = {
         "selected_files": totals["files"],
         "selected_bytes": totals["bytes"],
         "selected_categories": totals["categories"],
         "selected_extensions": totals["extensions"],
-        "quality_image_count": image_count if configuration.get("quality_provider") == "lar-iqa" else 0,
+        "quality_image_count": quality_image_count,
+        "quality_rendered_image_count": rendered_image_count if configuration.get("rendered_quality_provider", configuration.get("quality_provider")) == "lar-iqa" else 0,
+        "quality_raw_candidate_count": raw_quality_count,
+        "quality_video_count": video_count if configuration.get("video_quality_enabled", configuration.get("quality_provider") == "lar-iqa") else 0,
         "video_count": video_count,
         "video_sampling": {
             "target_fps": configuration["video_sampling_fps"],
@@ -54,6 +63,59 @@ def plan_from_analysis(analysis: dict[str, object], configuration: dict[str, obj
         },
         "estimated_seconds": estimated_seconds,
         "estimate_note": "Rough estimate; actual time depends on the local machine, media decoders, and model readiness.",
+    }
+    if workspace is not None and workspace.database_path.is_file():
+        counts = _indexed_quality_counts(workspace, configuration)
+        if counts is not None:
+            plan.update(counts)
+            plan["estimated_seconds"] = round(
+                counts["quality_image_count"] * 0.12
+                + counts["quality_video_count"] * 0.08,
+                1,
+            )
+            plan["estimate_note"] = (
+                "Existing logical-asset relationships are used when available; new or unindexed files remain approximate."
+            )
+    return plan
+
+
+def _indexed_quality_counts(workspace, configuration: dict[str, object]) -> dict[str, int] | None:
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            "SELECT logical_asset_id, media_type, extension, relative_path FROM physical_file WHERE is_online = 1"
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        return None
+    scoped = [row for row in rows if path_in_scope(row["relative_path"], configuration)]
+    rendered_assets = {
+        row["logical_asset_id"]
+        for row in scoped
+        if row["media_type"] == "image" and is_rendered_image_extension(row["extension"])
+    }
+    raw_assets = {
+        row["logical_asset_id"]
+        for row in scoped
+        if row["media_type"] == "image" and is_raw_extension(row["extension"])
+    }
+    rendered_quality = (
+        len(rendered_assets)
+        if configuration.get("rendered_quality_provider", configuration.get("quality_provider")) == "lar-iqa"
+        else 0
+    )
+    raw_quality = (
+        len(raw_assets - rendered_assets)
+        if configuration.get("raw_quality_provider") == "lar-iqa"
+        else 0
+    )
+    video_count = sum(row["media_type"] == "video" for row in scoped)
+    return {
+        "quality_image_count": rendered_quality + raw_quality,
+        "quality_rendered_image_count": rendered_quality,
+        "quality_raw_candidate_count": raw_quality,
+        "quality_video_count": video_count if configuration.get("video_quality_enabled", False) else 0,
     }
 
 
@@ -156,10 +218,18 @@ def _accumulate_plan(node, configuration, totals, parent_path: str) -> None:
                 continue
             category = media_category(extension)
             selected = (
-                category in {"jpeg", "raw", "other_image"}
-                and configuration["include_images"]
+                category in {"jpeg", "other_image"}
+                and configuration.get("include_rendered_images", configuration["include_images"])
                 and extension in configuration["image_extensions"]
-            ) or (category == "video" and configuration["include_videos"] and extension in configuration["video_extensions"])
+            ) or (
+                category == "raw"
+                and configuration.get("include_raw", configuration["include_images"])
+                and extension in configuration["image_extensions"]
+            ) or (
+                category == "video"
+                and configuration["include_videos"]
+                and extension in configuration["video_extensions"]
+            )
             if selected:
                 totals["files"] += count
                 totals["bytes"] += node["direct_extension_bytes"].get(extension, 0)

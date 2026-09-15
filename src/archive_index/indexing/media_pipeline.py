@@ -22,6 +22,7 @@ from ..media.thumbnail import (
     THUMBNAIL_SIZE,
     generate_thumbnail,
     load_full_image,
+    load_raw_preview,
     load_reduced_image,
     thumbnail_provenance,
 )
@@ -60,7 +61,7 @@ def index_workspace(
         raise ValueError(f"components must be selected from {sorted(COMPONENTS)}")
 
     provider = create_quality_provider(
-        workspace.quality_provider() if quality_provider is None else quality_provider,
+        workspace.rendered_quality_provider() if quality_provider is None else quality_provider,
         batch_size=quality_batch_size,
         preparation_workers=quality_preparation_workers,
     )
@@ -149,7 +150,7 @@ def index_workspace(
             row,
             QUALITY_COMPONENT,
             _input_fingerprint(row),
-            _provenance(QUALITY_COMPONENT, row["media_type"], provider)[1],
+            _provenance(QUALITY_COMPONENT, row["media_type"], provider, row["extension"])[1],
             provider,
         )
         for row in quality_rows
@@ -271,7 +272,7 @@ def _prepare_component_states(
         for row in rows:
             fingerprint = _input_fingerprint(row)
             for component in components:
-                algorithm, version = _provenance(component, row["media_type"], provider)
+                algorithm, version = _provenance(component, row["media_type"], provider, row["extension"])
                 state = state_map.get((row["id"], component))
                 quality_not_processed = (
                     component == QUALITY_COMPONENT
@@ -279,6 +280,13 @@ def _prepare_component_states(
                     and row["id"] not in quality_row_ids
                 )
                 if component == QUALITY_COMPONENT and (not provider.enabled or quality_not_processed):
+                    if (
+                        state is not None
+                        and quality_not_processed
+                        and state["status"] == "complete"
+                        and row["quality_score"] is not None
+                    ):
+                        continue
                     if (
                         state is not None
                         and state["status"] == "complete"
@@ -305,15 +313,16 @@ def _prepare_component_states(
                             """,
                             (algorithm, version, row["id"], component),
                         )
-                    connection.execute(
-                        """
-                        UPDATE physical_file
-                        SET quality_raw_json = NULL, quality_components_json = NULL,
-                            quality_score = NULL, quality_algorithm = NULL, quality_version = NULL
-                        WHERE id = ?
-                        """,
-                        (row["id"],),
-                    )
+                    if not quality_not_processed:
+                        connection.execute(
+                            """
+                            UPDATE physical_file
+                            SET quality_raw_json = NULL, quality_components_json = NULL,
+                                quality_score = NULL, quality_algorithm = NULL, quality_version = NULL
+                            WHERE id = ?
+                            """,
+                            (row["id"],),
+                        )
                     continue
                 if state is None:
                     status = (
@@ -349,7 +358,7 @@ def _prepare_component_states(
                     """,
                     (status, algorithm, version, row["id"], component),
                 )
-                if component == QUALITY_COMPONENT:
+                if component == QUALITY_COMPONENT and not quality_not_processed:
                     connection.execute(
                         """
                         UPDATE physical_file
@@ -415,7 +424,7 @@ def _index_media_batches(
         fingerprint = _input_fingerprint(row)
         pending = []
         for component in (METADATA_COMPONENT, THUMBNAIL_COMPONENT):
-            version = _provenance(component, row["media_type"], provider)[1]
+            version = _provenance(component, row["media_type"], provider, row["extension"])[1]
             if not _state_ready(
                 workspace,
                 state_map.get((row["id"], component)),
@@ -449,7 +458,11 @@ def _index_media_batches(
             try:
                 if row["media_type"] == "image":
                     with timed(result["timings"], "thumbnail.decode"):
-                        prepared_image = load_reduced_image(source, THUMBNAIL_SIZE)
+                        prepared_image = (
+                            load_raw_preview(source)
+                            if is_raw_extension(row["extension"])
+                            else load_reduced_image(source, THUMBNAIL_SIZE)
+                        )
                 destination = workspace.index_directory / "thumbnails" / f"{row['id']}.jpg"
                 timing_kwargs = {"timings": result["timings"]}
                 if row["media_type"] == "video":
@@ -497,7 +510,7 @@ def _index_media_batches(
                     row,
                     component,
                     fingerprint,
-                    _provenance(component, row["media_type"], provider)[1],
+                    _provenance(component, row["media_type"], provider, row["extension"])[1],
                     provider,
                 ):
                     pending.append(component)
@@ -550,7 +563,7 @@ def _mark_components_running_batch(workspace: Workspace, rows, provider: Quality
     with workspace.transaction() as connection:
         for row in rows:
             for component in (METADATA_COMPONENT, THUMBNAIL_COMPONENT):
-                algorithm, version = _provenance(component, row["media_type"], provider)
+                algorithm, version = _provenance(component, row["media_type"], provider, row["extension"])
                 connection.execute(
                     """
                     UPDATE component_state
@@ -584,7 +597,7 @@ def _persist_metadata_sql(connection, row, fingerprint: str, result) -> None:
 
 
 def _persist_thumbnail_sql(connection, row, fingerprint: str, thumbnail) -> None:
-    algorithm, version, provenance = thumbnail_provenance(row["media_type"])
+    algorithm, version, provenance = thumbnail_provenance(row["media_type"], row["extension"])
     _, output_path, output_fingerprint = thumbnail
     _mark_complete_sql(
         connection,
@@ -636,14 +649,21 @@ def _process_file(
             if state_map is not None
             else _component_state(workspace, row["id"], component)
         )
-        version = _provenance(component, row["media_type"], provider)[1]
+        version = _provenance(component, row["media_type"], provider, row["extension"])[1]
         if _state_ready(workspace, state, row, component, fingerprint, version, provider):
             continue
         pending_components.append(component)
 
     if not pending_components:
         return "skipped"
-    _mark_running_many(workspace, row["id"], pending_components, row["media_type"], provider)
+    _mark_running_many(
+        workspace,
+        row["id"],
+        pending_components,
+        row["media_type"],
+        provider,
+        row["extension"],
+    )
 
     image_components = {
         component
@@ -660,7 +680,11 @@ def _process_file(
                     prepared_image = load_full_image(source)
             else:
                 with timed(timings, "thumbnail.decode"):
-                    prepared_image = load_reduced_image(source, THUMBNAIL_SIZE)
+                    prepared_image = (
+                        load_raw_preview(source)
+                        if is_raw_extension(row["extension"])
+                        else load_reduced_image(source, THUMBNAIL_SIZE)
+                    )
         except Exception as error:
             image_error = error
 
@@ -749,7 +773,7 @@ def _process_thumbnail(
     prepared_image,
     timings: TimingRecorder | None = None,
 ) -> None:
-    algorithm, version, provenance = thumbnail_provenance(row["media_type"])
+    algorithm, version, provenance = thumbnail_provenance(row["media_type"], row["extension"])
     destination = workspace.index_directory / "thumbnails" / f"{row['id']}.jpg"
     timing_kwargs = {"timings": timings} if timings is not None else {}
     if row["media_type"] == "video":
@@ -886,7 +910,7 @@ def _index_quality_batches(
             row,
             QUALITY_COMPONENT,
             _input_fingerprint(row),
-            _provenance(QUALITY_COMPONENT, row["media_type"], provider)[1],
+            _provenance(QUALITY_COMPONENT, row["media_type"], provider, row["extension"])[1],
             provider,
         )
         for row in rows
@@ -900,7 +924,7 @@ def _index_quality_batches(
             for row in batch:
                 fingerprint = _input_fingerprint(row)
                 state = state_map.get((row["id"], QUALITY_COMPONENT))
-                version = _provenance(QUALITY_COMPONENT, row["media_type"], provider)[1]
+                version = _provenance(QUALITY_COMPONENT, row["media_type"], provider, row["extension"])[1]
                 if row["media_type"] == "video":
                     skipped_video.append((row, fingerprint))
                     outcomes[row["id"]] = None
@@ -1012,7 +1036,7 @@ def _mark_running_batch(workspace: Workspace, pending, provider: QualityProvider
     now = _timestamp()
     with workspace.transaction() as connection:
         for row, _ in pending:
-            algorithm, version = _provenance(QUALITY_COMPONENT, row["media_type"], provider)
+            algorithm, version = _provenance(QUALITY_COMPONENT, row["media_type"], provider, row["extension"])
             connection.execute(
                 """
                 UPDATE component_state
@@ -1025,11 +1049,13 @@ def _mark_running_batch(workspace: Workspace, pending, provider: QualityProvider
 
 
 def _mark_not_requested_batch(workspace: Workspace, rows, provider: QualityProvider) -> None:
-    algorithm, version = _provenance(QUALITY_COMPONENT, provider=provider)
     settings = json.dumps(getattr(provider, "settings", {}), sort_keys=True)
     now = _timestamp()
     with workspace.transaction() as connection:
         for row, fingerprint in rows:
+            algorithm, version = _provenance(
+                QUALITY_COMPONENT, row["media_type"], provider, row["extension"]
+            )
             connection.execute(
                 """
                 UPDATE component_state
@@ -1047,10 +1073,11 @@ def _mark_running_many(
     components: list[str],
     media_type: str = "image",
     provider: QualityProvider | None = None,
+    extension: str | None = None,
 ) -> None:
     with workspace.transaction() as connection:
         for component in components:
-            algorithm, version = _provenance(component, media_type, provider)
+            algorithm, version = _provenance(component, media_type, provider, extension)
             connection.execute(
                 """
                 UPDATE component_state
@@ -1188,12 +1215,13 @@ def _provenance(
     component: str,
     media_type: str | None = None,
     provider: QualityProvider | None = None,
+    extension: str | None = None,
 ) -> tuple[str, str]:
     _validate_component(component)
     if component == METADATA_COMPONENT:
         return METADATA_ALGORITHM, METADATA_VERSION
     if component == THUMBNAIL_COMPONENT:
-        return thumbnail_provenance(media_type or "image")[:2]
+        return thumbnail_provenance(media_type or "image", extension)[:2]
     if media_type == "video":
         return VIDEO_QUALITY_ALGORITHM, VIDEO_QUALITY_VERSION
     provider = provider or create_quality_provider(None)

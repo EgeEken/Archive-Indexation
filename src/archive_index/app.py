@@ -129,6 +129,7 @@ def _index_command(
 ) -> int:
     from .indexing.media_pipeline import index_workspace
     from .indexing.video_quality import index_video_quality
+    from .indexing.raw_quality import index_raw_quality
     from .indexing.grouping import build_groups, extract_visual_features
     from .indexing.recommendation import build_recommendations
     from .indexing.reconciliation import reconcile_workspace
@@ -189,6 +190,14 @@ def _index_command(
             timings=timings,
         )
         if quality_result.cancelled:
+            return 130
+        raw_quality_result = index_raw_quality(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("raw quality"),
+            quality_batch_size=quality_batch_size,
+        )
+        if raw_quality_result.cancelled:
             return 130
         video_quality_result = index_video_quality(
             workspace,

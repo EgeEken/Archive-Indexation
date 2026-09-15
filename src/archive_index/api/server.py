@@ -25,6 +25,7 @@ from ..app_state import WorkspaceRegistry, workspace_id
 from ..configuration import default_configuration, normalize_configuration
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
+from ..indexing.raw_quality import index_raw_quality
 from ..indexing.video_quality import index_video_quality, video_quality_details
 from ..indexing.recommendation import build_recommendations
 from ..indexing.reconciliation import reconcile_workspace
@@ -167,8 +168,11 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 raise ValueError("analysis does not belong to this workspace folder")
             if not isinstance(source_analysis.get("root"), dict):
                 raise ValueError("analysis is incomplete")
-            plan = plan_from_analysis(source_analysis, normalized)
-            plan["quality_readiness"] = _quality_readiness(normalized["quality_provider"])
+            existing_workspace = (
+                Workspace.open(root) if (root / ".archive-index").is_dir() else None
+            )
+            plan = plan_from_analysis(source_analysis, normalized, existing_workspace)
+            plan.update(_configuration_quality_readiness(normalized))
         except (ValueError, OSError) as error:
             raise InvalidRequest(str(error)) from error
         return {"path": str(root), "configuration": normalized, "plan": plan}
@@ -213,6 +217,13 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
     def remove_workspace_with_index(self, handle: str, delete_index: bool) -> bool:
         _, workspace = self.resolve_workspace(handle)
         if delete_index:
+            with self._active_lock:
+                thread = self._active_threads.get(handle)
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5)
+            with self._active_lock:
+                if thread is not None and thread.is_alive():
+                    raise InvalidRequest("the workspace index is still shutting down")
             active = _active_job(workspace)
             if active is not None:
                 raise InvalidRequest("the workspace index cannot be deleted while a job is running")
@@ -356,6 +367,18 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 timings=timings,
             )
             if quality_result.cancelled:
+                return
+            raw_quality_job_id = JobStore(workspace).create("raw_quality")
+            with self._active_lock:
+                self._cancel_events[(handle, raw_quality_job_id)] = cancel_event
+            job_ids.append(raw_quality_job_id)
+            current_job_id = raw_quality_job_id
+            raw_quality_result = index_raw_quality(
+                workspace,
+                job_id=raw_quality_job_id,
+                cancel_event=cancel_event,
+            )
+            if raw_quality_result.cancelled:
                 return
             video_quality_job_id = JobStore(workspace).create("video_quality")
             with self._active_lock:
@@ -672,8 +695,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                         or not isinstance(analysis.get("root"), dict)
                     ):
                         raise InvalidRequest("analysis does not belong to this workspace folder")
-                    plan = plan_from_analysis(analysis, configuration)
-                    plan["quality_readiness"] = _quality_readiness(configuration["quality_provider"])
+                    plan = plan_from_analysis(analysis, configuration, workspace)
+                    plan.update(_configuration_quality_readiness(configuration))
                 else:
                     plan = _workspace_plan(workspace, configuration)
                 self._send_json(200, {"configuration": configuration, "plan": plan})
@@ -1020,14 +1043,45 @@ def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
         "last_indexed": latest,
         "quality_provider": workspace.quality_provider(),
         "quality_providers": ["off", "lar-iqa"],
+        "rendered_quality_provider": workspace.rendered_quality_provider(),
+        "raw_quality_provider": workspace.raw_quality_provider(),
+        "video_quality_enabled": workspace.video_quality_enabled(),
     }
 
 
 def _workspace_plan(workspace: Workspace, configuration: Mapping[str, object]) -> dict[str, object]:
     analysis = analyze_folder(workspace.root)
-    plan = plan_from_analysis(analysis, dict(configuration))
-    plan["quality_readiness"] = _quality_readiness(configuration["quality_provider"])
+    plan = plan_from_analysis(analysis, dict(configuration), workspace)
+    plan.update(_configuration_quality_readiness(configuration))
     return plan
+
+
+def _configuration_quality_readiness(configuration: Mapping[str, object]) -> dict[str, object]:
+    rendered = _quality_readiness(configuration["rendered_quality_provider"])
+    raw = _quality_readiness(configuration["raw_quality_provider"])
+    if configuration["raw_quality_provider"] == "lar-iqa" and raw["ready"]:
+        try:
+            rawpy_ready = importlib.util.find_spec("rawpy") is not None
+        except (ImportError, ModuleNotFoundError):
+            rawpy_ready = False
+        if not rawpy_ready:
+            raw = {
+                **raw,
+                "status": "raw_preview_missing",
+                "ready": False,
+                "message": "Install the optional raw-preview dependency to assess RAW-only assets.",
+            }
+    video = _quality_readiness(
+        configuration["rendered_quality_provider"]
+        if configuration["video_quality_enabled"]
+        else "off"
+    )
+    return {
+        "quality_readiness": rendered,
+        "rendered_quality_readiness": rendered,
+        "raw_quality_readiness": raw,
+        "video_quality_readiness": video,
+    }
 
 
 def _quality_readiness(provider: object) -> dict[str, object]:
@@ -1145,7 +1199,12 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             f"""
             SELECT la.*,
                    (SELECT MAX(pf_quality.quality_score) FROM physical_file AS pf_quality
-                    WHERE pf_quality.logical_asset_id = la.id AND pf_quality.in_scope = 1) AS quality_score,
+                    WHERE pf_quality.logical_asset_id = la.id AND pf_quality.in_scope = 1
+                      AND (pf_quality.media_type != 'image' OR pf_quality.extension NOT IN ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.raf', '.rw2')
+                           OR NOT EXISTS (SELECT 1 FROM physical_file AS pf_rendered
+                                          WHERE pf_rendered.logical_asset_id = la.id AND pf_rendered.in_scope = 1
+                                            AND pf_rendered.media_type = 'image'
+                                            AND pf_rendered.extension NOT IN ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.raf', '.rw2')))) AS quality_score,
                    (SELECT MIN(LOWER(pf_sort.filename)) FROM physical_file AS pf_sort
                     WHERE pf_sort.logical_asset_id = la.id AND pf_sort.in_scope = 1) AS filename_sort
             FROM logical_asset AS la
@@ -1223,7 +1282,12 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             f"""
             SELECT sg.*,
                    (SELECT MAX(pf.quality_score) FROM physical_file AS pf
-                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_quality_score,
+                    WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1
+                      AND (pf.media_type != 'image' OR pf.extension NOT IN ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.raf', '.rw2')
+                           OR NOT EXISTS (SELECT 1 FROM physical_file AS pf_rendered
+                                          WHERE pf_rendered.logical_asset_id = sg.representative_logical_asset_id AND pf_rendered.in_scope = 1
+                                            AND pf_rendered.media_type = 'image'
+                                            AND pf_rendered.extension NOT IN ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.raf', '.rw2')))) AS representative_quality_score,
                    (SELECT MIN(LOWER(pf.filename)) FROM physical_file AS pf
                     WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_filename
             FROM strict_group AS sg
@@ -1603,6 +1667,15 @@ def _asset_summary(
     )
     if representative is None:
         raise ResourceNotFound("asset has no physical representation")
+    rendered_quality = [
+        row for row in active_physical
+        if row["media_type"] != "image" or not is_raw_extension(row["extension"])
+    ]
+    quality_rows = rendered_quality or active_physical
+    quality_score = next(
+        (row["quality_score"] for row in quality_rows if row["quality_score"] is not None),
+        None,
+    )
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
@@ -1616,7 +1689,8 @@ def _asset_summary(
         "online_count": sum(bool(row["is_online"]) for row in physical),
         "thumbnail_url": _url(f"/api/assets/{asset['id']}/thumbnail", handle) if thumbnail else None,
         "original_url": _url(f"/api/files/{online['id']}/original", handle) if online else None,
-        "quality_score": max((row["quality_score"] for row in active_physical if row["quality_score"] is not None), default=None),
+        "quality_score": quality_score,
+        "quality_source": _quality_source(next((row for row in quality_rows if row["quality_score"] is not None), None)),
         "issues": _asset_issues(physical),
         "is_representative": is_representative,
         "current_group_id": current_group_id,
@@ -1692,6 +1766,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
                 "codec": row["codec"],
                 "metadata": _json_or_none(row["metadata_json"]),
                 "quality_score": row["quality_score"],
+                "quality_source": _quality_source(row),
                 "quality_raw": _json_or_none(row["quality_raw_json"]),
                 "quality_components": _json_or_none(row["quality_components_json"]),
                 "video_quality": video_quality_details(workspace, row["id"])
@@ -1809,6 +1884,17 @@ def _representation_label(row, relationships: list[str]) -> str:
 def _component_info(row, component: str) -> dict[str, object]:
     prefix = "quality_component_" if component == "quality" else f"{component}_"
     return {"status": row[f"{prefix}status"], "algorithm": row[f"{prefix}algorithm"], "version": row[f"{prefix}version"], "error": row[f"{prefix}error"]}
+
+
+def _quality_source(row) -> str | None:
+    if row is None or row["quality_score"] is None:
+        return None
+    raw = _json_or_none(row["quality_raw_json"])
+    if isinstance(raw, dict) and raw.get("quality_source") == "raw_embedded_preview":
+        return "RAW embedded preview"
+    if row["media_type"] == "video":
+        return "sampled video frames"
+    return "rendered image"
 
 
 def _jobs(workspace: Workspace, query: Mapping[str, list[str]]):

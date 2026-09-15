@@ -150,7 +150,7 @@ class ApiTests(unittest.TestCase):
         status, configuration = _get_json(self.base_url, "/api/workspace/configuration")
         self.assertEqual(status, 200)
         draft = configuration["configuration"]
-        self.assertEqual(draft["configuration_version"], 1)
+        self.assertEqual(draft["configuration_version"], 2)
         draft["include_videos"] = False
         status, plan = _post_json(self.base_url, "/api/workspace/configuration/plan", {"configuration": draft})
         self.assertEqual(status, 200)

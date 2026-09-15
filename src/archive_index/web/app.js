@@ -252,13 +252,17 @@ function setupExtensionsMarkup(configuration) {
     return `<div class="extension-group"><strong>${category}</strong><div class="extension-list">${values.map((extension) => `<label><input type="checkbox" data-extension="${extension}" data-extension-kind="image"${imageExtensions.includes(extension) ? " checked" : ""}> ${extension}</label>`).join("")}</div></div>`;
   }).join("");
   const video = supportedVideoExtensions.map((extension) => `<label><input type="checkbox" data-extension="${extension}" data-extension-kind="video"${videoExtensions.includes(extension) ? " checked" : ""}> ${extension}</label>`).join("");
-  return `<div class="scope-options"><label class="setup-toggle"><input id="setup-include-images" type="checkbox"${configuration.include_images ? " checked" : ""}> Include supported image files</label><div class="extension-groups">${imageGroups}</div><div class="extension-group"><strong>Video extensions</strong><div class="extension-list">${video}</div></div></div>`;
+  return `<div class="scope-options"><label class="setup-toggle"><input id="setup-include-rendered-images" type="checkbox"${configuration.include_rendered_images ?? configuration.include_images ? " checked" : ""}> Index rendered image files</label><label class="setup-toggle"><input id="setup-include-raw" type="checkbox"${configuration.include_raw ?? configuration.include_images ? " checked" : ""}> Index RAW files</label><div class="extension-groups">${imageGroups}</div><div class="extension-group"><strong>Video extensions</strong><div class="extension-list">${video}</div></div></div>`;
 }
 
 function setupPlan(configuration) {
   const totals = { files: 0, bytes: 0, categories: {} };
   const includeExtension = (extension) => {
-    if ((configuration.image_extensions || []).includes(extension)) return Boolean(configuration.include_images);
+    if ((configuration.image_extensions || []).includes(extension)) {
+      return [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(extension)
+        ? Boolean(configuration.include_raw ?? configuration.include_images)
+        : Boolean(configuration.include_rendered_images ?? configuration.include_images);
+    }
     if ((configuration.video_extensions || []).includes(extension)) return Boolean(configuration.include_videos);
     return false;
   };
@@ -284,16 +288,17 @@ function renderSetupPlanData(plan) {
   const bytes = plan.selected_bytes ?? plan.bytes ?? 0;
   const categories = plan.selected_categories ?? plan.categories ?? {};
   const estimate = plan.estimated_seconds ? ` · roughly ${Math.max(1, Math.round(plan.estimated_seconds / 60))} min` : "";
-  const quality = state.setup.draftConfiguration.quality_provider === "lar-iqa"
-    ? `${plan.quality_image_count ?? 0} images need quality scoring${plan.quality_readiness?.ready ? " · runtime ready" : plan.quality_readiness?.message ? ` · ${plan.quality_readiness.message}` : ""}`
-    : "quality scoring off; existing scores are preserved";
-  const video = plan.video_sampling ? `video quality: ${plan.video_sampling.target_fps} samples/s, ${plan.video_sampling.min_frames}–${plan.video_sampling.max_frames} frames/video` : "";
+  const configuration = state.setup.draftConfiguration;
+  const rendered = configuration.rendered_quality_provider ?? configuration.quality_provider;
+  const quality = `rendered-image quality: ${plan.quality_rendered_image_count ?? 0} candidates${rendered === "lar-iqa" && plan.rendered_quality_readiness?.message ? ` · ${plan.rendered_quality_readiness.message}` : ""} · RAW-only quality: ${plan.quality_raw_candidate_count ?? 0} candidates`;
+  const video = plan.video_sampling ? `video: ${plan.video_count ?? 0} indexed · quality ${configuration.video_quality_enabled ? "enabled" : "off"}, ${plan.video_sampling.target_fps} samples/s, ${plan.video_sampling.min_frames}–${plan.video_sampling.max_frames} frames/video` : "";
   $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>${video ? `<span>${escapeHtml(video)}</span>` : ""}`;
 }
 
 function renderSetupPlan() {
   renderSetupPlanData(setupPlan(state.setup.draftConfiguration));
-  $("setup-quality-note").textContent = state.setup.draftConfiguration.quality_provider === "lar-iqa" ? "Lightweight image and video technical quality scoring will run after metadata and thumbnails; readiness is checked without loading the model." : "Technical quality scoring will be skipped; existing scores are preserved.";
+  const configuration = state.setup.draftConfiguration;
+  $("setup-quality-note").textContent = `Rendered images: ${configuration.rendered_quality_provider === "lar-iqa" ? "Lightweight LAR-IQA" : "off"}. RAW-only assets: ${configuration.raw_quality_provider === "lar-iqa" ? "Lightweight LAR-IQA from embedded previews" : "off"}. Existing quality scores are preserved when a provider is off.`;
   const request = ++state.setup.planRequest;
   fetch("/api/workspaces/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: state.setup.path, analysis: state.setup.analysis, configuration: state.setup.draftConfiguration }) })
     .then(async (response) => {
@@ -306,9 +311,14 @@ function renderSetupPlan() {
 
 function updateSetupConfiguration() {
   const configuration = state.setup.draftConfiguration;
-  configuration.include_images = $("setup-include-images").checked;
+  configuration.include_rendered_images = $("setup-include-rendered-images").checked;
+  configuration.include_raw = $("setup-include-raw").checked;
+  configuration.include_images = configuration.include_rendered_images || configuration.include_raw;
   configuration.include_videos = $("setup-include-videos").checked;
-  configuration.quality_provider = $("setup-quality-provider").value;
+  configuration.rendered_quality_provider = $("setup-rendered-quality-provider").value;
+  configuration.raw_quality_provider = $("setup-raw-quality-provider").value;
+  configuration.quality_provider = configuration.rendered_quality_provider;
+  configuration.video_quality_enabled = $("setup-video-quality").checked;
   configuration.video_sampling_fps = Number($("setup-video-fps").value);
   configuration.video_sampling_min_frames = Number($("setup-video-min-frames").value);
   configuration.video_sampling_max_frames = Number($("setup-video-max-frames").value);
@@ -324,7 +334,7 @@ function bindSetupControls() {
     if (input.value !== "inherit") state.setup.draftConfiguration.folder_rules.push({ path, included: input.value === "include" });
     renderSetupPlan();
   }));
-  ["setup-include-images", "setup-include-videos", "setup-quality-provider", "setup-video-fps", "setup-video-min-frames", "setup-video-max-frames"].forEach((id) => $(id).addEventListener("change", updateSetupConfiguration));
+  ["setup-include-rendered-images", "setup-include-raw", "setup-include-videos", "setup-video-quality", "setup-rendered-quality-provider", "setup-raw-quality-provider", "setup-video-fps", "setup-video-min-frames", "setup-video-max-frames"].forEach((id) => $(id).addEventListener("change", updateSetupConfiguration));
   $("setup-type-options").querySelectorAll("[data-extension]").forEach((input) => input.addEventListener("change", updateSetupConfiguration));
 }
 
@@ -347,7 +357,9 @@ function showSetup(payload) {
   $("setup-title").textContent = payload.indexed ? "Review workspace setup" : "Set up workspace";
   $("setup-path").textContent = payload.path;
   $("setup-include-videos").checked = Boolean(state.setup.draftConfiguration.include_videos);
-  $("setup-quality-provider").value = state.setup.draftConfiguration.quality_provider || "lar-iqa";
+  $("setup-video-quality").checked = state.setup.draftConfiguration.video_quality_enabled !== false;
+  $("setup-rendered-quality-provider").value = state.setup.draftConfiguration.rendered_quality_provider || state.setup.draftConfiguration.quality_provider || "lar-iqa";
+  $("setup-raw-quality-provider").value = state.setup.draftConfiguration.raw_quality_provider || "off";
   $("setup-video-fps").value = state.setup.draftConfiguration.video_sampling_fps ?? 2;
   $("setup-video-min-frames").value = state.setup.draftConfiguration.video_sampling_min_frames ?? 2;
   $("setup-video-max-frames").value = state.setup.draftConfiguration.video_sampling_max_frames ?? 32;
@@ -662,13 +674,15 @@ function renderQuality(file, showFilename) {
   }
   if (file.quality_score == null) {
     const status = file.components?.quality?.status;
-    const message = status === "not_requested" ? "Technical quality scoring is off." : status === "failed" ? "Technical quality scoring failed for this image." : "Technical quality is unavailable.";
-    return `<div class="quality-unsupported">${message}</div>`;
+    const error = file.components?.quality?.error;
+    const message = status === "not_requested" ? "Technical quality scoring is off." : status === "unsupported" && file.extension && [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(file.extension) ? "RAW preview is unavailable for technical quality scoring." : status === "failed" ? "Technical quality scoring failed for this image." : "Technical quality is unavailable.";
+    return `<div class="quality-unsupported">${message}${error ? `<div class="muted quality-error">${escapeHtml(error)}</div>` : ""}</div>`;
   }
   const score = Number(file.quality_score).toFixed(2);
   const color = file.quality_score == null ? "#26333f" : qualityColor(file.quality_score);
   const videoSamples = file.media_type === "video" && file.video_quality ? `<div class="muted quality-note">Video samples: ${file.video_quality.successful_count}/${file.video_quality.requested_count}${file.video_quality.status === "partial" ? " · partial" : ""}</div>` : "";
-  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div>${videoSamples}</section>`;
+  const source = file.quality_source ? `<div class="muted quality-note">Source: ${escapeHtml(file.quality_source)}</div>` : "";
+  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div>${source}${videoSamples}</section>`;
 }
 
 function meterMarkup(label, value, position, endpoints) {
