@@ -9,7 +9,8 @@ from pathlib import Path
 from .media_types import IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS
 
 JPEG_EXTENSIONS = frozenset({".jpeg", ".jpg"})
-CONFIGURATION_VERSION = 2
+CONFIGURATION_VERSION = 3
+EMBEDDING_PROVIDERS = frozenset({"openclip-b16-datacomp-xl", "siglip2-base-patch16-224"})
 VIDEO_SAMPLING_DEFAULT_FPS = 2.0
 VIDEO_SAMPLING_DEFAULT_MIN_FRAMES = 2
 VIDEO_SAMPLING_DEFAULT_MAX_FRAMES = 32
@@ -32,6 +33,8 @@ def default_configuration() -> dict[str, object]:
         "video_sampling_fps": VIDEO_SAMPLING_DEFAULT_FPS,
         "video_sampling_min_frames": VIDEO_SAMPLING_DEFAULT_MIN_FRAMES,
         "video_sampling_max_frames": VIDEO_SAMPLING_DEFAULT_MAX_FRAMES,
+        "semantic_search_enabled": False,
+        "embedding_provider": "openclip-b16-datacomp-xl",
     }
 
 
@@ -40,7 +43,7 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
     if not isinstance(value, Mapping):
         raise ValueError("configuration must be an object")
     version = value.get("configuration_version", CONFIGURATION_VERSION)
-    if version not in {1, CONFIGURATION_VERSION}:
+    if version not in {1, 2, CONFIGURATION_VERSION}:
         raise ValueError(f"unsupported configuration version: {version}")
     legacy_include_images = _bool(value.get("include_images", defaults["include_images"]), "include_images")
     legacy_quality_provider = value.get("quality_provider", defaults["quality_provider"])
@@ -92,10 +95,17 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
             "video_sampling_max_frames",
             maximum=256,
         ),
+        "semantic_search_enabled": _bool(
+            value.get("semantic_search_enabled", defaults["semantic_search_enabled"]),
+            "semantic_search_enabled",
+        ),
+        "embedding_provider": value.get("embedding_provider", defaults["embedding_provider"]),
     }
     for name in ("rendered_quality_provider", "raw_quality_provider", "quality_provider"):
         if result[name] not in {"off", "lar-iqa"}:
             raise ValueError(f"{name} must be off or lar-iqa")
+    if result["embedding_provider"] not in EMBEDDING_PROVIDERS:
+        raise ValueError("embedding_provider is not supported")
     if result["video_sampling_min_frames"] > result["video_sampling_max_frames"]:
         raise ValueError("video_sampling_min_frames must not exceed video_sampling_max_frames")
     return result
@@ -125,6 +135,8 @@ def configuration_from_connection(connection) -> dict[str, object]:
         "video_sampling_fps": row["video_sampling_fps"],
         "video_sampling_min_frames": row["video_sampling_min_frames"],
         "video_sampling_max_frames": row["video_sampling_max_frames"],
+        "semantic_search_enabled": bool(row["semantic_search_enabled"]),
+        "embedding_provider": row["embedding_provider"],
     })
 
 
@@ -138,8 +150,9 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             image_extensions_json, video_extensions_json, configuration_version, updated_at,
             video_sampling_fps, video_sampling_min_frames, video_sampling_max_frames,
             include_rendered_images, include_raw, rendered_quality_provider,
-            raw_quality_provider, video_quality_enabled
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            raw_quality_provider, video_quality_enabled,
+            semantic_search_enabled, embedding_provider
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             quality_provider = excluded.quality_provider,
             include_images = excluded.include_images,
@@ -155,6 +168,8 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             rendered_quality_provider = excluded.rendered_quality_provider,
             raw_quality_provider = excluded.raw_quality_provider,
             video_quality_enabled = excluded.video_quality_enabled,
+            semantic_search_enabled = excluded.semantic_search_enabled,
+            embedding_provider = excluded.embedding_provider,
             updated_at = excluded.updated_at
         """,
         (
@@ -173,6 +188,8 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             config["rendered_quality_provider"],
             config["raw_quality_provider"],
             int(config["video_quality_enabled"]),
+            int(config["semantic_search_enabled"]),
+            config["embedding_provider"],
         ),
     )
     connection.execute("DELETE FROM folder_scope_rule")

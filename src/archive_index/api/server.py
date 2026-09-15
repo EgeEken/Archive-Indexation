@@ -23,6 +23,13 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..app_state import WorkspaceRegistry, workspace_id
 from ..configuration import default_configuration, normalize_configuration
+from ..embeddings.models import (
+    OPENCLIP_PROVIDER,
+    SIGLIP_PROVIDER,
+    model_status,
+)
+from ..embeddings.search import SearchResult, search_similar, search_text
+from ..indexing.embeddings import EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, index_embeddings
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
 from ..indexing.raw_quality import index_raw_quality
@@ -289,6 +296,25 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             thread.start()
             return job_id
 
+    def start_embedding_rebuild(self, handle: str) -> str | None:
+        _, workspace = self.resolve_workspace(handle)
+        with self._active_lock:
+            thread = self._active_threads.get(handle)
+            if thread is not None and thread.is_alive():
+                return None
+            job_id = JobStore(workspace).create("embeddings")
+            cancel_event = threading.Event()
+            self._cancel_events[(handle, job_id)] = cancel_event
+            thread = threading.Thread(
+                target=self._run_embeddings_only,
+                args=(handle, workspace, job_id, cancel_event),
+                name=f"archive-index-embeddings-{handle[:8]}",
+                daemon=True,
+            )
+            self._active_threads[handle] = thread
+            thread.start()
+            return job_id
+
     def start_reconciliation(self, handle: str) -> str | None:
         _, workspace = self.resolve_workspace(handle)
         with self._active_lock:
@@ -392,6 +418,16 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             )
             if video_quality_result.cancelled:
                 return
+            embedding_job_id = JobStore(workspace).create("embeddings")
+            with self._active_lock:
+                self._cancel_events[(handle, embedding_job_id)] = cancel_event
+            job_ids.append(embedding_job_id)
+            current_job_id = embedding_job_id
+            embedding_result = index_embeddings(
+                workspace, job_id=embedding_job_id, cancel_event=cancel_event
+            )
+            if embedding_result.cancelled:
+                return
             feature_job_id = JobStore(workspace).create("visual_features")
             with self._active_lock:
                 self._cancel_events[(handle, feature_job_id)] = cancel_event
@@ -436,6 +472,27 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             with self._active_lock:
                 for active_job_id in job_ids:
                     self._cancel_events.pop((handle, active_job_id), None)
+
+    def _run_embeddings_only(
+        self,
+        handle: str,
+        workspace: Workspace,
+        job_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        try:
+            index_embeddings(workspace, job_id=job_id, cancel_event=cancel_event)
+        except Exception:
+            LOGGER.exception("embedding rebuild failed")
+            try:
+                row = JobStore(workspace).get(job_id)
+                if row is not None and row["status"] in {"pending", "running"}:
+                    JobStore(workspace).fail(job_id)
+            except Exception:
+                LOGGER.exception("could not mark embedding job failed")
+        finally:
+            with self._active_lock:
+                self._cancel_events.pop((handle, job_id), None)
                 if self._active_threads.get(handle) is threading.current_thread():
                     self._active_threads.pop(handle, None)
 
@@ -563,6 +620,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if request.path == "/api/workspaces":
                 self._send_json(200, {"workspaces": self.server.list_workspaces()})
                 return
+            if request.path == "/api/embedding-models":
+                self._send_json(200, {"models": _embedding_model_statuses()})
+                return
             handle, workspace = self._workspace(query)
             if request.path == "/api/workspace":
                 self._send_json(200, _workspace_summary(workspace, handle))
@@ -572,6 +632,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"folders": _folders(workspace)})
             elif request.path == "/api/assets":
                 self._send_json(200, _assets(workspace, query, handle))
+            elif request.path == "/api/search":
+                self._send_json(200, _semantic_search(workspace, query, handle))
             elif request.path == "/api/jobs":
                 self._send_json(200, {"jobs": _jobs(workspace, query)})
             elif request.path == "/api/problems":
@@ -667,6 +729,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(202, {"job_id": job_id})
                 return
+            if request.path == "/api/embeddings/rebuild":
+                job_id = self.server.start_embedding_rebuild(handle)
+                if job_id is None:
+                    self._send_json(409, {"error": "a workspace job is already running"})
+                else:
+                    self._send_json(202, {"job_id": job_id})
+                return
             if request.path == "/api/reconciliation/rebuild":
                 job_id = self.server.start_reconciliation(handle)
                 if job_id is None:
@@ -745,6 +814,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3 and parts[:2] == ["api", "assets"]:
             self._send_json(200, _asset_detail(workspace, parts[2], handle))
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "assets"] and parts[3] == "similar":
+            self._send_json(200, _similar_assets(workspace, parts[2], handle))
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "original":
             self._serve_original(workspace, parts[2])
@@ -1028,6 +1100,9 @@ def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
         online = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1 AND is_online = 1").fetchone()[0]
         out_of_scope = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 0").fetchone()[0]
         latest = connection.execute("SELECT MAX(finished_at) FROM job WHERE status = 'complete'").fetchone()[0]
+        embedding_storage = connection.execute(
+            "SELECT COALESCE((SELECT SUM(length(embedding)) FROM logical_asset_embedding), 0) + COALESCE((SELECT SUM(length(embedding)) FROM video_frame_embedding), 0)"
+        ).fetchone()[0]
     finally:
         connection.close()
     return {
@@ -1046,6 +1121,10 @@ def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
         "rendered_quality_provider": workspace.rendered_quality_provider(),
         "raw_quality_provider": workspace.raw_quality_provider(),
         "video_quality_enabled": workspace.video_quality_enabled(),
+        "semantic_search_enabled": workspace.semantic_search_enabled(),
+        "embedding_provider": workspace.embedding_provider(),
+        "embedding_model": _embedding_model_status(workspace.embedding_provider()),
+        "embedding_storage_bytes": embedding_storage,
     }
 
 
@@ -1053,6 +1132,7 @@ def _workspace_plan(workspace: Workspace, configuration: Mapping[str, object]) -
     analysis = analyze_folder(workspace.root)
     plan = plan_from_analysis(analysis, dict(configuration), workspace)
     plan.update(_configuration_quality_readiness(configuration))
+    plan.update(_embedding_plan(configuration, workspace))
     return plan
 
 
@@ -1081,6 +1161,96 @@ def _configuration_quality_readiness(configuration: Mapping[str, object]) -> dic
         "rendered_quality_readiness": rendered,
         "raw_quality_readiness": raw,
         "video_quality_readiness": video,
+        "embedding_readiness": _embedding_readiness(configuration),
+    }
+
+
+def _embedding_model_status(provider: str) -> dict[str, object]:
+    status = model_status(provider)
+    return {
+        "provider": status["provider"],
+        "model_id": status["model_id"],
+        "version": status["version"],
+        "dimension": status["dimension"],
+        "installed": status["installed"],
+        "cache_bytes": status["cache_bytes"],
+        "expected_download_bytes": status["expected_download_bytes"],
+    }
+
+
+def _embedding_model_statuses() -> list[dict[str, object]]:
+    return [_embedding_model_status(provider) for provider in (OPENCLIP_PROVIDER, SIGLIP_PROVIDER)]
+
+
+def _embedding_readiness(configuration: Mapping[str, object]) -> dict[str, object]:
+    provider = str(configuration["embedding_provider"])
+    status = _embedding_model_status(provider)
+    modules = ("torch", "numpy")
+    if provider == OPENCLIP_PROVIDER:
+        modules += ("open_clip",)
+    else:
+        modules += ("transformers", "safetensors")
+    try:
+        runtime_ready = all(importlib.util.find_spec(module) is not None for module in modules)
+    except (ImportError, ModuleNotFoundError):
+        runtime_ready = False
+    ready = not configuration["semantic_search_enabled"] or (runtime_ready and bool(status["installed"]))
+    if not configuration["semantic_search_enabled"]:
+        message = "Semantic search is off."
+        state = "off"
+    elif ready:
+        message = "Runtime and model appear ready."
+        state = "ready"
+    elif not runtime_ready:
+        message = "Install the embeddings extra before indexing semantic features."
+        state = "runtime_missing"
+    else:
+        message = "Install the selected embedding model before indexing semantic features."
+        state = "model_missing"
+    return {"status": state, "ready": ready, "runtime_ready": runtime_ready, "model": status, "message": message}
+
+
+def _embedding_plan(configuration: Mapping[str, object], workspace: Workspace | None = None) -> dict[str, object]:
+    if workspace is None:
+        return {"embedding_image_count": 0, "embedding_video_sample_count": 0, "embedding_cached_count": 0, "embedding_estimated_storage_bytes": 0, "embedding_estimated_seconds": 0.0}
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            "SELECT logical_asset_id, media_type, extension, duration_seconds FROM physical_file WHERE in_scope = 1 AND is_online = 1 ORDER BY logical_asset_id, relative_path"
+        ).fetchall()
+        active = connection.execute(
+            "SELECT active_run_id FROM workspace_embedding WHERE id = 1"
+        ).fetchone()
+        run_id = active[0] if active else None
+        component = f"embedding:{configuration['embedding_provider']}"
+        cached = connection.execute(
+            "SELECT COUNT(*) FROM component_state WHERE component = ? AND status = 'complete'",
+            (component,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    groups: dict[str, list] = {}
+    for row in rows:
+        groups.setdefault(row["logical_asset_id"], []).append(row)
+    images = 0
+    videos = 0
+    for members in groups.values():
+        if members[0]["media_type"] == "video":
+            duration = float(members[0]["duration_seconds"] or 0)
+            if duration > 0:
+                videos += max(int(configuration["video_sampling_min_frames"]), min(int(configuration["video_sampling_max_frames"]), int(duration * float(configuration["video_sampling_fps"]) + 0.999999)))
+        else:
+            images += 1
+    from ..embeddings.models import model_spec
+    dimension = int(model_spec(str(configuration["embedding_provider"]))["dimension"])
+    total_vectors = images + videos
+    return {
+        "embedding_image_count": images if configuration["semantic_search_enabled"] else 0,
+        "embedding_video_sample_count": videos if configuration["semantic_search_enabled"] else 0,
+        "embedding_cached_count": cached if configuration["semantic_search_enabled"] else 0,
+        "embedding_estimated_storage_bytes": total_vectors * dimension * 2 if configuration["semantic_search_enabled"] else 0,
+        "embedding_estimated_seconds": round(total_vectors * EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, 1) if configuration["semantic_search_enabled"] else 0.0,
+        "embedding_active_run_id": run_id,
     }
 
 
@@ -1245,6 +1415,120 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         "selection": selection_filter or ("representatives" if representatives_only else "recommended" if recommended_only else decision or "all"),
         "recommendation_run_id": recommendation_run_id,
     }
+
+
+def _semantic_search(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
+    text = _first(query, "text", "").strip()
+    if not text:
+        raise InvalidRequest("text query is required")
+    if len(text) > 500:
+        raise InvalidRequest("text query is too long")
+    page = _positive_int(_first(query, "page", "1"), "page")
+    page_size = min(_positive_int(_first(query, "page_size", "60"), "page_size"), MAX_PAGE_SIZE)
+    allowed_asset_ids = _semantic_asset_filter(workspace, query)
+    try:
+        results = search_text(
+            workspace,
+            text,
+            allowed_asset_ids=allowed_asset_ids,
+            top_k=max(len(allowed_asset_ids), page * page_size),
+        )
+    except (RuntimeError, ValueError) as error:
+        raise InvalidRequest(str(error)) from error
+    return _search_response(workspace, handle, results, page, page_size, text)
+
+
+def _similar_assets(workspace: Workspace, asset_id: str, handle: str) -> dict[str, object]:
+    try:
+        results = search_similar(workspace, asset_id, allowed_asset_ids=_semantic_asset_filter(workspace, {}), top_k=60)
+    except (RuntimeError, ValueError) as error:
+        raise InvalidRequest(str(error)) from error
+    return _search_response(workspace, handle, results, 1, 60, None)
+
+
+def _search_response(workspace: Workspace, handle: str, results: list[SearchResult], page: int, page_size: int, query_text: str | None) -> dict[str, object]:
+    total = len(results)
+    start = (page - 1) * page_size
+    selected = results[start : start + page_size]
+    asset_ids = [result.asset_id for result in selected]
+    if not asset_ids:
+        return {"items": [], "query": query_text, "page": page, "page_size": page_size, "total": total, "has_next": False, "similarity_sort": True}
+    placeholders = ",".join("?" for _ in asset_ids)
+    connection = workspace.connect()
+    try:
+        assets = connection.execute(f"SELECT * FROM logical_asset WHERE id IN ({placeholders})", asset_ids).fetchall()
+    finally:
+        connection.close()
+    by_id = {asset["id"]: asset for asset in assets}
+    physical = _physical_rows_for_assets(workspace, asset_ids)
+    representatives, _ = _current_representatives(workspace)
+    recommendations, recommendation_run_id = _current_recommendations(workspace)
+    groups = _current_group_ids(workspace, asset_ids)
+    items = []
+    for result in selected:
+        asset = by_id.get(result.asset_id)
+        if asset is None:
+            continue
+        item = _asset_summary(
+            workspace,
+            asset,
+            handle,
+            physical.get(result.asset_id, []),
+            result.asset_id in representatives,
+            result.asset_id in recommendations,
+            recommendation_run_id,
+            groups.get(result.asset_id),
+        )
+        item["similarity"] = result.similarity
+        item["best_match_timestamp"] = result.best_timestamp
+        items.append(item)
+    return {
+        "items": items,
+        "query": query_text,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_next": page * page_size < total,
+        "similarity_sort": True,
+    }
+
+
+def _semantic_asset_filter(workspace: Workspace, query: Mapping[str, list[str]]) -> set[str]:
+    folder = _folder_filter(workspace, _first(query, "folder", "")) if query else ""
+    media_type = _first(query, "media_type", "") if query else ""
+    if media_type and media_type not in {"image", "video"}:
+        raise InvalidRequest("media_type must be image or video")
+    selection = _first(query, "selection", "").lower() if query else ""
+    if selection not in {"", "all", "representatives", "recommended", "selected", "rejected", "undecided"}:
+        raise InvalidRequest("selection is invalid")
+    representatives, _ = _current_representatives(workspace)
+    recommendations, _ = _current_recommendations(workspace)
+    clauses = [
+        "EXISTS (SELECT 1 FROM physical_file AS pf_scope WHERE pf_scope.logical_asset_id = la.id AND pf_scope.in_scope = 1 AND pf_scope.is_online = 1)"
+    ]
+    params: list[object] = []
+    if folder:
+        escaped = _like_value(folder)
+        clauses.append("EXISTS (SELECT 1 FROM physical_file AS pf_folder WHERE pf_folder.logical_asset_id = la.id AND pf_folder.in_scope = 1 AND (pf_folder.relative_path = ? OR pf_folder.relative_path LIKE ? ESCAPE '\\'))")
+        params.extend([folder, f"{escaped}/%"])
+    if media_type:
+        clauses.append("EXISTS (SELECT 1 FROM physical_file AS pf_type WHERE pf_type.logical_asset_id = la.id AND pf_type.in_scope = 1 AND pf_type.media_type = ?)")
+        params.append(media_type)
+    ids = representatives if selection == "representatives" else recommendations if selection == "recommended" else None
+    if ids is not None:
+        if not ids:
+            return set()
+        clauses.append(f"la.id IN ({','.join('?' for _ in ids)})")
+        params.extend(sorted(ids))
+    if selection in {"selected", "rejected", "undecided"}:
+        clauses.append("la.selection_state = ?")
+        params.append(selection)
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(f"SELECT la.id FROM logical_asset AS la WHERE {' AND '.join(clauses)}", params).fetchall()
+    finally:
+        connection.close()
+    return {row[0] for row in rows}
 
 
 def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:

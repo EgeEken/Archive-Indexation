@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -371,6 +371,67 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE workspace_config ADD COLUMN video_quality_enabled INTEGER NOT NULL DEFAULT 1 CHECK (video_quality_enabled IN (0, 1))",
         "UPDATE workspace_config SET include_rendered_images = include_images, include_raw = include_images, rendered_quality_provider = quality_provider, raw_quality_provider = 'off', video_quality_enabled = CASE WHEN quality_provider = 'lar-iqa' THEN 1 ELSE 0 END, configuration_version = 2 WHERE id = 1",
     ),
+    16: (
+        "ALTER TABLE workspace_config ADD COLUMN semantic_search_enabled INTEGER NOT NULL DEFAULT 0 CHECK (semantic_search_enabled IN (0, 1))",
+        "ALTER TABLE workspace_config ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT 'openclip-b16-datacomp-xl'",
+        "UPDATE workspace_config SET semantic_search_enabled = 0, embedding_provider = 'openclip-b16-datacomp-xl', configuration_version = 3 WHERE id = 1",
+        """
+        CREATE TABLE embedding_run (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            embedding_dimension INTEGER NOT NULL,
+            settings_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_message TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS embedding_run_provider_idx ON embedding_run(provider, model_version, status, created_at)",
+        """
+        CREATE TABLE logical_asset_embedding (
+            run_id TEXT NOT NULL REFERENCES embedding_run(id) ON DELETE CASCADE,
+            logical_asset_id TEXT NOT NULL REFERENCES logical_asset(id) ON DELETE CASCADE,
+            source_physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            source_kind TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            embedding_dimension INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, logical_asset_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS logical_asset_embedding_asset_idx ON logical_asset_embedding(logical_asset_id, run_id)",
+        """
+        CREATE TABLE video_frame_embedding (
+            run_id TEXT NOT NULL REFERENCES embedding_run(id) ON DELETE CASCADE,
+            logical_asset_id TEXT NOT NULL REFERENCES logical_asset(id) ON DELETE CASCADE,
+            physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            sample_run_id TEXT NOT NULL REFERENCES video_sample_run(id) ON DELETE CASCADE,
+            sample_index INTEGER NOT NULL,
+            timestamp_seconds REAL NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            embedding_dimension INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, sample_run_id, sample_index)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS video_frame_embedding_asset_idx ON video_frame_embedding(logical_asset_id, run_id)",
+        """
+        CREATE TABLE workspace_embedding (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active_provider TEXT,
+            active_run_id TEXT REFERENCES embedding_run(id),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "INSERT INTO workspace_embedding(id, active_provider, active_run_id, updated_at) VALUES (1, NULL, NULL, datetime('now'))",
+    ),
 }
 
 
@@ -439,6 +500,43 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                     version == 15
                     and statement.startswith("ALTER TABLE workspace_config ADD COLUMN")
                     and _has_column(connection, "workspace_config", statement.split()[5])
+                ):
+                    continue
+                if (
+                    version == 16
+                    and statement.startswith("ALTER TABLE workspace_config ADD COLUMN")
+                    and _has_column(connection, "workspace_config", statement.split()[5])
+                ):
+                    continue
+                if (
+                    version == 16
+                    and statement.lstrip().startswith("CREATE TABLE embedding_run")
+                    and _has_table(connection, "embedding_run")
+                ):
+                    continue
+                if (
+                    version == 16
+                    and statement.lstrip().startswith("CREATE TABLE logical_asset_embedding")
+                    and _has_table(connection, "logical_asset_embedding")
+                ):
+                    continue
+                if (
+                    version == 16
+                    and statement.lstrip().startswith("CREATE TABLE video_frame_embedding")
+                    and _has_table(connection, "video_frame_embedding")
+                ):
+                    continue
+                if (
+                    version == 16
+                    and statement.lstrip().startswith("CREATE TABLE workspace_embedding")
+                    and _has_table(connection, "workspace_embedding")
+                ):
+                    continue
+                if (
+                    version == 16
+                    and statement.lstrip().startswith("INSERT INTO workspace_embedding")
+                    and _has_table(connection, "workspace_embedding")
+                    and connection.execute("SELECT 1 FROM workspace_embedding WHERE id = 1").fetchone() is not None
                 ):
                     continue
                 connection.execute(statement)

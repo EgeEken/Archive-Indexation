@@ -8,6 +8,20 @@ from pathlib import Path
 
 
 class FrontendTests(unittest.TestCase):
+    def test_semantic_search_and_similar_ui_hooks_are_present(self) -> None:
+        root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        javascript = (root / "app.js").read_text(encoding="utf-8")
+        css = (root / "app.css").read_text(encoding="utf-8")
+        self.assertIn('id="search-mode"', html)
+        self.assertIn('id="setup-semantic-search"', html)
+        self.assertIn("openclip-b16-datacomp-xl", html)
+        self.assertIn("siglip2-base-patch16-224", html)
+        self.assertIn("/api/search?", javascript)
+        self.assertIn("Find similar", javascript)
+        self.assertIn("similarity-chip", javascript)
+        self.assertIn("similarity-chip", css)
+
     @unittest.skipUnless(shutil.which("node"), "node is required for frontend formatter tests")
     def test_capture_formatter_keeps_offsets_and_limits_fractional_seconds(self) -> None:
         source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")

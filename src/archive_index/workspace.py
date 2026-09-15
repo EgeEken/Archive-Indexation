@@ -147,6 +147,12 @@ class Workspace:
             connection.close()
         return bool(value)
 
+    def semantic_search_enabled(self) -> bool:
+        return bool(self.configuration()["semantic_search_enabled"])
+
+    def embedding_provider(self) -> str:
+        return str(self.configuration()["embedding_provider"])
+
     def set_quality_provider(self, provider: str) -> None:
         if provider not in QUALITY_PROVIDERS:
             raise WorkspaceError(f"unsupported quality provider: {provider}")

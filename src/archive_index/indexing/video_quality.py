@@ -560,10 +560,11 @@ def _get_or_create_run(workspace, row, algorithm, version, settings_json, input_
             """
             SELECT * FROM video_sample_run
             WHERE physical_file_id = ? AND sampler_algorithm = ? AND sampler_version = ?
-              AND settings_json = ? AND input_fingerprint = ? AND status IN ('running', 'cancelled')
-            ORDER BY created_at DESC LIMIT 1
+              AND input_fingerprint = ? AND requested_count = ?
+              AND status IN ('running', 'cancelled', 'complete', 'partial', 'sampling_only')
+            ORDER BY CASE WHEN settings_json = ? THEN 0 ELSE 1 END, created_at DESC LIMIT 1
             """,
-            (row["id"], VIDEO_SAMPLER_ALGORITHM, VIDEO_SAMPLER_VERSION, settings_json, input_fingerprint),
+            (row["id"], VIDEO_SAMPLER_ALGORITHM, VIDEO_SAMPLER_VERSION, input_fingerprint, count, settings_json),
         ).fetchone()
     finally:
         connection.close()

@@ -8,6 +8,7 @@ const state = {
   items: [],
   viewerItems: [],
   viewMode: query.get("view") === "groups" ? "groups" : "gallery",
+  searchMode: query.get("search_mode") === "semantic" ? "semantic" : "filename",
   selectionFilter: query.get("selection") || "all",
   groupPage: Number(query.get("group_page") || 1),
   groupPageSize: 10,
@@ -59,7 +60,8 @@ function syncUrl() {
   } else if (state.page > 1) {
     params.set("page", state.page);
   }
-  if ($("search").value.trim()) params.set("q", $("search").value.trim());
+  if ($("search").value.trim()) params.set(state.searchMode === "semantic" ? "text" : "q", $("search").value.trim());
+  if (state.searchMode === "semantic") params.set("search_mode", "semantic");
   if ($("folder").value) params.set("folder", $("folder").value);
   if ($("media-type").value) params.set("media_type", $("media-type").value);
   if (state.selectionFilter !== "all") params.set("selection", state.selectionFilter);
@@ -76,7 +78,7 @@ function filterParams(kind) {
     sort_by: $("sort-by").value,
     direction: $("direction").value,
   });
-  if ($("search").value.trim()) params.set("q", $("search").value.trim());
+  if ($("search").value.trim()) params.set(state.searchMode === "semantic" ? "text" : "q", $("search").value.trim());
   if ($("folder").value) params.set("folder", $("folder").value);
   if ($("media-type").value) params.set("media_type", $("media-type").value);
   if (state.selectionFilter !== "all") params.set("selection", state.selectionFilter);
@@ -113,6 +115,12 @@ function qualityColor(score) {
 
 function scoreMarkup(score) {
   return score == null ? "" : `<span class="quality-chip" style="--quality-color: ${qualityColor(score)}">Quality: ${Number(score).toFixed(2)}</span>`;
+}
+
+function similarityMarkup(item) {
+  if (item.similarity == null) return "";
+  const timestamp = item.best_match_timestamp == null ? "" : ` · ${Number(item.best_match_timestamp).toFixed(1)} s`;
+  return `<span class="similarity-chip">Similarity: ${Number(item.similarity).toFixed(2)}${timestamp}</span>`;
 }
 
 function selectionState(item) {
@@ -172,7 +180,7 @@ function renderCard(item, index) {
     : `<div class="placeholder">Preview unavailable</div>`;
   const capture = $("sort-by").value === "capture_time" && item.capture_time
     ? `<div class="capture">${escapeHtml(formatCapture(item.capture_time, item.capture_time_kind))}</div>` : "";
-  return `<article class="photo-card${item.is_representative ? " representative-card" : ""}${item.auto_recommended ? " recommended-card" : ""}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div>${scoreMarkup(item.quality_score)}${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
+  return `<article class="photo-card${item.is_representative ? " representative-card" : ""}${item.auto_recommended ? " recommended-card" : ""}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
 }
 
 async function loadHome() {
@@ -292,7 +300,10 @@ function renderSetupPlanData(plan) {
   const rendered = configuration.rendered_quality_provider ?? configuration.quality_provider;
   const quality = `rendered-image quality: ${plan.quality_rendered_image_count ?? 0} candidates${rendered === "lar-iqa" && plan.rendered_quality_readiness?.message ? ` · ${plan.rendered_quality_readiness.message}` : ""} · RAW-only quality: ${plan.quality_raw_candidate_count ?? 0} candidates`;
   const video = plan.video_sampling ? `video: ${plan.video_count ?? 0} indexed · quality ${configuration.video_quality_enabled ? "enabled" : "off"}, ${plan.video_sampling.target_fps} samples/s, ${plan.video_sampling.min_frames}–${plan.video_sampling.max_frames} frames/video` : "";
-  $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>${video ? `<span>${escapeHtml(video)}</span>` : ""}`;
+  const embedding = configuration.semantic_search_enabled
+    ? `semantic search: ${plan.embedding_image_count ?? 0} image assets · ${plan.embedding_video_sample_count ?? 0} video samples · ${formatBytes(plan.embedding_estimated_storage_bytes ?? 0)} estimated vectors${plan.embedding_readiness?.message ? ` · ${plan.embedding_readiness.message}` : ""}`
+    : "semantic search: off";
+  $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>${video ? `<span>${escapeHtml(video)}</span>` : ""}<span>${escapeHtml(embedding)}</span>`;
 }
 
 function renderSetupPlan() {
@@ -322,8 +333,11 @@ function updateSetupConfiguration() {
   configuration.video_sampling_fps = Number($("setup-video-fps").value);
   configuration.video_sampling_min_frames = Number($("setup-video-min-frames").value);
   configuration.video_sampling_max_frames = Number($("setup-video-max-frames").value);
+  configuration.semantic_search_enabled = $("setup-semantic-search").checked;
+  configuration.embedding_provider = $("setup-embedding-provider").value;
   configuration.image_extensions = [...document.querySelectorAll('[data-extension-kind="image"]:checked')].map((input) => input.dataset.extension);
   configuration.video_extensions = [...document.querySelectorAll('[data-extension-kind="video"]:checked')].map((input) => input.dataset.extension);
+  loadEmbeddingModelStatus();
   renderSetupPlan();
 }
 
@@ -334,7 +348,7 @@ function bindSetupControls() {
     if (input.value !== "inherit") state.setup.draftConfiguration.folder_rules.push({ path, included: input.value === "include" });
     renderSetupPlan();
   }));
-  ["setup-include-rendered-images", "setup-include-raw", "setup-include-videos", "setup-video-quality", "setup-rendered-quality-provider", "setup-raw-quality-provider", "setup-video-fps", "setup-video-min-frames", "setup-video-max-frames"].forEach((id) => $(id).addEventListener("change", updateSetupConfiguration));
+  ["setup-include-rendered-images", "setup-include-raw", "setup-include-videos", "setup-video-quality", "setup-rendered-quality-provider", "setup-raw-quality-provider", "setup-video-fps", "setup-video-min-frames", "setup-video-max-frames", "setup-semantic-search", "setup-embedding-provider"].forEach((id) => $(id).addEventListener("change", updateSetupConfiguration));
   $("setup-type-options").querySelectorAll("[data-extension]").forEach((input) => input.addEventListener("change", updateSetupConfiguration));
 }
 
@@ -363,10 +377,27 @@ function showSetup(payload) {
   $("setup-video-fps").value = state.setup.draftConfiguration.video_sampling_fps ?? 2;
   $("setup-video-min-frames").value = state.setup.draftConfiguration.video_sampling_min_frames ?? 2;
   $("setup-video-max-frames").value = state.setup.draftConfiguration.video_sampling_max_frames ?? 32;
+  $("setup-semantic-search").checked = Boolean(state.setup.draftConfiguration.semantic_search_enabled);
+  $("setup-embedding-provider").value = state.setup.draftConfiguration.embedding_provider || "openclip-b16-datacomp-xl";
   $("setup-folder-tree").innerHTML = renderSetupFolder(payload.analysis.root, state.setup.draftConfiguration);
   $("setup-type-options").innerHTML = setupExtensionsMarkup(state.setup.draftConfiguration);
   bindSetupControls();
+  loadEmbeddingModelStatus();
   renderSetupPlan();
+}
+
+async function loadEmbeddingModelStatus() {
+  try {
+    const response = await fetch("/api/embedding-models");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Could not inspect embedding models");
+    const selected = payload.models.find((model) => model.provider === state.setup?.draftConfiguration.embedding_provider);
+    if (selected && state.setup) {
+      $("setup-embedding-status").textContent = `${selected.installed ? "Installed" : "Not installed"} · ~${(selected.expected_download_bytes / (1024 ** 3)).toFixed(2)} GiB download · ${selected.dimension} dimensions`;
+    }
+  } catch (error) {
+    if (state.setup) $("setup-embedding-status").textContent = error.message;
+  }
 }
 
 async function configureWorkspace() {
@@ -454,6 +485,10 @@ async function loadWorkspace() {
   $("folder").innerHTML = `<option value="">All folders</option>` + folders.folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join("");
   $("folder").value = query.get("folder") || "";
   $("search").value = query.get("q") || "";
+  state.searchMode = query.get("search_mode") === "semantic" ? "semantic" : "filename";
+  $("search-mode").value = state.searchMode;
+  $("search").placeholder = state.searchMode === "semantic" ? "Describe what you want to find" : "Filename";
+  $("search").value = state.searchMode === "semantic" ? query.get("text") || "" : query.get("q") || "";
   $("media-type").value = query.get("media_type") || "";
   $("sort-by").value = query.get("sort_by") || "capture_time";
   $("direction").value = query.get("direction") || "desc";
@@ -470,12 +505,17 @@ async function loadWorkspace() {
 async function loadAssets() {
   const requestId = ++state.assetRequest;
   try {
-    const data = await api(`/api/assets?${filterParams("gallery")}`);
+    const params = filterParams("gallery");
+    const data = state.searchMode === "semantic" && $("search").value.trim()
+      ? await api(`/api/search?${params}`)
+      : await api(`/api/assets?${params}`);
     if (requestId !== state.assetRequest) return;
     state.items = data.items;
     state.viewerItems = state.items;
     state.total = data.total;
-    $("status").textContent = state.selectionFilter === "representatives" && !data.grouping_available ? "Groups have not been built for this workspace yet." : "";
+    $("status").textContent = state.searchMode === "semantic" && !$("search").value.trim()
+      ? "Enter a description to search semantically."
+      : state.selectionFilter === "representatives" && !data.grouping_available ? "Groups have not been built for this workspace yet." : "";
     $("gallery").innerHTML = data.items.map(renderCard).join("") || `<div class="empty">No matching media.</div>`;
     bindGalleryCards();
     renderPager(data, "");
@@ -623,11 +663,40 @@ async function showDetails(assetId, context = { mode: "gallery", items: state.it
     $("details").showModal();
     document.body.classList.add("modal-open");
     $("details-close").addEventListener("click", () => closeDialog($("details")));
+    $("details").querySelector("[data-find-similar]")?.addEventListener("click", () => showSimilar(asset.asset_id));
     $("details").querySelector("[data-detail-thumbnail]")?.addEventListener("click", () => {
       closeDialog($("details"));
       const item = context.items?.[context.index] || assetToViewerItem(asset);
       showViewer(context.index || 0, context.items || [item], context);
     });
+  } catch (error) {
+    $("status").textContent = error.message;
+  }
+}
+
+async function showSimilar(assetId) {
+  try {
+    const data = await api(`/api/assets/${encodeURIComponent(assetId)}/similar`);
+    closeDialog($("details"));
+    closeDialog($("viewer"));
+    state.viewMode = "gallery";
+    state.searchMode = "filename";
+    state.page = 1;
+    $("search-mode").value = "filename";
+    $("search").value = "";
+    $("search").placeholder = "Filename";
+    $("gallery").classList.remove("hidden");
+    $("groups-view").classList.add("hidden");
+    $("pager-top").classList.remove("hidden");
+    $("pager-bottom").classList.remove("hidden");
+    state.items = data.items;
+    state.viewerItems = data.items;
+    state.total = data.total;
+    $("status").textContent = `Similar images · ${data.total} results`;
+    $("gallery").innerHTML = data.items.map(renderCard).join("") || `<div class="empty">No similar media available.</div>`;
+    bindGalleryCards();
+    renderPager(data, "");
+    syncUrl();
   } catch (error) {
     $("status").textContent = error.message;
   }
@@ -651,7 +720,8 @@ function renderDetails(asset, options = {}) {
   const first = asset.physical_files?.[0] || {};
   const dimensions = first.width && first.height ? `${first.width} × ${first.height} (${(first.width * first.height / 1000000).toFixed(2)} MP)` : "Unavailable";
   const thumbnail = options.showThumbnail && first.thumbnail_url ? `<button class="detail-thumbnail" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer"><img src="${first.thumbnail_url}" alt=""></button>` : "";
-  const header = options.viewerPanel ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>` : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted">${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Capture time unavailable")}</div></div><button id="details-close" class="secondary" type="button">Close</button></div>`;
+  const similarButton = asset.media_type === "image" ? `<button data-find-similar class="secondary" type="button">Find similar</button>` : "";
+  const header = options.viewerPanel ? `<div class="panel-header"><h2>Details</h2><div>${similarButton}<button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div></div>` : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted">${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Capture time unavailable")}</div></div><div>${similarButton}<button id="details-close" class="secondary" type="button">Close</button></div></div>`;
   const overview = `<section><h3>Overview</h3><div class="overview-grid"><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd><dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")}</dd></dl>${thumbnail}</div></section>`;
   return `<div class="details-content">${header}${overview}${renderRepresentations(asset)}${renderTechnicalDetails(first)}${asset.physical_files.map((file, index) => renderQuality(file, asset.physical_files.length > 1 && index > 0)).join("")}${asset.physical_files.map(renderComponentProblems).join("")}</div>`;
 }
@@ -740,6 +810,7 @@ async function loadViewerDetails() {
     if (state.viewerInfoOpen) {
       $("viewer-details").innerHTML = renderDetails(state.viewerDetail, { viewerPanel: true });
       $("viewer-details").querySelector("#viewer-details-close")?.addEventListener("click", () => toggleViewerInfo(false));
+      $("viewer-details").querySelector("[data-find-similar]")?.addEventListener("click", () => showSimilar(item.asset_id));
     }
   } catch (error) {
     $("viewer-details").innerHTML = `<div class="viewer-error">${escapeHtml(error.message)}</div>`;
@@ -812,6 +883,13 @@ async function startIndex() {
 }
 
 function setupFilters() {
+  $("search-mode").addEventListener("change", () => {
+    state.searchMode = $("search-mode").value === "semantic" ? "semantic" : "filename";
+    $("search").placeholder = state.searchMode === "semantic" ? "Describe what you want to find" : "Filename";
+    state.page = 1;
+    syncUrl();
+    loadAssets();
+  });
   ["folder", "media-type", "sort-by", "direction"].forEach((id) => $(id).addEventListener("change", () => {
     state.page = 1;
     state.groupPage = 1;

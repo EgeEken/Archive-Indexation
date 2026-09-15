@@ -62,7 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     model = commands.add_parser("model", help="manage optional inference models")
     model_commands = model.add_subparsers(dest="model_command")
     install = model_commands.add_parser("install", help="download an optional model")
-    install.add_argument("model_id", choices=("lar-iqa",), help="model to install")
+    install.add_argument(
+        "model_id",
+        choices=("lar-iqa", "openclip-b16", "siglip2-base"),
+        help="model to install",
+    )
     return parser
 
 
@@ -129,6 +133,7 @@ def _index_command(
 ) -> int:
     from .indexing.media_pipeline import index_workspace
     from .indexing.video_quality import index_video_quality
+    from .indexing.embeddings import index_embeddings
     from .indexing.raw_quality import index_raw_quality
     from .indexing.grouping import build_groups, extract_visual_features
     from .indexing.recommendation import build_recommendations
@@ -208,6 +213,13 @@ def _index_command(
         )
         if video_quality_result.cancelled:
             return 130
+        embedding_result = index_embeddings(
+            workspace,
+            cancel_event=cancel_event,
+            progress=_progress_reporter("embeddings"),
+        )
+        if embedding_result.cancelled:
+            return 130
         with timings.measure("visual_features.total"):
             feature_result = extract_visual_features(
                 workspace,
@@ -236,6 +248,7 @@ def _index_command(
             f"\nIndex complete: {media_result.succeeded + quality_result.succeeded} processed, "
             f"{media_result.skipped + quality_result.skipped} skipped, "
             f"{media_result.errors + quality_result.errors} failed; "
+            f"{embedding_result.succeeded} embeddings; "
             f"{grouping_result.multi_image_groups} multi-image groups; "
             f"{recommendation_result.auto_recommended} recommendations.",
             flush=True,
@@ -330,6 +343,30 @@ def _compact_command(root: Path) -> int:
 
 
 def _model_install_command(model_id: str) -> int:
+    if model_id in {"openclip-b16", "siglip2-base"}:
+        from .embeddings.models import (
+            OPENCLIP_PROVIDER,
+            SIGLIP_PROVIDER,
+            install_model,
+            model_spec,
+        )
+
+        provider = OPENCLIP_PROVIDER if model_id == "openclip-b16" else SIGLIP_PROVIDER
+        spec = model_spec(provider)
+        print(
+            f"Expected download for {spec['model_id']}: "
+            f"~{int(spec['expected_download_bytes']) / (1024 ** 3):.2f} GiB"
+        )
+        try:
+            status = install_model(provider)
+        except RuntimeError as error:
+            print(f"Model installation failed: {error}")
+            return 2
+        print(
+            f"Installed {spec['model_id']} at {status['cache_path']}\n"
+            f"Cache size: {int(status['cache_bytes']) / (1024 ** 3):.2f} GiB"
+        )
+        return 0
     from urllib.request import Request, urlopen
 
     from .media.quality_provider import (

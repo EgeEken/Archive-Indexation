@@ -51,6 +51,7 @@
     .photo-card-body { display: grid; grid-template-columns: 1fr auto; gap: .12rem .35rem; padding: .48rem .55rem .55rem; }
     .filename { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .85rem; font-weight: 600; }
     .quality-chip { display: inline-block; justify-self: end; align-self: start; padding: .12rem .34rem; border-radius: .28rem; background: var(--quality-color); color: #15181c; font-size: .7rem; font-weight: 650; white-space: nowrap; }
+    .similarity-chip { display: inline-block; justify-self: end; align-self: start; padding: .12rem .34rem; border-radius: .28rem; background: #2b3946; color: #c8d8e5; font-size: .7rem; font-weight: 650; white-space: nowrap; }
     .capture { grid-column: 1 / -1; color: #8996a2; font-size: .73rem; }
     .issues { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .2rem; }
     .badge { display: inline-block; border-radius: .25rem; padding: .12rem .32rem; background: #4d342d; color: #f2b59a; font-size: .68rem; }

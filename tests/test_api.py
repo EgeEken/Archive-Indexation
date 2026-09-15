@@ -22,6 +22,7 @@ from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
 from archive_index.media.quality_provider import LegacyPillowProvider, OffQualityProvider
+from archive_index.embeddings.search import SearchResult
 
 
 def index_workspace(workspace, **kwargs):
@@ -56,6 +57,7 @@ class ApiTests(unittest.TestCase):
         status, home = _get_json(self.base_url, "/api/workspace")
         self.assertEqual(status, 200)
         self.assertEqual((home["assets"], home["online_files"]), (3, 3))
+        self.assertEqual(home["embedding_storage_bytes"], 0)
 
         status, nested = _get_json(self.base_url, "/api/assets?folder=nested")
         self.assertEqual(status, 200)
@@ -91,6 +93,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"aspect-ratio: 1 / 1", css)
         status, js = _get_bytes(self.base_url, "/app.js")
         self.assertEqual(status, 200)
+        status, models = _get_json(self.base_url, "/api/embedding-models")
+        self.assertEqual(status, 200)
+        self.assertEqual({model["provider"] for model in models["models"]}, {"openclip-b16-datacomp-xl", "siglip2-base-patch16-224"})
         self.assertIn(b">Groups<", html)
         self.assertNotIn(b">Selection<", html)
         self.assertNotIn(b">Strict groups<", html)
@@ -146,11 +151,31 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b'renderDetails(state.viewerDetail', js)
         self.assertIn(b'params.set("selection", state.selectionFilter)', js)
 
+    def test_semantic_search_returns_similarity_results_through_the_same_asset_shape(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            asset_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+        status, unavailable = _get_json(self.base_url, "/api/search?text=red%20flower")
+        self.assertEqual(status, 400)
+        self.assertIn("semantic embeddings", unavailable["error"])
+        configuration = {**self.workspace.configuration(), "semantic_search_enabled": True}
+        self.workspace.apply_configuration(configuration)
+        with patch(
+            "archive_index.api.server.search_text",
+            return_value=[SearchResult(asset_id, 0.8123)],
+        ):
+            status, result = _get_json(self.base_url, "/api/search?text=red%20flower")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["asset_id"], asset_id)
+        self.assertAlmostEqual(result["items"][0]["similarity"], 0.8123)
+
     def test_configuration_plan_and_scoped_gallery(self) -> None:
         status, configuration = _get_json(self.base_url, "/api/workspace/configuration")
         self.assertEqual(status, 200)
         draft = configuration["configuration"]
-        self.assertEqual(draft["configuration_version"], 2)
+        self.assertEqual(draft["configuration_version"], 3)
         draft["include_videos"] = False
         status, plan = _post_json(self.base_url, "/api/workspace/configuration/plan", {"configuration": draft})
         self.assertEqual(status, 200)
