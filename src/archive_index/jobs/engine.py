@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from time import monotonic
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +14,22 @@ from ..workspace import Workspace
 
 LOGGER = logging.getLogger(__name__)
 JOB_STATES = frozenset({"pending", "running", "complete", "failed", "cancelled", "interrupted"})
+
+
+SUBSTAGES = {}
+
+
+def report_substage(job_id, stage, current, total, item=None):
+    now = monotonic()
+    previous = SUBSTAGES.get(job_id)
+    started = previous["started"] if previous and previous["stage"] == stage and previous["item"] == item and current >= previous["current"] else now
+    elapsed = now - started
+    rate = current / elapsed if current >= 2 and elapsed >= 0.5 else None
+    SUBSTAGES[job_id] = {"stage": stage, "current": current, "total": total, "item": item,
+                         "started": started, "elapsed": elapsed, "rate": rate,
+                         "eta": (total-current)/rate if rate else None}
+    while len(SUBSTAGES) > 64:
+        del SUBSTAGES[next(iter(SUBSTAGES))]
 
 
 @dataclass(frozen=True)

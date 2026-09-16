@@ -231,7 +231,7 @@ class EmbeddingTests(unittest.TestCase):
             ]
             with patch("archive_index.indexing.embeddings.extract_video_frames", return_value=frames):
                 result = index_embeddings(workspace, provider=FakeProvider(dimension=3))
-            self.assertEqual((result.succeeded, result.errors), (1, 0))
+            self.assertEqual((result.succeeded, result.errors), (2, 0))
             with closing(workspace.connect()) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM video_frame_embedding").fetchone()[0], 2)
 

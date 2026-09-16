@@ -22,13 +22,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..app_state import WorkspaceRegistry, workspace_id
-from ..configuration import default_configuration, normalize_configuration
+from ..configuration import default_configuration, normalize_configuration, path_in_scope
 from ..embeddings.models import (
     OPENCLIP_PROVIDER,
     SIGLIP_PROVIDER,
     model_status,
 )
-from ..embeddings.search import SearchResult, search_similar, search_text
+from ..embeddings.search import SearchResult, active_embedding, search_similar, search_text, provider_state, prepare_provider, request_text, select_provider
 from ..indexing.embeddings import EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, index_embeddings
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
@@ -40,7 +40,7 @@ from ..indexing.scanner import scan
 from ..media.quality_provider import default_model_path
 from ..media_types import is_raw_extension
 from ..timing import TimingRecorder
-from ..jobs.engine import JobStore
+from ..jobs.engine import JobStore, SUBSTAGES
 from ..planning import analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
 from ..indexing.representations import preferred_physical
@@ -150,7 +150,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         handle = None
         if indexed:
             try:
-                workspace = Workspace.open(root)
+                workspace = next((w for w in self._workspaces.values() if w.root == root), None) or Workspace.open(root)
                 handle = self._register_workspace(workspace)
                 configuration = workspace.configuration()
             except (WorkspaceError, OSError) as error:
@@ -176,10 +176,11 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             if not isinstance(source_analysis.get("root"), dict):
                 raise ValueError("analysis is incomplete")
             existing_workspace = (
-                Workspace.open(root) if (root / ".archive-index").is_dir() else None
+                (next((w for w in self._workspaces.values() if w.root == root), None) or Workspace.open(root)) if (root / ".archive-index").is_dir() else None
             )
             plan = plan_from_analysis(source_analysis, normalized, existing_workspace)
             plan.update(_configuration_quality_readiness(normalized))
+            plan.update(_embedding_plan(normalized, existing_workspace, plan))
         except (ValueError, OSError) as error:
             raise InvalidRequest(str(error)) from error
         return {"path": str(root), "configuration": normalized, "plan": plan}
@@ -206,6 +207,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             config = workspace.apply_configuration(configuration)
         except (ValueError, WorkspaceError) as error:
             raise InvalidRequest(str(error)) from error
+        _prepare_search(workspace)
         self.registry.add(workspace)
         job_id = self.start_indexing(selected)
         return {"workspace": _workspace_entry(selected, workspace, recent=True), "configuration": config, "job_id": job_id}
@@ -625,6 +627,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             handle, workspace = self._workspace(query)
             if request.path == "/api/workspace":
+                _prepare_search(workspace)
                 self._send_json(200, _workspace_summary(workspace, handle))
             elif request.path == "/api/workspace/configuration":
                 self._send_json(200, {"configuration": workspace.configuration()})
@@ -632,10 +635,24 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"folders": _folders(workspace)})
             elif request.path == "/api/assets":
                 self._send_json(200, _assets(workspace, query, handle))
+            elif request.path == "/api/browser/locate":
+                group_id = _first(query, "group_id", "")
+                offset = 0
+                while True:
+                    data = _browser_assets(workspace, {**query, "view": ["groups"], "offset": [str(offset)], "limit": ["180"]}, handle)
+                    found = next((i for i, group in enumerate(data["groups"]) if group["group_id"] == group_id), None)
+                    if found is not None or not data["has_next"]:
+                        self._send_json(200, {"found": found is not None, "page": (offset + found) // 10 + 1 if found is not None else 1})
+                        break
+                    offset += 180
+            elif request.path == "/api/browser":
+                self._send_json(200, _browser_assets(workspace, query, handle))
+            elif request.path == "/api/search-status":
+                self._send_json(200, _search_status(workspace))
             elif request.path == "/api/search":
                 self._send_json(200, _semantic_search(workspace, query, handle))
             elif request.path == "/api/jobs":
-                self._send_json(200, {"jobs": _jobs(workspace, query)})
+                self._send_json(200, {"jobs": _jobs(workspace, query), "revision": _browser_revision(workspace)})
             elif request.path == "/api/problems":
                 self._send_json(200, {"problems": _problems(workspace, query)})
             elif request.path == "/api/groups":
@@ -646,6 +663,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, _recommendations(workspace))
             else:
                 self._handle_resource_get(request.path, workspace, handle)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
         except InvalidRequest as error:
             self._send_json(400, {"error": str(error)})
         except ResourceNotFound as error:
@@ -708,6 +727,57 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             handle, workspace = self._workspace(query)
+            if request.path == "/api/search/prepare":
+                _prepare_search(workspace)
+                status = _search_status(workspace)
+                self._send_json(200, status)
+                return
+            if request.path == "/api/recommendation-threshold":
+                value = self._json_body().get("threshold")
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                    raise InvalidRequest("threshold must be between 0 and 1")
+                connection = workspace.connect()
+                try:
+                    with connection:
+                        connection.execute("UPDATE workspace_config SET recommendation_threshold = ? WHERE id = 1", (value,))
+                finally:
+                    connection.close()
+                self._send_json(200, {"threshold": value})
+                return
+            if request.path == "/api/reveal":
+                file_id = self._json_body().get("file_id")
+                path = workspace.root
+                if file_id:
+                    connection = workspace.connect()
+                    try:
+                        row = connection.execute("SELECT relative_path FROM physical_file WHERE id = ? AND in_scope = 1 AND is_online = 1", (file_id,)).fetchone()
+                    finally:
+                        connection.close()
+                    if row is None:
+                        raise ResourceNotFound("file is unavailable")
+                    path = workspace.absolute_path(row[0])
+                if sys.platform != "win32":
+                    raise InvalidRequest("Explorer is available on Windows")
+                subprocess.Popen(["explorer.exe", "/select,", str(path)] if file_id else ["explorer.exe", str(path)])
+                self._send_json(200, {"opened": True})
+                return
+            if request.path == "/api/embedding-models/install":
+                from ..embeddings.models import install_model
+                provider = self._json_body().get("provider")
+                if provider not in {OPENCLIP_PROVIDER, SIGLIP_PROVIDER}:
+                    raise InvalidRequest("unsupported provider")
+                try:
+                    install_model(provider)
+                    with _browser_lock:
+                        _browser_cache.clear()
+                except Exception as error:
+                    raise InvalidRequest(f"Model installation failed: {error}") from error
+                config = {**workspace.configuration(), "embedding_provider": provider}
+                plan = _embedding_plan(config, workspace)
+                active = active_embedding(workspace)
+                compatible = bool(active and active["active_provider"] == provider and active["active_run_id"] == plan["embedding_active_run_id"] and active["status"] == "complete" and plan["embedding_total_vectors"] > 0 and plan["embedding_pending_count"] == 0 and plan["embedding_unknown_videos"] == 0)
+                self._send_json(200, {"model": _embedding_model_status(provider), "compatible_embeddings": compatible, "search": _search_status(workspace)})
+                return
             if request.path == "/api/index":
                 job_id = self.server.start_indexing(handle)
                 if job_id is None:
@@ -766,6 +836,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                         raise InvalidRequest("analysis does not belong to this workspace folder")
                     plan = plan_from_analysis(analysis, configuration, workspace)
                     plan.update(_configuration_quality_readiness(configuration))
+                    plan.update(_embedding_plan(configuration, workspace, plan))
                 else:
                     plan = _workspace_plan(workspace, configuration)
                 self._send_json(200, {"configuration": configuration, "plan": plan})
@@ -1210,48 +1281,57 @@ def _embedding_readiness(configuration: Mapping[str, object]) -> dict[str, objec
     return {"status": state, "ready": ready, "runtime_ready": runtime_ready, "model": status, "message": message}
 
 
-def _embedding_plan(configuration: Mapping[str, object], workspace: Workspace | None = None) -> dict[str, object]:
-    if workspace is None:
-        return {"embedding_image_count": 0, "embedding_video_sample_count": 0, "embedding_cached_count": 0, "embedding_estimated_storage_bytes": 0, "embedding_estimated_seconds": 0.0}
-    connection = workspace.connect()
-    try:
-        rows = connection.execute(
-            "SELECT logical_asset_id, media_type, extension, duration_seconds FROM physical_file WHERE in_scope = 1 AND is_online = 1 ORDER BY logical_asset_id, relative_path"
-        ).fetchall()
-        active = connection.execute(
-            "SELECT active_run_id FROM workspace_embedding WHERE id = 1"
-        ).fetchone()
-        run_id = active[0] if active else None
-        component = f"embedding:{configuration['embedding_provider']}"
-        cached = connection.execute(
-            "SELECT COUNT(*) FROM component_state WHERE component = ? AND status = 'complete'",
-            (component,),
-        ).fetchone()[0]
-    finally:
-        connection.close()
-    groups: dict[str, list] = {}
-    for row in rows:
-        groups.setdefault(row["logical_asset_id"], []).append(row)
-    images = 0
-    videos = 0
-    for members in groups.values():
-        if members[0]["media_type"] == "video":
-            duration = float(members[0]["duration_seconds"] or 0)
-            if duration > 0:
-                videos += max(int(configuration["video_sampling_min_frames"]), min(int(configuration["video_sampling_max_frames"]), int(duration * float(configuration["video_sampling_fps"]) + 0.999999)))
-        else:
-            images += 1
-    from ..embeddings.models import model_spec
-    dimension = int(model_spec(str(configuration["embedding_provider"]))["dimension"])
-    total_vectors = images + videos
-    return {
-        "embedding_image_count": images if configuration["semantic_search_enabled"] else 0,
-        "embedding_video_sample_count": videos if configuration["semantic_search_enabled"] else 0,
-        "embedding_cached_count": cached if configuration["semantic_search_enabled"] else 0,
-        "embedding_estimated_storage_bytes": total_vectors * dimension * 2 if configuration["semantic_search_enabled"] else 0,
-        "embedding_estimated_seconds": round(total_vectors * EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, 1) if configuration["semantic_search_enabled"] else 0.0,
-        "embedding_active_run_id": run_id,
-    }
+def _embedding_plan(configuration, workspace=None, filesystem_plan=None):
+    from ..embeddings.providers import create_embedding_provider
+    from ..indexing.embeddings import _source, _source_units, _input_fingerprint
+    provider = create_embedding_provider(configuration["embedding_provider"])
+    images = videos = reusable = unknown_videos = 0
+    run_id = None
+    if workspace is not None:
+        connection = workspace.connect()
+        try:
+            rows = connection.execute("SELECT * FROM physical_file WHERE is_online = 1 ORDER BY logical_asset_id, relative_path").fetchall()
+            run = connection.execute("SELECT id FROM embedding_run WHERE provider = ? AND model_version = ? AND settings_json = ? ORDER BY created_at DESC LIMIT 1",
+                                     (provider.provider_id, provider.version, json.dumps(provider.settings, ensure_ascii=False, sort_keys=True))).fetchone()
+            run_id = run[0] if run else None
+            states = {r["physical_file_id"]: r for r in connection.execute("SELECT * FROM component_state WHERE component = ?", (f"embedding:{provider.provider_id}",))}
+            image_cache = {(r[0], r[1]): r[2] for r in connection.execute("SELECT logical_asset_id, source_physical_file_id, input_fingerprint FROM logical_asset_embedding WHERE run_id = ?", (run_id,))}
+            video_cache = {(r[0], r[1]): r[2] for r in connection.execute("SELECT v.logical_asset_id, v.physical_file_id, COUNT(*) FROM video_frame_embedding v JOIN workspace_video_sample s ON s.physical_file_id=v.physical_file_id AND s.active_run_id=v.sample_run_id WHERE v.run_id = ? GROUP BY v.logical_asset_id,v.physical_file_id", (run_id,))}
+        finally:
+            connection.close()
+        groups = {}
+        for row in rows:
+            if path_in_scope(row["relative_path"], configuration):
+                groups.setdefault(row["logical_asset_id"], []).append(row)
+        for asset_id, members in groups.items():
+            rendered = [r for r in members if not is_raw_extension(r["extension"])]
+            selected = preferred_physical(rendered or members)
+            kind = "video" if selected["media_type"] == "video" else "rendered" if rendered else "raw_preview"
+            source = _source(selected, asset_id, kind, configuration)
+            if kind == "video" and not (selected["duration_seconds"] and selected["duration_seconds"] > 0):
+                unknown_videos += 1
+                continue
+            units = _source_units(source)
+            if kind == "video": videos += units
+            else: images += 1
+            fingerprint = _input_fingerprint(source, provider)
+            state = states.get(selected["id"])
+            valid = state and state["status"] == "complete" and state["version"] == provider.version and state["input_fingerprint"] == fingerprint
+            stored = video_cache.get((asset_id, selected["id"]), 0) == units if kind == "video" else image_cache.get((asset_id, selected["id"])) == fingerprint
+            if valid and stored: reusable += units
+    elif filesystem_plan:
+        categories = filesystem_plan.get("selected_categories", {})
+        images = sum(categories.get(k, 0) for k in ("jpeg", "other_image", "raw"))
+        unknown_videos = categories.get("video", 0)
+    total = images + videos
+    pending = total - reusable
+    return {"embedding_image_count": images, "embedding_video_sample_count": videos,
+            "embedding_total_vectors": total, "embedding_pending_count": pending,
+            "embedding_cached_count": reusable, "embedding_unknown_videos": unknown_videos,
+            "embedding_counts_estimated": workspace is None,
+            "embedding_estimated_storage_bytes": pending * provider.dimension * 2,
+            "embedding_estimated_seconds": round(pending * EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, 1),
+            "embedding_active_run_id": run_id}
 
 
 def _quality_readiness(provider: object) -> dict[str, object]:
@@ -1417,6 +1497,159 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     }
 
 
+def _browser_revision(workspace):
+    return [(p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+            for p in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal"))]
+
+
+_browser_cache = {}
+_browser_catalogs = {}
+_browser_lock = threading.RLock()
+
+
+def _prepare_search(workspace):
+    config = workspace.configuration()
+    provider = config["embedding_provider"]
+    runtime = "open_clip" if provider == OPENCLIP_PROVIDER else "transformers"
+    enabled = config["semantic_search_enabled"] and model_status(provider)["installed"] and importlib.util.find_spec(runtime) is not None
+    select_provider(provider if enabled else None)
+
+
+def _search_status(workspace):
+    configuration = workspace.configuration()
+    provider = configuration["embedding_provider"]
+    label = "OpenCLIP" if provider == OPENCLIP_PROVIDER else "SigLIP2"
+    if not configuration["semantic_search_enabled"]:
+        return {"state": "unavailable", "message": "Semantic search disabled · Configure to enable", "provider": label}
+    if not model_status(provider)["installed"]:
+        return {"state": "missing_model", "message": f"{label} model not installed", "provider": label}
+    runtime = "open_clip" if provider == OPENCLIP_PROVIDER else "transformers"
+    if importlib.util.find_spec(runtime) is None:
+        return {"state": "unavailable", "message": f"{label} runtime unavailable", "provider": label}
+    active = active_embedding(workspace)
+    if active is None or active["active_run_id"] is None or active["status"] != "complete":
+        return {"state": "missing_embeddings", "message": "Embeddings not indexed · Re-index required", "provider": label}
+    state = provider_state(provider)
+    message = {"ready": f"Semantic search ready · {label}", "available": f"Semantic search available · {label}",
+               "loading": f"Preparing semantic search · {label}…", "failed": f"Search failed: {label} could not be loaded"}[state]
+    if state == "failed":
+        message = f"Search failed: {prepare_provider(provider).exception()}"
+    return {"state": state, "message": message, "provider": label}
+
+
+def _browser_assets(workspace, query, handle):
+    started = time.perf_counter()
+    offset = int(_first(query, "offset", "0"))
+    limit = min(_positive_int(_first(query, "limit", "60"), "limit"), 180)
+    if offset < 0:
+        raise InvalidRequest("offset must not be negative")
+    text = _first(query, "q", "").strip()
+    if len(text) > 500:
+        raise InvalidRequest("query is too long")
+    threshold = float(_first(query, "threshold", "0.20"))
+    if not 0 <= threshold <= 1:
+        raise InvalidRequest("threshold must be between 0 and 1")
+    signature = tuple(sorted((k, tuple(v)) for k, v in query.items() if k not in {"offset", "limit", "view", "group_id", "async"}))
+    fingerprint = tuple(_browser_revision(workspace))
+    key = (str(workspace.root), handle, fingerprint, signature)
+    with _browser_lock:
+        cached = _browser_cache.get(key)
+    if cached is None:
+        base_query = {"page_size": ["180"], "sort_by": ["capture_time"], "direction": ["desc"]}
+        catalog_key = (str(workspace.root), handle, fingerprint)
+        with _browser_lock:
+            catalog = _browser_catalogs.get(catalog_key)
+        items = [] if catalog is None else list(catalog)
+        page = 1
+        while catalog is None:
+            base_query["page"] = [str(page)]
+            batch = _assets(workspace, base_query, handle)
+            items.extend(batch["items"])
+            if not batch["has_next"]:
+                break
+            page += 1
+        with _browser_lock:
+            _browser_catalogs[catalog_key] = items
+            while len(_browser_catalogs) > 4:
+                del _browser_catalogs[next(iter(_browser_catalogs))]
+        folders = json.loads(_first(query, "folders", "null"))
+        if folders is not None and (not isinstance(folders, list) or not all(isinstance(p, str) for p in folders)):
+            raise InvalidRequest("folders must be a list of paths")
+        connection = workspace.connect()
+        try:
+            physical = connection.execute("SELECT logical_asset_id, filename, relative_path FROM physical_file WHERE in_scope = 1").fetchall()
+        finally:
+            connection.close()
+        filename_ids = {r[0] for r in physical if text and text.casefold() in r[1].casefold()}
+        folder_ids = None if folders is None else {r[0] for r in physical if (r[2].rsplit("/", 1)[0] if "/" in r[2] else "") in folders}
+        media_type = _first(query, "media_type", "")
+        layout = _first(query, "layout", "")
+        manual = _first(query, "manual", "all")
+        auto = _first(query, "auto", "all")
+        items = [i for i in items if
+                 (folder_ids is None or i["asset_id"] in folder_ids)
+                 and (not media_type or i["media_type"] == media_type)
+                 and (manual == "all" or i["user_decision"] == manual)
+                 and (auto == "all" or (auto == "representatives" and i["is_representative"]) or (auto == "recommended" and i["auto_recommended"]))
+                 and (not layout or (i["width"] and i["height"] and ((layout == "horizontal" and i["width"] >= i["height"]) or (layout == "vertical" and i["height"] > i["width"]))))]
+        status = _search_status(workspace)
+        if text:
+            scores = {}
+            if _first(query, "semantic", "1") == "0":
+                status = {**status, "state": "loading" if status["state"] in {"available", "loading"} else "searching", "message": f"Loading {status['provider']}…" if status["state"] in {"available", "loading"} else "Searching…"}
+            elif status["state"] in {"ready", "available", "loading", "failed"}:
+                try:
+                    allowed = {i["asset_id"] for i in items}
+                    if _first(query, "async", "0") == "1":
+                        results, phase = request_text(workspace, text, allowed_asset_ids=allowed)
+                        status = {**status, "state": phase, "message": f"Loading {status['provider']}…" if phase == "loading" else "Searching…" if phase == "searching" else "Search complete"}
+                        scores = {r.asset_id: r for r in results or []}
+                    else:
+                        scores = {r.asset_id: r for r in search_text(workspace, text, allowed_asset_ids=allowed, top_k=len(items))}
+                except Exception as error:
+                    status = {**status, "state": "failed", "message": f"Search failed: {error}"}
+            merged = []
+            for item in items:
+                result = scores.get(item["asset_id"])
+                filename_match = item["asset_id"] in filename_ids
+                if filename_match or (result is not None and result.similarity >= threshold):
+                    merged.append({**item, "filename_match": filename_match, "similarity": result.similarity if result else None,
+                                   "best_match_timestamp": result.best_timestamp if result else None})
+            items = merged
+        sort_by = _first(query, "sort_by", "capture_time")
+        descending = _first(query, "direction", "desc") == "desc"
+        if sort_by == "search" and text:
+            items.sort(key=lambda i: (i["filename_match"], i.get("similarity") if i.get("similarity") is not None else -2), reverse=descending)
+        else:
+            field = "quality_score" if sort_by == "quality" else "capture_time"
+            known = [i for i in items if i[field] is not None]
+            known.sort(key=lambda i: i[field], reverse=descending)
+            items = known + [i for i in items if i[field] is None]
+        cached = (items, status)
+        with _browser_lock:
+            if status["state"] not in {"failed", "loading", "searching"}:
+                _browser_cache[key] = cached
+            while len(_browser_cache) > 8:
+                del _browser_cache[next(iter(_browser_cache))]
+    items, status = cached
+    if not text:
+        status = _search_status(workspace)
+    result = {"total": len(items), "media_total": len(items), "search": status, "filename_matches": sum(bool(i.get("filename_match")) for i in items)}
+    if _first(query, "view", "gallery") == "groups":
+        groups = {}
+        for item in items:
+            group_id = item["current_group_id"] or item["asset_id"]
+            group = groups.setdefault(group_id, {"group_id": group_id, "label": "Video" if item["media_type"] == "video" else "Group", "members": [], "first_capture_time": item["capture_time"]})
+            group["members"].append(item)
+            group["member_count"] = len(group["members"])
+        values = list(groups.values())
+        result.update(groups=values[offset:offset + limit], total=len(values), has_next=offset + limit < len(values))
+    else:
+        result.update(items=items[offset:offset + limit], has_next=offset + limit < len(items))
+    result["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 2)
+    return result
+
+
 def _semantic_search(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
     text = _first(query, "text", "").strip()
     if not text:
@@ -1438,12 +1671,18 @@ def _semantic_search(workspace: Workspace, query: Mapping[str, list[str]], handl
     return _search_response(workspace, handle, results, page, page_size, text)
 
 
+IMAGE_SIMILARITY_SUMMARY_THRESHOLD = 0.70
+
+
 def _similar_assets(workspace: Workspace, asset_id: str, handle: str) -> dict[str, object]:
+    allowed = _semantic_asset_filter(workspace, {"media_type": ["image"]})
     try:
-        results = search_similar(workspace, asset_id, allowed_asset_ids=_semantic_asset_filter(workspace, {}), top_k=60)
+        results = search_similar(workspace, asset_id, allowed_asset_ids=allowed, top_k=len(allowed))
     except (RuntimeError, ValueError) as error:
         raise InvalidRequest(str(error)) from error
-    return _search_response(workspace, handle, results, 1, 60, None)
+    response = _search_response(workspace, handle, results, 1, max(1, len(results)), None)
+    response["strong_count"] = sum(r.similarity >= IMAGE_SIMILARITY_SUMMARY_THRESHOLD for r in results)
+    return response
 
 
 def _search_response(workspace: Workspace, handle: str, results: list[SearchResult], page: int, page_size: int, query_text: str | None) -> dict[str, object]:
@@ -1838,8 +2077,18 @@ def _current_recommendations(workspace: Workspace) -> tuple[set[str], str | None
         ):
             return set(), None
         rows = connection.execute(
-            "SELECT logical_asset_id FROM asset_recommendation WHERE run_id = ? AND auto_recommended = 1",
-            (active["active_run_id"],),
+            """SELECT sg.representative_logical_asset_id AS logical_asset_id
+               FROM strict_group sg
+               JOIN workspace_config wc ON wc.id = 1
+               WHERE sg.run_id = ? AND EXISTS (
+                   SELECT 1 FROM physical_file pf
+                   WHERE pf.logical_asset_id = sg.representative_logical_asset_id
+                     AND pf.in_scope = 1 AND pf.quality_score >= wc.recommendation_threshold
+                     AND (pf.extension NOT IN ('.arw','.cr2','.cr3','.dng','.nef','.raf','.rw2')
+                          OR NOT EXISTS (SELECT 1 FROM physical_file rendered
+                              WHERE rendered.logical_asset_id = pf.logical_asset_id AND rendered.in_scope = 1
+                              AND rendered.extension NOT IN ('.arw','.cr2','.cr3','.dng','.nef','.raf','.rw2'))))""",
+            (active["grouping_run_id"],),
         ).fetchall()
     finally:
         connection.close()
@@ -1983,6 +2232,8 @@ def _asset_summary(
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
         "preferred_physical_id": representative["id"],
+        "width": representative["width"],
+        "height": representative["height"],
     }
 
 
@@ -2188,7 +2439,7 @@ def _jobs(workspace: Workspace, query: Mapping[str, list[str]]):
         rows = connection.execute("SELECT * FROM job ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
     finally:
         connection.close()
-    return [_row_dict(row) for row in rows]
+    return [{**_row_dict(row), "substage": SUBSTAGES.get(row["id"])} for row in rows]
 
 
 def _problems(workspace: Workspace, query: Mapping[str, list[str]]):
@@ -2213,6 +2464,13 @@ def _problems(workspace: Workspace, query: Mapping[str, list[str]]):
             JOIN workspace_reconciliation AS wr ON wr.active_run_id = rc.run_id AND wr.id = 1
             LEFT JOIN physical_file AS pf
               ON pf.logical_asset_id IN (rc.left_logical_asset_id, rc.right_logical_asset_id)
+            WHERE (rc.left_logical_asset_id IS NULL OR rc.right_logical_asset_id IS NULL
+                   OR rc.left_logical_asset_id <> rc.right_logical_asset_id)
+              AND (rc.conflict_type NOT IN ('manual_decision_conflict', 'exact_duplicate_decision_conflict')
+                   OR EXISTS (SELECT 1 FROM logical_asset l JOIN logical_asset r
+                              ON r.id=rc.right_logical_asset_id WHERE l.id=rc.left_logical_asset_id
+                              AND l.selection_state IN ('selected','rejected') AND r.selection_state IN ('selected','rejected')
+                              AND l.selection_state <> r.selection_state))
             GROUP BY rc.id
             ORDER BY rc.id DESC LIMIT ?
             """,

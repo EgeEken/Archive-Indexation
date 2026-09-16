@@ -18,7 +18,7 @@ from PIL import Image, ImageOps
 from ..embeddings.providers import EmbeddingProvider, create_embedding_provider
 from ..embeddings.vector import vector_to_blob
 from ..indexing.representations import preferred_physical
-from ..jobs.engine import JobProgress, JobRunResult, JobStore
+from ..jobs.engine import report_substage, JobProgress, JobRunResult, JobStore
 from ..media.metadata import UnsupportedDecoderError
 from ..media.raw_preview import extract_embedded_preview
 from ..media_types import is_raw_extension, is_rendered_image_extension
@@ -74,15 +74,16 @@ def index_embeddings(
 ) -> JobRunResult:
     configuration = workspace.configuration()
     sources = _embedding_sources(workspace, configuration)
+    total_units = sum(_source_units(source) for source in sources)
     store = JobStore(workspace)
-    identifier = job_id or store.create("embeddings", len(sources))
-    store.set_total(identifier, len(sources))
+    identifier = job_id or store.create("embeddings", total_units)
+    store.set_total(identifier, total_units)
     store.set_stage(identifier, "embeddings")
     store.start(identifier)
     if not configuration["semantic_search_enabled"]:
-        store.complete(identifier, 0, 0, len(sources))
+        store.complete(identifier, 0, 0, total_units)
         _mark_disabled_states(workspace, sources, configuration["embedding_provider"])
-        return JobRunResult(identifier, 0, 0, 0, False, len(sources))
+        return JobRunResult(identifier, 0, 0, 0, False, total_units)
 
     provider = provider or create_embedding_provider(
         configuration["embedding_provider"], batch_size=batch_size, precision=precision
@@ -93,10 +94,10 @@ def index_embeddings(
     pending = [source for source in sources if not _state_ready(workspace, source, provider, run["id"])]
     if not pending:
         _finish_run(workspace, run["id"], None)
-        store.complete(identifier, 0, 0, len(sources))
+        store.complete(identifier, 0, 0, total_units)
         _activate_run(workspace, provider, run["id"])
-        _report_cached(progress, identifier, len(sources), sources)
-        return JobRunResult(identifier, len(sources), 0, 0, False, len(sources))
+        _report_cached(progress, identifier, total_units, sources)
+        return JobRunResult(identifier, total_units, 0, 0, False, total_units)
 
     try:
         provider.preflight()
@@ -104,16 +105,16 @@ def index_embeddings(
         failed = 0
         for source in pending:
             if _cancelled(cancel_event):
-                store.cancel(identifier, failed, failed, len(sources) - failed)
+                store.cancel(identifier, failed, failed, total_units - failed)
                 _finish_run(workspace, run["id"], "cancelled", str(error))
-                return JobRunResult(identifier, failed, 0, failed, True, len(sources) - failed)
+                return JobRunResult(identifier, failed, 0, failed, True, total_units - failed)
             _mark_state(workspace, source, provider, settings_json, _input_fingerprint(source, provider), "failed", error)
             store.record_error(identifier, error, physical_file_id=source["physical_file_id"], relative_path=source["relative_path"])
-            failed += 1
-            _report(progress, identifier, failed, len(sources), source, failed, len(sources) - failed)
+            failed += _source_units(source)
+            _report(progress, identifier, failed, total_units, source, failed, total_units - failed)
         _finish_run(workspace, run["id"], "failed", str(error))
-        store.complete(identifier, len(sources), failed, len(sources) - len(pending))
-        return JobRunResult(identifier, len(sources), len(sources) - failed, failed, False, len(sources) - len(pending))
+        store.complete(identifier, total_units, failed, total_units - sum(_source_units(source) for source in pending))
+        return JobRunResult(identifier, total_units, total_units - failed, failed, False, total_units - sum(_source_units(source) for source in pending))
 
     processed = 0
     succeeded = 0
@@ -122,21 +123,21 @@ def index_embeddings(
     try:
         for source in sources:
             if _state_ready(workspace, source, provider, run["id"]):
-                processed += 1
-                skipped += 1
-                _report(progress, identifier, processed, len(sources), source, errors, skipped)
+                processed += _source_units(source)
+                skipped += _source_units(source)
+                _report(progress, identifier, processed, total_units, source, errors, skipped)
         pending_images = [source for source in pending if source["source_kind"] != "video"]
 
         def consume_image_outcomes(outcomes):
             nonlocal processed, succeeded, errors
             for source, outcome in outcomes:
-                processed += 1
+                processed += _source_units(source)
                 if isinstance(outcome, BaseException):
-                    errors += 1
+                    errors += _source_units(source)
                     store.record_error(identifier, outcome, physical_file_id=source["physical_file_id"], relative_path=source["relative_path"])
                 else:
-                    succeeded += 1
-                _report(progress, identifier, processed, len(sources), source, errors, skipped)
+                    succeeded += _source_units(source)
+                _report(progress, identifier, processed, total_units, source, errors, skipped)
             store.checkpoint(identifier, processed, errors, skipped)
 
         cancelled = _process_image_batches(
@@ -160,18 +161,19 @@ def index_embeddings(
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
             try:
-                _process_video(workspace, source, provider, run["id"], settings_json, cancel_event)
+                _process_video(workspace, source, provider, run["id"], settings_json, cancel_event,
+                    lambda stage, current, total: report_substage(identifier, stage, current, total, source["relative_path"]))
             except EmbeddingCancelled:
                 _finish_run(workspace, run["id"], "cancelled")
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
             except Exception as error:
-                errors += 1
+                errors += _source_units(source)
                 store.record_error(identifier, error, physical_file_id=source["physical_file_id"], relative_path=source["relative_path"])
             else:
-                succeeded += 1
-            processed += 1
-            _report(progress, identifier, processed, len(sources), source, errors, skipped)
+                succeeded += _source_units(source)
+            processed += _source_units(source)
+            _report(progress, identifier, processed, total_units, source, errors, skipped)
             store.checkpoint(identifier, processed, errors, skipped)
         _finish_run(workspace, run["id"], "complete", None if not errors else f"{errors} source(s) failed")
         store.complete(identifier, processed, errors, skipped)
@@ -513,17 +515,20 @@ def _store_image_embedding(workspace, source, provider, run_id, vector):
         )
 
 
-def _process_video(workspace, source, provider, run_id, settings_json, cancel_event):
+def _process_video(workspace, source, provider, run_id, settings_json, cancel_event, substage=None):
     duration = float(source["duration_seconds"] or 0)
     count = _video_sample_count(source)
     sample_run_id, sample_rows = _sample_context(workspace, source, duration, count)
     timestamps = [row["requested_timestamp"] for row in sample_rows]
+    if substage:
+        substage("Extracting frames", 0, count)
     try:
         frames = extract_video_frames(
             workspace.absolute_path(source["relative_path"]),
             timestamps,
             cancel_event,
             seek_per_frame=duration > VIDEO_SINGLE_PROCESS_MAX_DURATION_SECONDS,
+            **({"progress": lambda current, total: substage("Extracting frames", current, total)} if substage else {}),
         )
     except VideoExtractionCancelled as error:
         raise EmbeddingCancelled("embedding cancelled") from error
@@ -535,6 +540,8 @@ def _process_video(workspace, source, provider, run_id, settings_json, cancel_ev
             ).fetchall()
         finally:
             connection.close()
+        if substage:
+            substage("Embedding frames", 0, len(frames))
         for index in range(0, len(frames), max(1, provider.batch_size)):
             if cancel_event is not None and cancel_event.is_set():
                 raise EmbeddingCancelled("embedding cancelled")
@@ -542,6 +549,8 @@ def _process_video(workspace, source, provider, run_id, settings_json, cancel_ev
             vectors = provider.encode_images([frame.image for frame in frame_batch])
             if len(vectors) != len(frame_batch):
                 raise ValueError("embedding provider returned an unexpected frame count")
+            if substage:
+                substage("Embedding frames", index + len(frame_batch), len(frames))
             for offset, vector in enumerate(vectors):
                 sample = rows[index + offset]
                 blob, dimension = vector_to_blob(vector)
@@ -688,8 +697,10 @@ def _report(progress, job_id, processed, total, source, failed, skipped):
 
 def _report_cached(progress, job_id, total, sources):
     if progress is not None:
-        for index, source in enumerate(sources, 1):
-            _report(progress, job_id, index, total, source, 0, index)
+        completed = 0
+        for source in sources:
+            completed += _source_units(source)
+            _report(progress, job_id, completed, total, source, 0, completed)
 
 
 def _cancelled(event):
@@ -698,3 +709,7 @@ def _cancelled(event):
 
 def _timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _source_units(source):
+    return _video_sample_count(source) if source["source_kind"] == "video" else 1

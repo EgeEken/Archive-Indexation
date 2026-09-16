@@ -18,7 +18,7 @@ from ..media_types import is_raw_extension, is_rendered_image_extension
 from ..workspace import Workspace
 
 RECONCILIATION_ALGORITHM = "exact-sha-and-conservative-raw-jpeg"
-RECONCILIATION_VERSION = "1"
+RECONCILIATION_VERSION = "2"
 RAW_JPEG_ALGORITHM = "same-stem-with-corroboration"
 RAW_JPEG_VERSION = "1"
 EXACT_DUPLICATE_ALGORITHM = "sha256-bytes"
@@ -103,7 +103,10 @@ def reconcile_workspace(
                 return _cancelled_result(identifier, len(physical), len(assets), started)
             left = canonical.get(raw_id, raw_id)
             right = canonical.get(rendered_id, rendered_id)
-            if left == right or left in blocked_assets or right in blocked_assets:
+            if left == right:
+                paired_assets.append((left, right, evidence, raw_files, rendered_files))
+                continue
+            if left in blocked_assets or right in blocked_assets:
                 continue
             if _decision_conflict((left, right), assets):
                 conflicts.append((left, right, "manual_decision_conflict", evidence))
@@ -170,7 +173,7 @@ def reconcile_workspace(
             for left, right, conflict_type, evidence in conflicts:
                 connection.execute(
                     "INSERT INTO reconciliation_conflict(run_id, left_logical_asset_id, right_logical_asset_id, conflict_type, message, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (run_id, left, right, conflict_type, "Manual decisions conflict; automatic reconciliation was skipped.", json.dumps(evidence, sort_keys=True), now),
+                    (run_id, left, right, conflict_type, "Multiple RAW/JPEG candidates; automatic reconciliation was skipped." if conflict_type == "ambiguous_raw_jpeg" else "Manual decisions conflict; automatic reconciliation was skipped.", json.dumps(evidence, sort_keys=True), now),
                 )
             connection.execute(
                 "INSERT INTO workspace_reconciliation(id, active_run_id, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET active_run_id = excluded.active_run_id, updated_at = excluded.updated_at",
@@ -257,7 +260,13 @@ def _raw_jpeg_candidates(assets, physical, canonical):
     for stem, family in sorted(groups.items()):
         raw_ids = sorted(family["raw"])
         rendered_ids = sorted(family["rendered"])
-        if len(raw_ids) != 1 or len(rendered_ids) != 1 or raw_ids[0] == rendered_ids[0]:
+        if len(raw_ids) == len(rendered_ids) == 1 and raw_ids[0] == rendered_ids[0]:
+            members = files_by_asset[raw_ids[0]]
+            candidates.append((raw_ids[0], rendered_ids[0], {"rule": "already_reconciled"},
+                               [row["id"] for row in members if is_raw_extension(row["extension"])],
+                               [row["id"] for row in members if is_rendered_image_extension(row["extension"])]))
+            continue
+        if len(raw_ids) != 1 or len(rendered_ids) != 1:
             if raw_ids and rendered_ids:
                 ambiguities.append(
                     (

@@ -33,6 +33,7 @@ def default_configuration() -> dict[str, object]:
         "video_sampling_fps": VIDEO_SAMPLING_DEFAULT_FPS,
         "video_sampling_min_frames": VIDEO_SAMPLING_DEFAULT_MIN_FRAMES,
         "video_sampling_max_frames": VIDEO_SAMPLING_DEFAULT_MAX_FRAMES,
+        "recommendation_threshold": 0.70,
         "semantic_search_enabled": False,
         "embedding_provider": "openclip-b16-datacomp-xl",
     }
@@ -101,6 +102,10 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
         ),
         "embedding_provider": value.get("embedding_provider", defaults["embedding_provider"]),
     }
+    threshold = value.get("recommendation_threshold", 0.70)
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+        raise ValueError("recommendation_threshold must be between 0 and 1")
+    result["recommendation_threshold"] = float(threshold)
     for name in ("rendered_quality_provider", "raw_quality_provider", "quality_provider"):
         if result[name] not in {"off", "lar-iqa"}:
             raise ValueError(f"{name} must be off or lar-iqa")
@@ -137,6 +142,7 @@ def configuration_from_connection(connection) -> dict[str, object]:
         "video_sampling_max_frames": row["video_sampling_max_frames"],
         "semantic_search_enabled": bool(row["semantic_search_enabled"]),
         "embedding_provider": row["embedding_provider"],
+        "recommendation_threshold": row["recommendation_threshold"],
     })
 
 
@@ -192,6 +198,7 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             config["embedding_provider"],
         ),
     )
+    connection.execute("UPDATE workspace_config SET recommendation_threshold = ? WHERE id = 1", (config["recommendation_threshold"],))
     connection.execute("DELETE FROM folder_scope_rule")
     connection.executemany(
         "INSERT INTO folder_scope_rule(path, included) VALUES (?, ?)",

@@ -53,6 +53,15 @@ class ApiTests(unittest.TestCase):
         self.thread.join(timeout=5)
         self.temporary_directory.cleanup()
 
+    def test_explicit_model_install_does_not_index(self):
+        body = json.dumps({"provider": "openclip-b16-datacomp-xl"}).encode()
+        with patch("archive_index.embeddings.models.install_model") as install, patch.object(self.server, "start_indexing") as indexing:
+            request = Request(self.base_url + "/api/embedding-models/install", data=body, headers={"Content-Type":"application/json"}, method="POST")
+            with urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+            install.assert_called_once_with("openclip-b16-datacomp-xl")
+            indexing.assert_not_called()
+
     def test_home_summary_filters_and_pagination(self) -> None:
         status, home = _get_json(self.base_url, "/api/workspace")
         self.assertEqual(status, 200)
@@ -86,7 +95,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"Archive Indexation", html)
         self.assertIn(b"<dialog", html)
         self.assertIn(b"problems-dialog", html)
-        self.assertIn(b"page-size", html)
+        self.assertNotIn(b"page-size", html)
         self.assertIn(b"Choose folder", html)
         status, css = _get_bytes(self.base_url, "/app.css")
         self.assertEqual(status, 200)
@@ -96,7 +105,7 @@ class ApiTests(unittest.TestCase):
         status, models = _get_json(self.base_url, "/api/embedding-models")
         self.assertEqual(status, 200)
         self.assertEqual({model["provider"] for model in models["models"]}, {"openclip-b16-datacomp-xl", "siglip2-base-patch16-224"})
-        self.assertIn(b">Groups<", html)
+        self.assertIn(b">Groupings<", html)
         self.assertNotIn(b">Selection<", html)
         self.assertNotIn(b">Strict groups<", html)
         self.assertNotIn(b"Workspaces</a>", html)
@@ -129,7 +138,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"#details .details-content", css)
         self.assertIn(b"focused-group .group-heading", css)
         self.assertIn(b"range-label-top", html)
-        self.assertIn("aria-label=\"Previous page\"".encode(), html)
+        self.assertNotIn("aria-label=\"Previous page\"".encode(), html)
         self.assertNotIn(b">Previous<", html)
         self.assertNotIn(b">Next<", html)
         self.assertNotIn(b"Open a workspace to browse", html)
@@ -142,14 +151,15 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn(b"Open thumbnail", html)
         self.assertNotIn(b"scrollIntoView", html)
         self.assertNotIn(b'id="selection-filter"', html)
-        for label in (b"All", b"Representatives", b"Recommended", b"Selected", b"Rejected", b"Undecided"):
-            self.assertIn(b"data-selection-filter=\"" + label.lower() + b"\"", html)
-        self.assertIn(b"review-filter-buttons", html)
+        for value in (b"all", b"representatives", b"recommended"):
+            self.assertIn(b'data-auto="' + value + b'"', html)
+        for value in (b"all", b"selected", b"rejected", b"undecided"):
+            self.assertIn(b'data-manual="' + value + b'"', html)
         self.assertIn(b"function formatCapture", js)
         self.assertIn(b"slice(1, 3)", js)
         self.assertIn(b'data-detail-thumbnail', js)
         self.assertIn(b'renderDetails(state.viewerDetail', js)
-        self.assertIn(b'params.set("selection", state.selectionFilter)', js)
+        self.assertIn(b'manual: state.manual', js)
 
     def test_semantic_search_returns_similarity_results_through_the_same_asset_shape(self) -> None:
         with closing(self.workspace.connect()) as connection:

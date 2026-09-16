@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from threading import RLock
+from time import perf_counter
+import logging
 
 from .providers import EmbeddingProvider, create_embedding_provider
 from .vector import blob_to_vector, exact_top_k
@@ -14,6 +19,100 @@ class SearchResult:
     asset_id: str
     similarity: float
     best_timestamp: float | None = None
+
+
+_search_lock = RLock()
+_providers = {}
+_text_vectors = OrderedDict()
+_rankings = OrderedDict()
+_active_provider = None
+_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-search")
+_state_lock = RLock()
+_loads = {}
+_requests = OrderedDict()
+LAST_SEARCH_TIMINGS = {}
+
+
+def provider_state(provider_id):
+    with _state_lock:
+        future = _loads.get(provider_id)
+        if future is None:
+            return "available"
+        if not future.done():
+            return "loading"
+        return "failed" if future.exception() else "ready"
+
+
+def select_provider(provider_id):
+    global _active_provider
+    with _state_lock:
+        if _active_provider != provider_id:
+            _active_provider = provider_id
+            for future in (*_loads.values(), *_requests.values()):
+                future.cancel()
+            _loads.clear()
+            _requests.clear()
+            _worker.submit(_release_providers)
+        if provider_id is not None and provider_id not in _loads:
+            _loads[provider_id] = _worker.submit(_warm_provider, provider_id)
+        return _loads.get(provider_id)
+
+
+def prepare_provider(provider_id):
+    return select_provider(provider_id)
+
+
+def _warm_provider(provider_id):
+    with _search_lock:
+        candidate = create_embedding_provider(provider_id)
+        session = _providers.get((provider_id, candidate.version), candidate)
+        started = perf_counter()
+        session.preflight()
+        _providers[(provider_id, session.version)] = session
+        LAST_SEARCH_TIMINGS["provider_load"] = perf_counter() - started
+        LAST_SEARCH_TIMINGS["load_stages"] = dict(getattr(session, "last_timings", {}))
+
+
+def request_text(workspace, text, *, allowed_asset_ids):
+    active = active_embedding(workspace)
+    if active is None or active["status"] != "complete":
+        raise RuntimeError("Embeddings not indexed · Re-index required")
+    provider_id = active["active_provider"]
+    loading = prepare_provider(provider_id)
+    if not loading.done():
+        return None, "loading"
+    loading.result()
+    fingerprint = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+                        for p in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal")))
+    key = (str(workspace.root), active["active_run_id"], fingerprint, text, frozenset(allowed_asset_ids))
+    with _state_lock:
+        future = _requests.get(key)
+        if future is None:
+            future = _worker.submit(search_text, workspace, text, allowed_asset_ids=allowed_asset_ids, top_k=2**31)
+            _requests[key] = future
+        while len(_requests) > 16:
+            _, old = _requests.popitem(last=False)
+            old.cancel()
+    try:
+        return future.result(timeout=0.04), "complete"
+    except TimeoutError:
+        return None, "searching"
+
+
+def _release_providers():
+    with _search_lock:
+        runtimes = [p._torch for p in _providers.values() if getattr(p, "_torch", None) is not None]
+        _providers.clear()
+        _rankings.clear()
+        for runtime in runtimes:
+            if runtime.cuda.is_available():
+                runtime.cuda.empty_cache()
+
+
+def clear_search_sessions():
+    select_provider(None)
+    _worker.submit(_release_providers).result()
+
 
 
 def active_embedding(workspace: Workspace):
@@ -46,9 +145,40 @@ def search_text(
     active = active_embedding(workspace)
     if active is None or active["active_run_id"] is None or active["status"] != "complete":
         raise RuntimeError("semantic embeddings are not available; enable search and index the workspace")
-    provider = provider or create_embedding_provider(active["active_provider"])
-    query = provider.encode_text(text)
-    return search_vector(workspace, query, allowed_asset_ids=allowed_asset_ids, top_k=top_k)
+    started = perf_counter()
+    with _search_lock:
+        key = (active["active_provider"], active["model_version"], text)
+        if provider is not None:
+            query = provider.encode_text(text)
+            return search_vector(workspace, query, allowed_asset_ids=allowed_asset_ids, top_k=top_k)
+        query = _text_vectors.get(key)
+        encode_started = perf_counter()
+        if query is None:
+            session = _providers.get(key[:2])
+            if session is None:
+                session = create_embedding_provider(active["active_provider"])
+                _providers[key[:2]] = session
+            query = session.encode_text(text)
+            _text_vectors[key] = query
+            while len(_text_vectors) > 128:
+                _text_vectors.popitem(last=False)
+        encode_elapsed = perf_counter() - encode_started
+        fingerprint = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+                            for p in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal")))
+        rank_key = (str(workspace.root), active["active_run_id"], fingerprint, key,
+                    None if allowed_asset_ids is None else frozenset(allowed_asset_ids))
+        results = _rankings.get(rank_key)
+        cached = results is not None
+        rank_started = perf_counter()
+        if results is None:
+            results = search_vector(workspace, query, allowed_asset_ids=allowed_asset_ids, top_k=2**31)
+            _rankings[rank_key] = results
+            while len(_rankings) > 16:
+                _rankings.popitem(last=False)
+        logging.getLogger(__name__).info("semantic search %.4fs ranking_cache=%s", perf_counter() - started, cached)
+        LAST_SEARCH_TIMINGS.update(encode=encode_elapsed, rank=perf_counter() - rank_started, total=perf_counter() - started, ranking_cached=cached)
+        return results[:top_k]
+
 
 
 def search_similar(

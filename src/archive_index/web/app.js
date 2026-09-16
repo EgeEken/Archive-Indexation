@@ -2,13 +2,13 @@ const query = new URLSearchParams(location.search);
 const MAX_VIEWER_ZOOM = 40;
 const state = {
   workspace: query.get("workspace"),
-  page: Number(query.get("page") || 1),
-  pageSize: Number(localStorage.getItem("archive-index-page-size") || query.get("page_size") || 60),
   total: 0,
   items: [],
   viewerItems: [],
-  viewMode: query.get("view") === "groups" ? "groups" : "gallery",
-  searchMode: query.get("search_mode") === "semantic" ? "semantic" : "filename",
+  viewMode: ["groups", "cloud"].includes(query.get("view")) ? query.get("view") : "gallery",
+  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [],
+  scrollPositions: {}, windowStart: 0, windowRows: [], windowColumns: 1, windowHeight: 360,
+  collapsed: localStorage.getItem("archive-sidebar-collapsed") === "true",
   selectionFilter: query.get("selection") || "all",
   groupPage: Number(query.get("group_page") || 1),
   groupPageSize: 10,
@@ -51,37 +51,18 @@ async function api(path, options) {
 }
 
 function syncUrl() {
-  const params = new URLSearchParams();
+  const params = filterParams();
   if (state.workspace) params.set("workspace", state.workspace);
-  if (state.viewMode === "groups") {
-    params.set("view", "groups");
-    if (state.groupPage > 1) params.set("group_page", state.groupPage);
-    if (state.focusGroup) params.set("focus_group", state.focusGroup);
-  } else if (state.page > 1) {
-    params.set("page", state.page);
-  }
-  if ($("search").value.trim()) params.set(state.searchMode === "semantic" ? "text" : "q", $("search").value.trim());
-  if (state.searchMode === "semantic") params.set("search_mode", "semantic");
-  if ($("folder").value) params.set("folder", $("folder").value);
-  if ($("media-type").value) params.set("media_type", $("media-type").value);
-  if (state.selectionFilter !== "all") params.set("selection", state.selectionFilter);
-  params.set("sort_by", $("sort-by").value);
-  params.set("direction", $("direction").value);
-  params.set("page_size", state.pageSize);
+  params.set("view", state.viewMode);
   history.replaceState(null, "", `${location.pathname}?${params}`);
 }
 
-function filterParams(kind) {
-  const params = new URLSearchParams({
-    page: kind === "groups" ? state.groupPage : state.page,
-    page_size: kind === "groups" ? state.groupPageSize : state.pageSize,
-    sort_by: $("sort-by").value,
-    direction: $("direction").value,
-  });
-  if ($("search").value.trim()) params.set(state.searchMode === "semantic" ? "text" : "q", $("search").value.trim());
-  if ($("folder").value) params.set("folder", $("folder").value);
-  if ($("media-type").value) params.set("media_type", $("media-type").value);
-  if (state.selectionFilter !== "all") params.set("selection", state.selectionFilter);
+function filterParams() {
+  const params = new URLSearchParams({q: $("search").value.trim(), sort_by: $("sort-by").value,
+    direction: $("direction").value, threshold: $("similarity-threshold").value,
+    media_type: $("media-type").value, layout: state.layout, auto: state.auto, manual: state.manual,
+    semantic: state.semanticPending ? "0" : "1", async: "1"});
+  if (state.folders !== null) params.set("folders", JSON.stringify([...state.folders].sort()));
   return params;
 }
 
@@ -131,15 +112,12 @@ function selectionState(item) {
 }
 
 function selectionStateMarkup(item) {
-  const effective = selectionState(item);
-  if (!effective) return "";
-  const classes = effective === "selected" || effective === "rejected" ? `manual-${effective}` : effective;
-  return `<span class="state-tag ${classes}">${effective[0].toUpperCase() + effective.slice(1)}</span>`;
+  return `${item.is_representative ? '<span class="state-tag representative">Representative</span>' : ''}${item.auto_recommended ? '<span class="state-tag recommended">Recommended</span>' : ''}${item.filename_match ? '<span class="state-tag">Filename match</span>' : ''}`;
 }
 
 function selectionActionsMarkup(item) {
   const decision = item.user_decision || "undecided";
-  return `<div class="selection-actions"><button type="button" class="selection-button select${decision === "selected" ? " active" : ""}" data-decision="selected" data-asset-id="${escapeHtml(item.asset_id)}">Select</button><button type="button" class="selection-button reject${decision === "rejected" ? " active" : ""}" data-decision="rejected" data-asset-id="${escapeHtml(item.asset_id)}">Reject</button></div>`;
+  return `<div class="selection-actions" data-review="${decision}"><button type="button" class="selection-button select${decision === "selected" ? " active" : ""}" data-decision="selected" data-asset-id="${escapeHtml(item.asset_id)}">${decision === "selected" ? "Selected" : "Select"}</button><button type="button" class="selection-button reject${decision === "rejected" ? " active" : ""}" data-decision="rejected" data-asset-id="${escapeHtml(item.asset_id)}">${decision === "rejected" ? "Rejected" : "Reject"}</button></div>`;
 }
 
 function bindSelectionButtons(root) {
@@ -151,7 +129,7 @@ function bindSelectionButtons(root) {
 
 async function setDecision(assetId, decision) {
   try {
-    const current = [...state.items, ...state.viewerItems].find((item) => item?.asset_id === assetId)?.user_decision || "undecided";
+    const current = [...state.items, ...state.viewerItems, ...(state.groupItems || [])].find((item) => item?.asset_id === assetId)?.user_decision || "undecided";
     const nextDecision = decision === current && decision !== "undecided" ? "undecided" : decision;
     const payload = await api(`/api/assets/${encodeURIComponent(assetId)}/decision`, {
       method: "POST",
@@ -165,8 +143,10 @@ async function setDecision(assetId, decision) {
         item.recommendation_run_id = payload.recommendation_run_id;
       }
     };
+    state.renderKeys = {};
     state.items.forEach(update);
     state.viewerItems.forEach(update);
+    (state.groupItems || []).forEach(update);
     if ($("viewer").open) renderViewer();
     if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
   } catch (error) {
@@ -178,8 +158,8 @@ function renderCard(item, index) {
   const media = item.thumbnail_url
     ? `<img class="thumb" loading="lazy" src="${item.thumbnail_url}" alt="${escapeHtml(item.filename)}">`
     : `<div class="placeholder">Preview unavailable</div>`;
-  const capture = $("sort-by").value === "capture_time" && item.capture_time
-    ? `<div class="capture">${escapeHtml(formatCapture(item.capture_time, item.capture_time_kind))}</div>` : "";
+  const date = item.capture_time?.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2})/);
+  const capture = `<div class="capture">${date ? `${date[3]}/${date[2]}/${date[1]} · ${date[4]}` : "Capture time unavailable"}</div>`;
   return `<article class="photo-card${item.is_representative ? " representative-card" : ""}${item.auto_recommended ? " recommended-card" : ""}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
 }
 
@@ -300,10 +280,12 @@ function renderSetupPlanData(plan) {
   const rendered = configuration.rendered_quality_provider ?? configuration.quality_provider;
   const quality = `rendered-image quality: ${plan.quality_rendered_image_count ?? 0} candidates${rendered === "lar-iqa" && plan.rendered_quality_readiness?.message ? ` · ${plan.rendered_quality_readiness.message}` : ""} · RAW-only quality: ${plan.quality_raw_candidate_count ?? 0} candidates`;
   const video = plan.video_sampling ? `video: ${plan.video_count ?? 0} indexed · quality ${configuration.video_quality_enabled ? "enabled" : "off"}, ${plan.video_sampling.target_fps} samples/s, ${plan.video_sampling.min_frames}–${plan.video_sampling.max_frames} frames/video` : "";
-  const embedding = configuration.semantic_search_enabled
-    ? `semantic search: ${plan.embedding_image_count ?? 0} image assets · ${plan.embedding_video_sample_count ?? 0} video samples · ${formatBytes(plan.embedding_estimated_storage_bytes ?? 0)} estimated vectors${plan.embedding_readiness?.message ? ` · ${plan.embedding_readiness.message}` : ""}`
-    : "semantic search: off";
-  $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>${video ? `<span>${escapeHtml(video)}</span>` : ""}<span>${escapeHtml(embedding)}</span>`;
+  const embedding = !configuration.semantic_search_enabled ? "Semantic search: off" : plan.embedding_total_vectors == null ? "Calculating semantic work…" :
+    `Semantic search${plan.embedding_counts_estimated ? " (estimated before reconciliation)" : ""}: ${plan.embedding_image_count} image assets · ${plan.embedding_video_sample_count} video samples · ${plan.embedding_total_vectors} vectors
+${plan.embedding_pending_count} pending · ${plan.embedding_cached_count} reusable
+Estimated new storage: ${formatBytes(plan.embedding_estimated_storage_bytes)}${plan.embedding_pending_count ? ` · roughly ${plan.embedding_estimated_seconds} s processing` : ""}${plan.embedding_unknown_videos ? ` · ${plan.embedding_unknown_videos} videos need duration metadata before frame totals can be estimated` : ""}
+${plan.embedding_readiness?.message || ""}`;
+  $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>${video ? `<span>${escapeHtml(video)}</span>` : ""}<span class="semantic-plan">${escapeHtml(embedding)}</span>`;
 }
 
 function renderSetupPlan() {
@@ -391,9 +373,17 @@ async function loadEmbeddingModelStatus() {
     const response = await fetch("/api/embedding-models");
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not inspect embedding models");
-    const selected = payload.models.find((model) => model.provider === state.setup?.draftConfiguration.embedding_provider);
-    if (selected && state.setup) {
-      $("setup-embedding-status").textContent = `${selected.installed ? "Installed" : "Not installed"} · ~${(selected.expected_download_bytes / (1024 ** 3)).toFixed(2)} GiB download · ${selected.dimension} dimensions`;
+    if (state.setup) {
+      $("setup-embedding-status").innerHTML = payload.models.map(model => `<div class="model-row"><strong>${model.provider.startsWith("openclip") ? "OpenCLIP B/16" : "SigLIP2 Base 224"}</strong> · ${model.installed ? "Installed" : "Not installed"} · ${formatBytes(model.installed ? model.cache_bytes : model.expected_download_bytes)}${model.provider === state.setup.draftConfiguration.embedding_provider ? " · Active provider" : ""}${model.installed ? "" : ` <button data-install-model="${model.provider}">Install</button>`}</div>`).join("");
+      $("setup-embedding-status").querySelectorAll("[data-install-model]").forEach(button => button.onclick = async () => {
+        button.disabled = true; button.textContent = "Installing…";
+        try {
+          const installed = await api("/api/embedding-models/install", {method:"POST", headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:button.dataset.installModel})});
+          await loadEmbeddingModelStatus();
+          $("setup-embedding-note").innerHTML = installed.compatible_embeddings ? 'Model installed · Semantic search ready' : 'Model installed · Re-index required <button id="model-reindex">Re-index</button>';
+          $("model-reindex")?.addEventListener("click", startIndex);
+        } catch(error) { button.disabled=false; button.textContent="Retry install"; $("setup-embedding-note").textContent=error.message; }
+      });
     }
   } catch (error) {
     if (state.setup) $("setup-embedding-status").textContent = error.message;
@@ -401,6 +391,8 @@ async function loadEmbeddingModelStatus() {
 }
 
 async function configureWorkspace() {
+  state.setupScroll = window.scrollY;
+  state.browserAbort?.abort(); clearTimeout(state.searchPoll);
   try {
     const workspace = await api("/api/workspace");
     const response = await fetch("/api/workspaces/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: workspace.path }) });
@@ -426,7 +418,7 @@ async function applySetup() {
 }
 
 function cancelSetup() {
-  if (state.setup?.workspace) location.href = `/?workspace=${encodeURIComponent(state.setup.workspace)}`;
+  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); if(state.viewMode === "groups") loadGroups(); else if(state.viewMode === "gallery") loadAssets(); }
   else { state.setup = null; loadHome().catch((error) => $("home-status").textContent = error.message); }
 }
 
@@ -474,55 +466,92 @@ async function loadWorkspace() {
   $("home-view").classList.add("hidden");
   $("setup-view").classList.add("hidden");
   $("workspace-view").classList.remove("hidden");
-  $("index").classList.remove("hidden");
-  $("configure-workspace").classList.remove("hidden");
-  $("workspace-crumb").classList.remove("hidden");
+  ["index", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
   const data = await api("/api/workspace");
   $("workspace-crumb").textContent = data.name;
-  $("workspace-current-path").textContent = data.path;
-  $("workspace-summary").textContent = `${data.assets} assets · ${data.online_files} online · ${data.offline_files} offline`;
-  const folders = await api("/api/folders");
-  $("folder").innerHTML = `<option value="">All folders</option>` + folders.folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join("");
-  $("folder").value = query.get("folder") || "";
-  $("search").value = query.get("q") || "";
-  state.searchMode = query.get("search_mode") === "semantic" ? "semantic" : "filename";
-  $("search-mode").value = state.searchMode;
-  $("search").placeholder = state.searchMode === "semantic" ? "Describe what you want to find" : "Filename";
-  $("search").value = state.searchMode === "semantic" ? query.get("text") || "" : query.get("q") || "";
-  $("media-type").value = query.get("media_type") || "";
+  state.folderPaths = (await api("/api/folders")).folders;
+  $("search").value = query.get("q") || query.get("text") || "";
+  state.auto=query.get("auto") || "all"; state.manual=query.get("manual") || "all"; state.layout=query.get("layout") || "";
+  $("media-type").value=query.get("media_type") || "";
+  if(query.has("folders")) state.folders=new Set(JSON.parse(query.get("folders")));
+  normalizeFolders(); renderFolderTree();
   $("sort-by").value = query.get("sort_by") || "capture_time";
   $("direction").value = query.get("direction") || "desc";
-  state.selectionFilter = ["all", "representatives", "recommended", "selected", "rejected", "undecided"].includes(query.get("selection")) ? query.get("selection") : "all";
-  renderReviewFilters();
-  $("page-size").value = String(state.pageSize);
-  if (!["60", "120", "180"].includes($("page-size").value)) { state.pageSize = 60; $("page-size").value = "60"; }
+  $("similarity-threshold").value = localStorage.getItem(`archive-threshold-${state.workspace}`) || "0.20";
+  $("similarity-value").textContent = Number($("similarity-threshold").value).toFixed(2);
+  const config = await api("/api/workspace/configuration");
+  $("recommendation-threshold").value = config.configuration?.recommendation_threshold ?? 0.70;
+  $("recommendation-value").textContent = Number($("recommendation-threshold").value).toFixed(2);
+  document.body.classList.toggle("sidebar-collapsed", state.collapsed);
+  $("sidebar-reopen").classList.toggle("hidden", !state.collapsed);
+  renderFilterButtons();
   setViewMode(state.viewMode, false);
   await loadJobs();
-  await loadProblemsBadge();
   if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
+  setTimeout(prepareSearch, 250);
+}
+
+function showSearchStatus(status, data = null) {
+  state.searchState = status.state;
+  if(status.provider) state.searchProvider=status.provider;
+  $("search-status").dataset.state = status.state;
+  $("search-status").textContent = status.state === "complete" && data ? `Found ${data.media_total} media · ${data.filename_matches} filename matches` : status.message;
+  $("search-count").textContent = data && status.state !== "complete" ? `Found ${data.media_total} media · ${data.filename_matches} filename matches` : "";
+}
+
+async function prepareSearch() {
+  try {
+    if (!$("search").value.trim() && state.searchState === "available") showSearchStatus({state:"loading", message:`Preparing semantic search · ${state.searchProvider || "OpenCLIP"}…`});
+    const status = await api("/api/search/prepare", {method:"POST"});
+    if (!$("search").value.trim()) showSearchStatus(status);
+    if (status.state === "loading") setTimeout(prepareSearch, 150);
+  } catch (error) { if (!$("search").value.trim()) showSearchStatus({state:"failed",message:`Search failed: ${error.message}`}); }
+}
+
+async function browserData(params) {
+  state.browserAbort?.abort(); clearTimeout(state.searchPoll);
+  const controller = new AbortController(); state.browserAbort = controller;
+  if (params.get("q") && params.get("semantic") !== "0") {
+    const loading = ["available", "loading"].includes(state.searchState);
+    showSearchStatus({state:loading ? "loading" : "searching",message:loading ? `Loading ${state.searchProvider || "OpenCLIP"}…` : "Searching…"});
+  }
+  const data = await api(`/api/browser?${params}`, {signal:controller.signal});
+  if (controller.signal.aborted) throw new DOMException("Search replaced", "AbortError");
+  state.searchProvider = data.search.provider;
+  showSearchStatus(data.search, data);
+  if (["loading","searching"].includes(data.search.state) && params.get("semantic") !== "0") {
+    state.searchPoll = setTimeout(() => {
+      if (!$("workspace-view").classList.contains("hidden")) (state.viewMode === "groups" ? loadGroups() : loadAssets());
+    }, 100);
+  }
+  return data;
 }
 
 async function loadAssets() {
   const requestId = ++state.assetRequest;
   try {
-    const params = filterParams("gallery");
-    const data = state.searchMode === "semantic" && $("search").value.trim()
-      ? await api(`/api/search?${params}`)
-      : await api(`/api/assets?${params}`);
+    const width = $("gallery").clientWidth || 900;
+    const columns = Math.max(1, Math.floor((width + 12) / 210));
+    const height = Math.floor((width - (columns - 1) * 12) / columns) + 184;
+    const top = $("gallery").getBoundingClientRect().top + window.scrollY;
+    const row = Math.max(0, Math.floor((window.scrollY - top) / height) - 2);
+    const offset = row * columns;
+    const limit = Math.min(180, (Math.ceil(window.innerHeight / height) + 5) * columns);
+    const params = filterParams(); params.set("offset", offset); params.set("limit", limit);
+    const renderKey = `${params}|${columns}`;
+    if (state.renderKeys.gallery === renderKey) return;
+    const data = await browserData(params);
     if (requestId !== state.assetRequest) return;
-    state.items = data.items;
-    state.viewerItems = state.items;
-    state.total = data.total;
-    $("status").textContent = state.searchMode === "semantic" && !$("search").value.trim()
-      ? "Enter a description to search semantically."
-      : state.selectionFilter === "representatives" && !data.grouping_available ? "Groups have not been built for this workspace yet." : "";
-    $("gallery").innerHTML = data.items.map(renderCard).join("") || `<div class="empty">No matching media.</div>`;
-    bindGalleryCards();
-    renderPager(data, "");
-    syncUrl();
-  } catch (error) {
-    $("status").textContent = error.message;
-  }
+    state.items = data.items; state.total = data.total;
+    state.windowStart = offset; state.windowColumns = columns; state.windowHeight = height;
+    if (!["loading","searching","failed"].includes(data.search.state)) state.renderKeys.gallery = renderKey;
+    $("gallery").style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+    const before = Math.floor(offset / columns) * height;
+    const after = Math.max(0, Math.ceil((data.total - offset - data.items.length) / columns) * height);
+    $("gallery").innerHTML = data.items.length ? `<div class="window-spacer" style="height:${before}px"></div>${data.items.map(renderCard).join("")}<div class="window-spacer" style="height:${after}px"></div>` : `<div class="empty">No media match these filters.</div>`;
+    $("gallery").style.setProperty("--card-height", `${height - 12}px`);
+    bindGalleryCards(); syncUrl();
+  } catch (error) { if(error.name !== "AbortError") showSearchStatus({state:"failed",message:`Search failed: ${error.message}`}); }
 }
 
 function bindGalleryCards() {
@@ -532,25 +561,6 @@ function bindGalleryCards() {
   });
   $("gallery").querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); showDetails(state.items[Number(button.dataset.info)].asset_id, { mode: "gallery", items: state.items, index: Number(button.dataset.info) }); }));
   bindSelectionButtons($("gallery"));
-}
-
-function renderPager(data, prefix) {
-  const pageCount = Math.max(1, Math.ceil(data.total / data.page_size));
-  const first = data.total ? ((data.page - 1) * data.page_size) + 1 : 0;
-  const last = data.total ? Math.min(data.total, data.page * data.page_size) : 0;
-  const range = data.total ? `${first}–${last} / ${data.total} matches` : "0 / 0 matches";
-  ["top", "bottom"].forEach((place) => {
-    $(`${prefix}page-label-${place}`).textContent = `Page ${data.page} / ${pageCount}`;
-    $(`${prefix}range-label-${place}`).textContent = range;
-    $(`${prefix}previous-${place}`).disabled = data.page <= 1;
-    $(`${prefix}next-${place}`).disabled = !data.has_next;
-  });
-}
-
-function changePage(delta) {
-  state.page = Math.max(1, state.page + delta);
-  syncUrl();
-  loadAssets().then(() => window.scrollTo({ top: 0, behavior: "smooth" }));
 }
 
 function resetViewerZoom() {
@@ -564,9 +574,11 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
   if (!state.viewerItems[index]) return;
   state.viewerIndex = index;
   state.viewerContext = context.mode || "gallery";
+  state.viewerStart = context.start ?? (state.viewerContext === "gallery" ? state.windowStart : 0);
   state.viewerGroupId = context.groupId || state.viewerItems[index].current_group_id || null;
   state.viewerInfoOpen = false;
   state.viewerDetail = null;
+  $("similar-gallery").classList.add("hidden");
   resetViewerZoom();
   renderViewer();
   if (!$("viewer").open) { $("viewer").showModal(); document.body.classList.add("modal-open"); }
@@ -576,14 +588,16 @@ function renderViewer() {
   const item = state.viewerItems[state.viewerIndex];
   if (!item) return;
   $("viewer-title").textContent = item.filename;
-  $("viewer-count").textContent = `${state.viewerIndex + 1} of ${state.viewerItems.length}`;
-  $("viewer-previous").disabled = state.viewerIndex <= 0;
-  $("viewer-next").disabled = state.viewerIndex >= state.viewerItems.length - 1;
-  $("viewer-selection").innerHTML = `${selectionStateMarkup(item)}${selectionActionsMarkup(item)}`;
+  $("viewer-count").textContent = `${state.viewerStart + state.viewerIndex + 1} of ${state.viewerContext === "gallery" ? state.total : state.viewerItems.length}`;
+  $("viewer-previous").disabled = state.viewerIndex <= 0 && (state.viewerContext !== "gallery" || state.viewerStart === 0);
+  $("viewer-next").disabled = state.viewerContext === "gallery" ? state.viewerStart + state.viewerIndex >= state.total - 1 : state.viewerIndex >= state.viewerItems.length - 1;
+  $("viewer-selection").innerHTML = selectionActionsMarkup(item);
+  $("viewer-similar").classList.toggle("hidden", item.media_type === "video");
   bindSelectionButtons($("viewer-selection"));
   $("viewer-grouping").classList.toggle("hidden", item.media_type === "video" || !state.viewerGroupId);
   $("smooth-control").classList.toggle("hidden", item.media_type === "video");
   $("viewer-smooth").checked = state.viewerSmooth;
+  stopViewerMedia();
   $("viewer-media").innerHTML = "";
   if (!item.original_url) {
     $("viewer-media").innerHTML = `<div class="viewer-error">${item.issues?.includes("offline") ? "This media is offline." : "This media cannot currently be rendered."}</div>`;
@@ -595,6 +609,7 @@ function renderViewer() {
     media.draggable = false;
     media.src = item.original_url;
     media.addEventListener("error", () => {
+      if (!media.isConnected || !media.getAttribute("src")) return;
       const explanation = item.media_type === "video" && item.codec ? `This source video codec (${item.codec}) is not supported by the browser yet.` : item.media_type === "video" ? "This source video codec is not supported by the browser yet." : "This media could not be rendered.";
       $("viewer-media").innerHTML = `<div class="viewer-error">${escapeHtml(explanation)}</div>`;
     });
@@ -604,7 +619,7 @@ function renderViewer() {
   }
   $("viewer-details").classList.toggle("hidden", !state.viewerInfoOpen);
   $("viewer-stage").classList.toggle("info-open", state.viewerInfoOpen);
-  if (state.viewerInfoOpen && state.viewerDetail) $("viewer-details").innerHTML = renderDetails(state.viewerDetail, { viewerPanel: true });
+  if (state.viewerInfoOpen) loadViewerDetails();
   requestAnimationFrame(() => applyViewerTransform($("viewer-media").querySelector("img.viewer-media")));
 }
 
@@ -630,17 +645,34 @@ function clampViewerPan(media) {
   if (maxY === 0) state.viewerPanY = 0;
 }
 
-function moveViewer(delta) {
-  const next = state.viewerIndex + delta;
+async function moveViewer(delta) {
+  let next = state.viewerIndex + delta;
+  if (state.viewerContext === "gallery" && (next < 0 || next >= state.viewerItems.length)) {
+    const offset = next < 0 ? Math.max(0, state.viewerStart - 60) : state.viewerStart + state.viewerItems.length;
+    if (offset < 0 || offset >= state.total) return;
+    const params = filterParams(); params.set("offset",offset); params.set("limit",60);
+    try {
+      const data = await api(`/api/browser?${params}`);
+      if (!data.items.length) return;
+      if (next < 0) { next = data.items.length - 1; state.viewerItems = [...data.items, ...state.viewerItems]; state.viewerStart = offset; }
+      else state.viewerItems = [...state.viewerItems, ...data.items];
+    } catch(error) { $("viewer-title").textContent=error.message;return; }
+  }
   if (next < 0 || next >= state.viewerItems.length) return;
   state.viewerIndex = next;
   resetViewerZoom();
   state.viewerDetail = null;
   renderViewer();
-  if (state.viewerInfoOpen) loadViewerDetails();
+}
+
+function stopViewerMedia() {
+  $("viewer-media").querySelectorAll("video").forEach(video => {
+    video.pause(); video.removeAttribute("src"); video.load();
+  });
 }
 
 function closeDialog(dialog) {
+  if (dialog.id === "viewer") stopViewerMedia();
   if (dialog.open) dialog.close();
   if (!["viewer", "details", "problems-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
 }
@@ -675,31 +707,23 @@ async function showDetails(assetId, context = { mode: "gallery", items: state.it
 }
 
 async function showSimilar(assetId) {
+  const source = state.viewerItems[state.viewerIndex];
+  const section = $("similar-gallery"); section.classList.remove("hidden"); section.textContent = "Finding similar images…";
   try {
     const data = await api(`/api/assets/${encodeURIComponent(assetId)}/similar`);
-    closeDialog($("details"));
-    closeDialog($("viewer"));
-    state.viewMode = "gallery";
-    state.searchMode = "filename";
-    state.page = 1;
-    $("search-mode").value = "filename";
-    $("search").value = "";
-    $("search").placeholder = "Filename";
-    $("gallery").classList.remove("hidden");
-    $("groups-view").classList.add("hidden");
-    $("pager-top").classList.remove("hidden");
-    $("pager-bottom").classList.remove("hidden");
-    state.items = data.items;
-    state.viewerItems = data.items;
-    state.total = data.total;
-    $("status").textContent = `Similar images · ${data.total} results`;
-    $("gallery").innerHTML = data.items.map(renderCard).join("") || `<div class="empty">No similar media available.</div>`;
-    bindGalleryCards();
-    renderPager(data, "");
-    syncUrl();
-  } catch (error) {
-    $("status").textContent = error.message;
-  }
+    let count = 6;
+    const render = () => {
+      const strong = data.strong_count;
+      section.innerHTML = `<div class="dialog-header"><h3>${strong ? `${strong} similar images found` : "No strongly similar images found"}</h3><button id="similar-close">Close similar images</button></div><div class="similar-grid">${data.items.slice(0, count).map((item, index) => `<button data-similar-index="${index}" class="similar-result"><img src="${item.thumbnail_url || ''}" alt=""><span>${escapeHtml(item.filename)}</span>${similarityMarkup(item)}</button>`).join("")}</div>${count < data.items.length ? '<button id="similar-more">Load more</button>' : ''}`;
+      $("similar-close").onclick = () => section.classList.add("hidden");
+      $("similar-more")?.addEventListener("click", () => { count += 6; render(); });
+      section.querySelectorAll("[data-similar-index]").forEach(button => button.onclick = () => {
+        state.similarSource ||= {item: source, items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart}};
+        showViewer(Number(button.dataset.similarIndex), data.items, {mode: "similar"});
+      });
+    };
+    render();
+  } catch (error) { section.textContent = error.message; }
 }
 
 function assetToViewerItem(asset) {
@@ -720,18 +744,16 @@ function renderDetails(asset, options = {}) {
   const first = asset.physical_files?.[0] || {};
   const dimensions = first.width && first.height ? `${first.width} × ${first.height} (${(first.width * first.height / 1000000).toFixed(2)} MP)` : "Unavailable";
   const thumbnail = options.showThumbnail && first.thumbnail_url ? `<button class="detail-thumbnail" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer"><img src="${first.thumbnail_url}" alt=""></button>` : "";
-  const similarButton = asset.media_type === "image" ? `<button data-find-similar class="secondary" type="button">Find similar</button>` : "";
+  const similarButton = "";
   const header = options.viewerPanel ? `<div class="panel-header"><h2>Details</h2><div>${similarButton}<button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div></div>` : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted">${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Capture time unavailable")}</div></div><div>${similarButton}<button id="details-close" class="secondary" type="button">Close</button></div></div>`;
-  const overview = `<section><h3>Overview</h3><div class="overview-grid"><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd><dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")}</dd></dl>${thumbnail}</div></section>`;
-  return `<div class="details-content">${header}${overview}${renderRepresentations(asset)}${renderTechnicalDetails(first)}${asset.physical_files.map((file, index) => renderQuality(file, asset.physical_files.length > 1 && index > 0)).join("")}${asset.physical_files.map(renderComponentProblems).join("")}</div>`;
+  const overview = `<section><h3>Overview</h3><div class="overview-grid"><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd><dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")} <button class="explorer-button" data-reveal="${escapeHtml(first.id)}" aria-label="Reveal file in Explorer">📁</button></dd></dl>${thumbnail}</div></section>`;
+  return `<div class="details-content">${header}${overview}${renderTechnicalDetails(first)}${renderQuality(first, false)}${renderRepresentations(asset)}</div>`;
 }
 
 function renderRepresentations(asset) {
-  if ((asset.physical_files || []).length < 2) return "";
-  const rows = asset.physical_files.map((file) => {
-    const state = file.is_online ? (file.is_preferred ? "Preferred view" : "Available") : "Offline";
-    const relation = (file.relationships || []).join(" · ");
-    return `<div class="representation-row"><div><strong>${escapeHtml(file.filename)}</strong><div class="muted">${escapeHtml(file.representation_label || "Physical file")}${relation ? ` · ${escapeHtml(relation)}` : ""}</div></div><span class="muted">${escapeHtml(state)} · ${escapeHtml(formatBytes(file.size_bytes))}</span><div class="muted representation-path">${escapeHtml(file.relative_path || "")}</div></div>`;
+  const rows = asset.physical_files.map(file => {
+    const problems = renderComponentProblems(file);
+    return `<div class="representation-row"><div><div class="representation-title"><strong>${escapeHtml(file.extension === ".jpg" || file.extension === ".jpeg" ? "JPEG" : [".arw",".cr2",".cr3",".dng",".nef",".raf",".rw2"].includes(file.extension) ? "RAW" : file.representation_label)} · ${escapeHtml(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Reveal representation in Explorer">📁</button></div>`;
   }).join("");
   return `<section class="section"><h3>Representations</h3><div class="representations">${rows}</div></section>`;
 }
@@ -751,15 +773,22 @@ function renderQuality(file, showFilename) {
   const score = Number(file.quality_score).toFixed(2);
   const color = file.quality_score == null ? "#26333f" : qualityColor(file.quality_score);
   const videoSamples = file.media_type === "video" && file.video_quality ? `<div class="muted quality-note">Video samples: ${file.video_quality.successful_count}/${file.video_quality.requested_count}${file.video_quality.status === "partial" ? " · partial" : ""}</div>` : "";
-  const source = file.quality_source ? `<div class="muted quality-note">Source: ${escapeHtml(file.quality_source)}</div>` : "";
-  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div>${source}${videoSamples}</section>`;
+  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div>${videoSamples}</section>`;
 }
 
-function meterMarkup(label, value, position, endpoints) {
+function meterMarkup(label, value, position) {
   if (!value || position == null) return `<dt>${label}</dt><dd>${escapeHtml(value || "Unavailable")}</dd>`;
-  const clamped = Math.max(0, Math.min(100, position));
-  const overflow = position < 0 ? "<" : position > 100 ? ">" : "";
-  return `<dt>${label}</dt><dd class="technical-reading"><span>${escapeHtml(value)}</span><span class="meter-wrap"><span class="meter-labels"><span>${endpoints[0]}</span><span>${endpoints[1]}</span></span><span class="meter" aria-hidden="true"><span class="meter-fill" style="--meter-position: ${clamped}%"></span><span class="meter-overflow">${overflow}</span></span></span></dd>`;
+  const scales = {
+    "Focal length": {ticks:[10,20,30,40,50,70,100,200,300,400,500,600], labels:[[10,"10"],[50,"50"],[100,"100"],[600,"600 mm"]]},
+    "Aperture": {ticks:[1,1.4,2,2.8,4,5.6,8,11,16,22], labels:[[1,"f/1"],[4,"f/4"],[8,"f/8"],[22,"f/22"]]},
+    "Shutter speed": {ticks:[1,3,30,300,3000,30000,240000], labels:[[1,"30 s"],[30,"1 s"],[3000,"1/100"],[240000,"1/8000"]]},
+    "ISO": {ticks:[40,100,200,400,800,1600,3200,6400,12800,25600,40000], labels:[[40,"40"],[400,"400"],[6400,"6400"],[40000,"40000"]]}
+  };
+  const scale = scales[label];
+  const positionOf = v => logPosition(v,scale.ticks[0],scale.ticks.at(-1));
+  const ticks = scale.ticks.map(v => `<i class="scale-tick${scale.labels.some(([n])=>n===v) ? " major" : ""}" style="left:${positionOf(v)}%"></i>`).join("");
+  const labels = scale.labels.map(([v,text],index) => `<span class="scale-label${index===0 ? " first" : index===scale.labels.length-1 ? " last" : ""}" style="left:${positionOf(v)}%">${text}</span>`).join("");
+  return `<dt>${label}</dt><dd class="technical-reading"><span class="technical-value">${escapeHtml(value)}</span><span class="measurement-scale" aria-hidden="true"><span class="scale-line">${ticks}<i class="scale-marker${position<0 || position>100 ? " overflow" : ""}" style="left:${Math.max(0,Math.min(100,position))}%"></i></span><span class="scale-labels">${labels}</span></span></dd>`;
 }
 
 function logPosition(value, low, high) { return Number.isFinite(value) && value > 0 ? Math.log(value / low) / Math.log(high / low) * 100 : null; }
@@ -777,7 +806,7 @@ function renderTechnicalDetails(file) {
   const rows = [["Camera", cameraValue(file)], ["Lens", metadataValue(file, ["LensModel", "LensMake"])]];
   const hasMeter = aperture || shutter || iso || focal;
   if (!rows.some(([, value]) => value) && !hasMeter) return "";
-  return `<section class="section"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22), ["f/1", "f/22"]) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber), ["30 s", "1/8000 s"]) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000), ["ISO 40", "ISO 40000"]) : ""}${focal ? meterMarkup("Focal length", focal, logPosition(focalNumber, 10, 1000), ["10 mm", "1000 mm"]) : ""}</dl></section>`;
+  return `<section class="section"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${focal ? meterMarkup("Focal length", focal, logPosition(focalNumber, 10, 600), ["10 mm", "600 mm"]) : ""}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22), ["f/1", "f/22"]) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber), ["30 s", "1/8000 s"]) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000), ["ISO 40", "ISO 40000"]) : ""}</dl></section>`;
 }
 
 function componentProblemMessage(name, component) {
@@ -788,7 +817,7 @@ function componentProblemMessage(name, component) {
 }
 
 function renderComponentProblems(file) {
-  return ["metadata", "thumbnail", "quality"].flatMap((name) => { const component = file.components[name]; return component && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(componentProblemMessage(name, component))}</p>`] : []; }).join("");
+  return ["metadata", "thumbnail", "quality"].flatMap((name) => { const component = file.components?.[name]; return component && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(componentProblemMessage(name, component))}</p>`] : []; }).join("");
 }
 
 function cameraValue(file) { const exif = file.metadata?.exif || {}; return [exif.Make, exif.Model].filter((value) => value != null && readable(value)).map(formatExif).filter((value, index, values) => values.indexOf(value) === index).join(" "); }
@@ -805,7 +834,9 @@ async function loadViewerDetails() {
   const item = state.viewerItems[state.viewerIndex];
   if (!item) return;
   try {
-    state.viewerDetail = await api(`/api/assets/${encodeURIComponent(item.asset_id)}`);
+    const detail = await api(`/api/assets/${encodeURIComponent(item.asset_id)}`);
+    if (state.viewerItems[state.viewerIndex]?.asset_id !== item.asset_id || !state.viewerInfoOpen) return;
+    state.viewerDetail = detail;
     state.viewerDetail._context = { mode: state.viewerContext, items: state.viewerItems, index: state.viewerIndex, groupId: state.viewerGroupId };
     if (state.viewerInfoOpen) {
       $("viewer-details").innerHTML = renderDetails(state.viewerDetail, { viewerPanel: true });
@@ -828,13 +859,20 @@ async function toggleViewerInfo(open = !state.viewerInfoOpen) {
 async function loadJobs() {
   try {
     const data = await api("/api/jobs?limit=10");
+    const revision = JSON.stringify(data.revision);
+    if (state.browserRevision && state.browserRevision !== revision) state.renderKeys = {};
+    state.browserRevision = revision;
+    if (!$("search").value.trim() && !$("workspace-view").classList.contains("hidden")) {
+      const readiness = await api("/api/search-status");
+      if (!$("search").value.trim()) showSearchStatus(readiness);
+    }
     const active = data.jobs.find((job) => ["pending", "running"].includes(job.status));
     if (!active) {
       $("job-banner").classList.add("hidden");
       if (state.activeJobId) {
         state.activeJobId = null;
         const workspace = await api("/api/workspace");
-        $("workspace-summary").textContent = `${workspace.assets} assets · ${workspace.online_files} online · ${workspace.offline_files} offline`;
+        state.renderKeys = {};
         if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
         await loadProblemsBadge();
       }
@@ -846,6 +884,10 @@ async function loadJobs() {
     const rate = (active.completed_items / elapsed).toFixed(1);
     $("job-banner").classList.remove("hidden");
     $("job-copy").textContent = `${active.stage || active.kind} · ${active.completed_items}/${active.total_items} (${percent}%) · ${rate}/s · ${active.failed_items || 0} failed · ${active.skipped_items || 0} skipped`;
+    if (active.substage) {
+      const sub = active.substage;
+      $("job-copy").textContent = `${active.kind.replaceAll("_", " ")} · ${active.completed_items}/${active.total_items} · ${sub.item || ""} — ${sub.stage} · ${sub.current}/${sub.total}${sub.rate == null ? "" : ` · ${sub.rate.toFixed(1)} frames/s · ETA ${Math.ceil(sub.eta)} s`}`;
+    }
     $("job-progress").max = Math.max(active.total_items || 1, 1);
     $("job-progress").value = active.completed_items;
     $("cancel-job").onclick = async () => { await api(`/api/jobs/${active.id}/cancel`, { method: "POST" }); };
@@ -857,7 +899,7 @@ async function loadJobs() {
 async function loadProblemsBadge() {
   try {
     const data = await api("/api/problems?limit=500");
-    $("problems-button").classList.toggle("hidden", data.problems.length === 0);
+    $("problems-button").classList.remove("hidden");
     $("problem-count").textContent = data.problems.length ? `(${data.problems.length})` : "";
   } catch (error) {
     $("status").textContent = error.message;
@@ -882,48 +924,112 @@ async function startIndex() {
   catch (error) { $("status").textContent = error.message; }
 }
 
+function renderFilterButtons() {
+  for (const [attr, value] of [["auto", state.auto], ["manual", state.manual], ["type", $("media-type").value], ["layout", state.layout], ["sort", $("sort-by").value]]) {
+    document.querySelectorAll(`[data-${attr}]`).forEach(b => { b.classList.toggle("active", b.dataset[attr] === value); b.setAttribute("aria-pressed", String(b.dataset[attr] === value)); });
+  }
+  $("direction-button").textContent = $("direction").value === "desc" ? "↓" : "↑";
+}
+
+function refreshBrowser() {
+  state.renderKeys = {}; state.browserAbort?.abort(); clearTimeout(state.searchPoll);
+  state.assetRequest++; state.groupRequest++;
+  state.groupPage = 1; state.scrollPositions = {}; window.scrollTo(0, 0);
+  renderFilterButtons();
+  if (state.viewMode === "groups") loadGroups(); else if (state.viewMode === "gallery") loadAssets();
+}
+
 function setupFilters() {
-  $("search-mode").addEventListener("change", () => {
-    state.searchMode = $("search-mode").value === "semantic" ? "semantic" : "filename";
-    $("search").placeholder = state.searchMode === "semantic" ? "Describe what you want to find" : "Filename";
-    state.page = 1;
-    syncUrl();
-    loadAssets();
+  for (const attr of ["auto", "manual", "type", "layout", "sort"]) document.querySelectorAll(`[data-${attr}]`).forEach(b => b.onclick = () => {
+    if (attr === "type") $("media-type").value = b.dataset[attr];
+    else if (attr === "sort") $("sort-by").value = b.dataset[attr];
+    else state[attr] = b.dataset[attr];
+    refreshBrowser();
   });
-  ["folder", "media-type", "sort-by", "direction"].forEach((id) => $(id).addEventListener("change", () => {
-    state.page = 1;
-    state.groupPage = 1;
-    syncUrl();
-    if (state.viewMode === "groups") loadGroups(); else loadAssets();
-  }));
-  document.querySelectorAll("[data-selection-filter]").forEach((button) => button.addEventListener("click", () => {
-    state.selectionFilter = reviewFilters.includes(button.dataset.selectionFilter) ? button.dataset.selectionFilter : "all";
-    state.page = 1;
-    state.groupPage = 1;
-    renderReviewFilters();
-    syncUrl();
-    if (state.viewMode === "groups") loadGroups(); else loadAssets();
-  }));
-  $("page-size").addEventListener("change", () => { state.pageSize = Number($("page-size").value); localStorage.setItem("archive-index-page-size", state.pageSize); state.page = 1; syncUrl(); if (state.viewMode === "groups") loadGroups(); else loadAssets(); });
+  $("direction-button").onclick = () => { $("direction").value = $("direction").value === "desc" ? "asc" : "desc"; refreshBrowser(); };
   let debounce;
-  $("search").addEventListener("input", () => { clearTimeout(debounce); debounce = setTimeout(() => { state.page = 1; state.groupPage = 1; syncUrl(); if (state.viewMode === "groups") loadGroups(); else loadAssets(); }, 250); });
+  $("search").addEventListener("input", () => {
+    clearTimeout(debounce); state.semanticPending = Boolean($("search").value.trim());
+    if (state.semanticPending) {
+      const cold = ["available", "loading"].includes(state.searchState);
+      showSearchStatus({state:cold ? "loading" : "searching", message:cold ? `Loading ${state.searchProvider || "OpenCLIP"}…` : "Searching…"});
+    }
+    $("sort-by").value = state.semanticPending ? "search" : "capture_time"; $("direction").value = "desc";
+    refreshBrowser();
+    if (state.semanticPending) debounce = setTimeout(() => { state.semanticPending = false; refreshBrowser(); }, 500);
+  });
+  $("similarity-threshold").oninput = () => { $("similarity-value").textContent = Number($("similarity-threshold").value).toFixed(2); localStorage.setItem(`archive-threshold-${state.workspace}`, $("similarity-threshold").value); refreshBrowser(); };
+  let thresholdSave = Promise.resolve();
+  $("recommendation-threshold").oninput = () => {
+    state.renderKeys = {};
+    const threshold = Number($("recommendation-threshold").value); $("recommendation-value").textContent = threshold.toFixed(2);
+    thresholdSave = thresholdSave.catch(() => {}).then(() => api("/api/recommendation-threshold", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({threshold})})).then(refreshBrowser).catch(e => {$("status").textContent=e.message;});
+  };
+  const collapse = value => {state.collapsed = value; localStorage.setItem("archive-sidebar-collapsed", value); document.body.classList.toggle("sidebar-collapsed", value); $("sidebar-reopen").classList.toggle("hidden", !value); if(state.viewMode === "gallery") loadAssets();};
+  $("sidebar-collapse").onclick = () => collapse(true); $("sidebar-reopen").onclick = () => collapse(false);
+  $("folder-open").onclick = () => { renderFolderTree(); $("folder-dialog").showModal(); document.body.classList.add("modal-open"); };
+  $("folder-close").onclick = () => closeDialog($("folder-dialog"));
+  $("folders-all").onclick = () => { state.folders = null; renderFolderTree(); refreshBrowser(); };
+  $("folders-none").onclick = () => {state.folders = new Set(); renderFolderTree(); refreshBrowser();};
+  $("folder-dialog").addEventListener("close", () => document.body.classList.remove("modal-open"));
+  bindBackdropClose($("folder-dialog"));
+  $("clear-filters").onclick = () => {state.auto="all";state.manual="all";state.layout="";state.folders=null;state.semanticPending=false;clearTimeout(debounce);$("search").value="";$("media-type").value="";$("sort-by").value="capture_time";$("direction").value="desc";$("folder-summary").textContent="All folders selected";$("similarity-threshold").value="0.20";$("similarity-value").textContent="0.20";localStorage.setItem(`archive-threshold-${state.workspace}`,"0.20");$("recommendation-threshold").value="0.70";$("recommendation-value").textContent="0.70";$("recommendation-threshold").oninput();refreshBrowser();};
+}
+
+function normalizeFolders() {
+  if (state.folders !== null) {
+    state.folders = new Set(state.folderPaths.filter(p => state.folders.has(p)));
+    if (state.folderPaths.length && state.folders.size === state.folderPaths.length) state.folders = null;
+  }
+}
+
+function folderSummary() {
+  if (state.folders === null) return "All folders selected";
+  const count = [...state.folders].filter(Boolean).length;
+  return `${count} ${count === 1 ? "folder" : "folders"} selected`;
+}
+
+function toggleFolder(path, checked) {
+  const all = state.folderPaths;
+  if(path === null && checked) {state.folders=null;return;}
+  const selected = new Set(state.folders === null ? all : state.folders);
+  const descendants = all.filter(p => path === null || p === path || (path && p.startsWith(path+"/")));
+  descendants.forEach(p => checked ? selected.add(p) : selected.delete(p));
+  state.folders = selected; normalizeFolders();
+}
+
+function renderFolderTree() {
+  normalizeFolders();
+  const nodes = [null, ...state.folderPaths];
+  $("folder-tree").innerHTML = nodes.map((path,index) => `<label class="folder-check" style="padding-left:${path === null ? 0 : (path ? path.split("/").length : 1)*18}px"><input type="checkbox" data-folder-index="${index}">${escapeHtml(path === null ? "Workspace root" : path === "" ? "Files directly in root" : path.split("/").pop())}</label>`).join("");
+  $("folder-tree").querySelectorAll("[data-folder-index]").forEach(input => {
+    const path=nodes[Number(input.dataset.folderIndex)];
+    const descendants=state.folderPaths.filter(p => path === null || p === path || (path && p.startsWith(path+"/")));
+    const selected=descendants.filter(p => state.folders === null || state.folders.has(p)).length;
+    input.checked=path === null ? state.folders === null : descendants.length>0 && selected===descendants.length; input.indeterminate=selected>0 && selected<descendants.length;
+    input.onchange=()=>{toggleFolder(path,input.checked); renderFolderTree(); refreshBrowser();};
+  });
+  $("folder-summary").textContent=folderSummary();
 }
 
 function setViewMode(mode, load = true) {
-  state.viewMode = mode === "groups" ? "groups" : "gallery";
-  const groups = state.viewMode === "groups";
-  ["pager-top", "gallery", "pager-bottom"].forEach((id) => $(id).classList.toggle("hidden", groups));
-  $("groups-view").classList.toggle("hidden", !groups);
-  $("gallery-view-toggle").setAttribute("aria-selected", String(!groups));
-  $("groups-view-toggle").setAttribute("aria-selected", String(groups));
-  syncUrl();
-  if (load) (groups ? loadGroups() : loadAssets());
+  const started = performance.now();
+  if(state.workspace) {$("setup-view").classList.add("hidden");$("workspace-view").classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
+  if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
+  state.viewMode = ["groups", "cloud"].includes(mode) ? mode : "gallery";
+  $("gallery").classList.toggle("hidden", mode !== "gallery");
+  $("groups-view").classList.toggle("hidden", mode !== "groups");
+  $("cloud-view").classList.toggle("hidden", mode !== "cloud");
+  for(const [id, value] of [["gallery-view-toggle","gallery"],["groups-view-toggle","groups"],["cloud-view-toggle","cloud"]]) $(id).setAttribute("aria-selected",String(mode===value));
+  syncUrl(); window.scrollTo(0, state.scrollPositions[mode] || 0);
+  const focusing = Boolean(state.focusGroup);
+  if (load) (mode === "groups" ? loadGroups() : mode === "gallery" ? loadAssets() : Promise.resolve()).then(()=>{if(!focusing && state.viewMode===mode) window.scrollTo(0,state.scrollPositions[mode] || 0); requestAnimationFrame(()=>{performance.measure(`navigation:${mode}`,{start:started});console.debug(`navigation:${mode} ${(performance.now()-started).toFixed(1)} ms`);});});
 }
 
 function renderGroup(group) {
   const members = group.members.map((item, index) => {
     const preview = item.thumbnail_url ? `<img class="group-thumb" loading="lazy" src="${item.thumbnail_url}" alt="${escapeHtml(item.filename)}" onerror="this.replaceWith(Object.assign(document.createElement('div'), {className:'group-thumb placeholder', textContent:'Preview unavailable'}))">` : `<div class="group-thumb placeholder">Preview unavailable</div>`;
-    return `<div class="group-member${item.is_representative ? " representative" : ""}${item.auto_recommended ? " recommended" : ""}"><button class="group-photo" type="button" data-group-index="${index}" aria-label="View ${escapeHtml(item.filename)}">${preview}</button><button class="group-info info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="group-caption"><span title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</span>${scoreMarkup(item.quality_score)}<div class="group-state">${selectionStateMarkup(item)}</div><div class="group-actions">${selectionActionsMarkup(item)}</div></div></div>`;
+    return `<div class="group-member${item.is_representative ? " representative" : ""}${item.auto_recommended ? " recommended" : ""}"><button class="group-photo" type="button" data-group-index="${index}" aria-label="View ${escapeHtml(item.filename)}">${preview}</button><button class="group-info info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="group-caption"><span title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</span>${scoreMarkup(item.quality_score)}${similarityMarkup(item)}<div class="group-state">${selectionStateMarkup(item)}</div><div class="group-actions">${selectionActionsMarkup(item)}</div></div></div>`;
   }).join("");
   const memberLabel = `${group.member_count} ${group.member_count === 1 ? "member" : "members"}`;
   return `<section class="group-row" data-group-id="${escapeHtml(group.group_id)}"><div class="group-heading"><strong>${escapeHtml(group.label)}</strong><span class="muted">${memberLabel}</span><span class="muted">${escapeHtml(formatCapture(group.first_capture_time, ""))}</span></div>${members || `<div class="empty">No members</div>`}</section>`;
@@ -932,8 +1038,15 @@ function renderGroup(group) {
 async function loadGroups() {
   const requestId = ++state.groupRequest;
   try {
-    const data = await api(`/api/groups?${filterParams("groups")}`);
+    const params=filterParams();params.set("view","groups");params.set("offset",(state.groupPage-1)*10);params.set("limit",10);
+    const renderKey = String(params);
+    if (state.renderKeys.groups === renderKey && !state.focusGroup) return;
+    const data = await browserData(params);
     if (requestId !== state.groupRequest) return;
+    if (!["loading","searching","failed"].includes(data.search.state)) state.renderKeys.groups = renderKey;
+    data.page=state.groupPage;data.page_size=10;data.run_id="browser";
+    if (requestId !== state.groupRequest) return;
+    state.groupItems=data.groups.flatMap(g=>g.members);
     $("groups-list").innerHTML = data.groups.map(renderGroup).join("") || `<div class="empty">${escapeHtml(data.empty_reason || (data.run_id ? "No groups match these filters." : "Groups have not been built yet."))}</div>`;
     $("groups-status").textContent = data.run_id ? "" : "Run Re-index to build groups.";
     $("groups-list").querySelectorAll(".group-row").forEach((row) => {
@@ -946,12 +1059,12 @@ async function loadGroups() {
     syncUrl();
     if (state.focusGroup) {
       const target = $("groups-list").querySelector(`[data-group-id="${CSS.escape(state.focusGroup)}"]`);
-      if (target) { target.classList.add("focused-group"); target.scrollIntoView({ block: "center", behavior: "smooth" }); setTimeout(() => target.classList.remove("focused-group"), 1800); }
+      if (target) { target.classList.add("focused-group"); target.scrollIntoView({ block: "center", behavior: "instant" }); setTimeout(() => target.classList.remove("focused-group"), 1800); }
       state.focusGroup = null;
       syncUrl();
     }
   } catch (error) {
-    $("groups-status").textContent = error.message;
+    if (error.name !== "AbortError") $("groups-status").textContent = error.message;
   }
 }
 
@@ -969,22 +1082,18 @@ function renderGroupPager(data) {
 }
 
 async function locateCurrentGroup() {
+  const started = performance.now();
   const item = state.viewerItems[state.viewerIndex];
   if (!item?.current_group_id) return;
   const params = filterParams("groups");
   params.set("group_id", item.current_group_id);
-  const target = await api(`/api/groups/locate?${params}`);
+  const target = await api(`/api/browser/locate?${params}`);
   closeDialog($("viewer"));
-  if (!target.found) {
-    $("search").value = "";
-    $("folder").value = "";
-    $("media-type").value = "";
-    state.selectionFilter = "all";
-    renderReviewFilters();
-  }
   state.groupPage = target.found ? target.page : 1;
   state.focusGroup = item.current_group_id;
   setViewMode("groups");
+  performance.measure("navigation:locate",{start:started});
+  console.debug(`navigation:locate ${(performance.now()-started).toFixed(1)} ms`);
 }
 
 $("workspace-form").addEventListener("submit", (event) => { event.preventDefault(); openWorkspace($("workspace-path").value.trim(), false); });
@@ -995,10 +1104,14 @@ $("setup-apply").addEventListener("click", applySetup);
 $("index").addEventListener("click", startIndex);
 $("problems-button").addEventListener("click", showProblems);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
+$("cloud-view-toggle").onclick = () => setViewMode("cloud");
+$("viewer-similar").onclick = () => showSimilar(state.viewerItems[state.viewerIndex].asset_id);
+$("workspace-explorer").onclick = () => revealFile();
+$("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex].preferred_physical_id);
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));
-["top", "bottom"].forEach((place) => { $(`previous-${place}`).addEventListener("click", () => changePage(-1)); $(`next-${place}`).addEventListener("click", () => changePage(1)); });
+
 ["top", "bottom"].forEach((place) => { $(`groups-previous-${place}`).addEventListener("click", () => { state.groupPage = Math.max(1, state.groupPage - 1); syncUrl(); loadGroups().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }); $(`groups-next-${place}`).addEventListener("click", () => { state.groupPage += 1; syncUrl(); loadGroups().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }); });
-$("viewer-close").addEventListener("click", () => closeDialog($("viewer")));
+$("viewer-close").addEventListener("click", () => { if(state.viewerContext === "similar" && state.similarSource) { const source=state.similarSource; state.similarSource=null; showViewer(source.index,source.items,source.context); } else closeDialog($("viewer")); });
 $("viewer-previous").addEventListener("click", () => moveViewer(-1));
 $("viewer-next").addEventListener("click", () => moveViewer(1));
 $("viewer-info").addEventListener("click", () => toggleViewerInfo());
@@ -1062,3 +1175,26 @@ document.addEventListener("keydown", (event) => {
 });
 setupFilters();
 if (state.workspace) { loadWorkspace().catch((error) => $("status").textContent = error.message); setInterval(() => { loadJobs(); loadProblemsBadge(); }, 1500); } else { loadHome().catch((error) => $("home-status").textContent = error.message); }
+
+async function revealFile(file_id) {
+  try { await api("/api/reveal", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file_id})}); }
+  catch(error) {$("status").textContent=error.message;}
+}
+document.addEventListener("click", event => {const button=event.target.closest("[data-reveal]");if(button) revealFile(button.dataset.reveal);});
+let scrollTimer;
+window.addEventListener("scroll", () => {
+  if(state.viewMode!=="gallery" || $("workspace-view").classList.contains("hidden") || $("viewer").open) return;
+  clearTimeout(scrollTimer); scrollTimer=setTimeout(()=>{
+    const top=$("gallery").getBoundingClientRect().top+window.scrollY;
+    const start=Math.max(0,Math.floor((window.scrollY-top)/state.windowHeight)-2)*state.windowColumns;
+    if(start!==state.windowStart) loadAssets();
+  },70);
+}, {passive:true});
+
+$("viewer").addEventListener("cancel", event => {
+  if(state.viewerContext === "similar" && state.similarSource) {event.preventDefault();const source=state.similarSource;state.similarSource=null;showViewer(source.index,source.items,source.context);}
+});
+
+$("viewer").addEventListener("close", stopViewerMedia);
+$("viewer").addEventListener("cancel", () => {if(state.viewerContext !== "similar") stopViewerMedia();});
+window.addEventListener("pagehide", stopViewerMedia);

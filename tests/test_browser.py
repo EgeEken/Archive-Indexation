@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from PIL import Image
+
+from archive_index.api.server import _browser_assets, _asset_detail, _set_user_decision, _search_status
+from archive_index.embeddings.search import SearchResult, search_text, clear_search_sessions, _text_vectors
+from archive_index.indexing.scanner import scan
+from archive_index.indexing.media_pipeline import index_workspace
+from archive_index.indexing.grouping import extract_visual_features, build_groups
+from archive_index.indexing.recommendation import build_recommendations
+from archive_index.indexing.embeddings import index_embeddings
+from archive_index.jobs.engine import report_substage, SUBSTAGES
+from archive_index.media.quality_provider import OffQualityProvider
+from archive_index.workspace import Workspace
+from test_embeddings import FakeProvider
+
+
+class BrowserTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        (root / "nested" / "child").mkdir(parents=True)
+        for name, size in [("filename.jpg", (80,40)), ("nested/other.jpg", (40,80)), ("nested/child/third.jpg", (60,40))]:
+            Image.new("RGB", size, "red").save(root / name)
+        self.workspace = Workspace.create(root)
+        scan(self.workspace)
+        index_workspace(self.workspace, components=("metadata", "thumbnail"), quality_provider=OffQualityProvider())
+        self.items = _browser_assets(self.workspace, {}, "test")["items"]
+        self.ids = {item["filename"]: item["asset_id"] for item in self.items}
+
+    def browser(self, **params):
+        return _browser_assets(self.workspace, {key:[str(value)] for key,value in params.items()}, "test")
+
+    def test_merge_priority_threshold_and_no_duplicate_assets(self):
+        scores = [SearchResult(self.ids["other.jpg"], .9), SearchResult(self.ids["filename.jpg"], .01), SearchResult(self.ids["third.jpg"], .3)]
+        with patch("archive_index.api.server._search_status", return_value={"state":"ready","message":"Ready"}), patch("archive_index.api.server.search_text", return_value=scores) as search:
+            data = self.browser(q="filename", threshold=.5, sort_by="search")
+            self.assertEqual([i["filename"] for i in data["items"]], ["filename.jpg", "other.jpg"])
+            self.assertEqual(data["items"][0]["similarity"], .01)
+            self.assertTrue(data["items"][0]["filename_match"])
+            window = self.browser(q="filename", threshold=.5, sort_by="search", offset=1, limit=1)
+            self.assertEqual(window["items"][0]["filename"], "other.jpg")
+            self.assertEqual(search.call_count, 1)
+            self.assertEqual(len({i["asset_id"] for i in data["items"]}), data["total"])
+
+    def test_filename_without_model_has_no_fabricated_similarity(self):
+        result = self.browser(q="filename")
+        self.assertEqual(result["total"], 1)
+        self.assertIsNone(result["items"][0]["similarity"])
+        self.assertEqual(result["search"]["state"], "unavailable")
+
+    def test_folders_layout_windows_and_timestamp_contract(self):
+        self.assertEqual(self.browser(folders=json.dumps([]))["total"], 0)
+        nested = self.browser(folders=json.dumps(["nested", "nested/child"]))
+        self.assertEqual(nested["total"], 2)
+        self.assertEqual(self.browser(layout="vertical")["items"][0]["filename"], "other.jpg")
+        first = self.browser(limit=1)
+        second = self.browser(limit=1, offset=1)
+        self.assertNotEqual(first["items"][0]["asset_id"], second["items"][0]["asset_id"])
+        self.assertIn("capture_time", first["items"][0])
+        self.assertIn("width", first["items"][0])
+
+    def test_manual_decisions_survive_filters_and_threshold_configuration(self):
+        asset_id = self.ids["filename.jpg"]
+        for decision in ("selected", "undecided", "rejected", "undecided", "selected", "rejected"):
+            _set_user_decision(self.workspace, asset_id, decision)
+            self.assertEqual(_asset_detail(self.workspace, asset_id, "test")["user_decision"], decision)
+        config = self.workspace.configuration()
+        config["recommendation_threshold"] = .95
+        self.workspace.apply_configuration(config)
+        self.browser(q="filename", manual="rejected", threshold=.99)
+        self.assertEqual(_asset_detail(self.workspace, asset_id, "test")["user_decision"], "rejected")
+        self.assertEqual(Workspace.open(self.workspace.root).configuration()["recommendation_threshold"], .95)
+
+    def test_recommendations_derive_from_group_representative_and_threshold(self):
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE logical_asset SET capture_time = '2026-09-03T12:00:00', capture_time_kind = 'exif_local_unknown'")
+            connection.execute("UPDATE physical_file SET quality_score = 0.8")
+        extract_visual_features(self.workspace)
+        build_groups(self.workspace)
+        build_recommendations(self.workspace)
+        data = self.browser(auto="recommended")
+        self.assertGreater(data["total"], 0)
+        self.assertEqual(len({i["current_group_id"] for i in data["items"]}), data["total"])
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE workspace_config SET recommendation_threshold = 0.9")
+        self.assertEqual(self.browser(auto="recommended")["total"], 0)
+
+    def test_video_singletons_and_shared_filters(self):
+        (self.workspace.root / "video.mp4").write_bytes(b"fixture")
+        scan(self.workspace)
+        data = self.browser(view="groups", media_type="video")
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["groups"][0]["member_count"], 1)
+        self.assertEqual(data["groups"][0]["members"][0]["media_type"], "video")
+
+    def test_query_vector_and_ranking_reuse(self):
+        config = self.workspace.configuration(); config["semantic_search_enabled"] = True
+        self.workspace.apply_configuration(config)
+        provider = FakeProvider()
+        index_embeddings(self.workspace, provider=provider)
+        clear_search_sessions(); _text_vectors.clear()
+        self.addCleanup(clear_search_sessions)
+        with patch("archive_index.embeddings.search.create_embedding_provider", return_value=provider) as create, patch.object(provider, "encode_text", wraps=provider.encode_text) as encode:
+            first = search_text(self.workspace, "query", top_k=1)
+            second = search_text(self.workspace, "query", top_k=3)
+            self.assertEqual(first, second[:1])
+            self.assertEqual(encode.call_count, 1)
+            self.assertEqual(create.call_count, 1)
+            search_text(self.workspace, "different", top_k=3)
+            self.assertEqual(create.call_count, 1)
+
+    def test_missing_model_and_missing_embeddings_states(self):
+        config=self.workspace.configuration();config["semantic_search_enabled"]=True
+        self.workspace.apply_configuration(config)
+        with patch("archive_index.api.server.model_status", return_value={"installed":False}):
+            self.assertEqual(_search_status(self.workspace)["state"], "missing_model")
+        with patch("archive_index.api.server.model_status", return_value={"installed":True}):
+            self.assertEqual(_search_status(self.workspace)["state"], "missing_embeddings")
+
+    def test_substage_does_not_fabricate_rate(self):
+        report_substage("test-job", "Extracting frames", 0, 32, "video.mp4")
+        self.assertIsNone(SUBSTAGES["test-job"]["rate"])
+        self.assertIsNone(SUBSTAGES["test-job"]["eta"])
+        self.assertEqual(SUBSTAGES["test-job"]["total"], 32)

@@ -140,22 +140,38 @@ class OpenCLIPProvider(EmbeddingProvider):
                 "OpenCLIP B/16 model is not installed; run `archive-index model install openclip-b16`"
             )
         try:
+            started = perf_counter()
             import open_clip
             import torch
+            self._record_timing("load.imports", perf_counter() - started)
         except ImportError as error:
             raise EmbeddingProviderUnavailable("install the embeddings extra before using OpenCLIP") from error
         try:
+            started = perf_counter()
             model, _, preprocess = open_clip.create_model_and_transforms(
                 self.model_id,
-                pretrained=OPENCLIP_CHECKPOINT,
+                pretrained=None,
                 cache_dir=str(model_cache_dir(self.provider_id)),
-                device="cuda" if torch.cuda.is_available() else "cpu",
+                device="cpu",
             )
+            self._record_timing("load.model_and_transforms", perf_counter() - started)
+            started = perf_counter()
+            checkpoint = next(path for path in model_cache_dir(self.provider_id).rglob("*")
+                              if path.name in {"open_clip_pytorch_model.bin", "open_clip_model.safetensors"})
+            open_clip.load_checkpoint(model, str(checkpoint))
+            self._record_timing("load.checkpoint", perf_counter() - started)
+            started = perf_counter()
+            model.to("cuda" if torch.cuda.is_available() else "cpu")
+            if next(model.parameters()).is_cuda:
+                torch.cuda.synchronize()
+            self._record_timing("load.device_transfer", perf_counter() - started)
             model.eval()
             self._torch = torch
             self._model = model
             self._preprocess = preprocess
+            started = perf_counter()
             self._tokenizer = open_clip.get_tokenizer(self.model_id)
+            self._record_timing("load.tokenizer", perf_counter() - started)
             self._device = next(model.parameters()).device
         except Exception as error:
             raise EmbeddingProviderUnavailable(f"OpenCLIP could not be loaded: {error}") from error

@@ -19,7 +19,7 @@ from time import monotonic, perf_counter
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from ..jobs.engine import JobProgress, JobRunResult, JobStore, run_items
+from ..jobs.engine import report_substage, JobProgress, JobRunResult, JobStore, run_items
 from ..media.metadata import MetadataExtractionError, UnsupportedDecoderError
 from ..media.quality_provider import (
     LAR_IQA_CHECKPOINT_SHA256,
@@ -111,14 +111,22 @@ def extract_video_frames(
     cancel_event: Event | None = None,
     timings: dict[str, float] | None = None,
     seek_per_frame: bool = False,
+    progress=None,
 ) -> list[ExtractedVideoFrame]:
     if not timestamps:
         return []
     if seek_per_frame:
-        return [
-            _extract_video_frame_seek(source, timestamp, cancel_event, timings)
-            for timestamp in timestamps
-        ]
+        frames = []
+        try:
+            for timestamp in timestamps:
+                frames.append(_extract_video_frame_seek(source, timestamp, cancel_event, timings))
+                if progress:
+                    progress(len(frames), len(timestamps))
+            return frames
+        except Exception:
+            for frame in frames:
+                frame.image.close()
+            raise
     with TemporaryDirectory(prefix="archive-index-video-") as temporary_directory:
         output_pattern = str(Path(temporary_directory) / "sample-%05d.png")
         command = [
@@ -157,6 +165,8 @@ def extract_video_frames(
                     _, stderr = process.communicate(timeout=0.25)
                     break
                 except subprocess.TimeoutExpired:
+                    if progress:
+                        progress(max(0, len(list(Path(temporary_directory).glob("sample-*.png"))) - 1), len(timestamps))
                     if monotonic() - extraction_start >= VIDEO_EXTRACTION_TIMEOUT_SECONDS:
                         _stop_process(process)
                         raise MetadataExtractionError(f"video frame extraction timed out: {source}")
@@ -187,6 +197,8 @@ def extract_video_frames(
                 raise MetadataExtractionError(f"ffmpeg returned an invalid video frame: {source}") from error
         if timings is not None:
             timings["png_decode"] = timings.get("png_decode", 0.0) + monotonic() - decode_start
+        if progress:
+            progress(len(frames), len(timestamps))
         return frames
 
 
@@ -347,6 +359,7 @@ def index_video_quality(
                 settings,
                 cancel_event,
                 timings,
+                (lambda stage, current, total: report_substage(job_id, stage, current, total, row["filename"])) if job_id else None,
             )
         except Exception as error:
             _mark_failed(workspace, row, algorithm, version, settings, error)
@@ -401,7 +414,7 @@ def video_quality_details(workspace: Workspace, physical_file_id: str) -> dict[s
     }
 
 
-def _process_video(workspace, row, provider, algorithm, version, settings, cancel_event, timings=None):
+def _process_video(workspace, row, provider, algorithm, version, settings, cancel_event, timings=None, substage=None):
     duration = row["duration_seconds"]
     count = sample_count(
         float(duration) if duration is not None else 0.0,
@@ -444,6 +457,9 @@ def _process_video(workspace, row, provider, algorithm, version, settings, cance
                 cancel_event,
             )
             extract_kwargs = {}
+            if substage:
+                substage("Extracting frames", 0, len(pending_samples))
+                extract_kwargs["progress"] = lambda current, total: substage("Extracting frames", current, total)
             if float(duration) > VIDEO_SINGLE_PROCESS_MAX_DURATION_SECONDS:
                 extract_kwargs["seek_per_frame"] = True
             if timings is not None:
@@ -459,6 +475,9 @@ def _process_video(workspace, row, provider, algorithm, version, settings, cance
             extracted = []
         else:
             extraction_error = None
+        assessed = 0
+        if substage:
+            substage("Assessing frames", 0, len(extracted))
         for sample, extracted_frame in zip(pending_samples, extracted):
             actual_timestamp = extracted_frame.actual_timestamp
             timestamp_error = (
@@ -477,6 +496,9 @@ def _process_video(workspace, row, provider, algorithm, version, settings, cance
             frame_rows.append(sample)
             if len(frames) >= batch_size:
                 _score_batch(workspace, run["id"], frame_rows, frames, provider, timings)
+                assessed += len(frames)
+                if substage:
+                    substage("Assessing frames", assessed, len(extracted))
                 frames.clear()
                 frame_rows.clear()
         if len(extracted) < len(pending_samples):
@@ -490,6 +512,9 @@ def _process_video(workspace, row, provider, algorithm, version, settings, cance
                 )
         if frames:
             _score_batch(workspace, run["id"], frame_rows, frames, provider, timings)
+            assessed += len(frames)
+            if substage:
+                substage("Assessing frames", assessed, len(extracted))
         if cancel_event is not None and cancel_event.is_set():
             _mark_cancelled(workspace, row["id"], run["id"])
             return "cancelled"

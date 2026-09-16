@@ -8,11 +8,11 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><a href="/">Archive Indexation</a><span id="workspace-crumb" class="crumb hidden"></span></div>
+    <div class="brand"><a href="/">Archive Indexation</a><span id="workspace-crumb" class="crumb hidden"></span><button id="workspace-explorer" class="explorer-button hidden" aria-label="Open workspace in Explorer">📁</button></div>
+    <div id="workspace-tabs" class="view-tabs hidden" role="tablist"><button id="gallery-view-toggle" role="tab">Gallery</button><button id="groups-view-toggle" role="tab">Groupings</button><button id="cloud-view-toggle" role="tab">Cloud Map</button></div>
     <nav>
       <button id="configure-workspace" class="secondary hidden" type="button">Configure</button>
       <button id="index" class="primary-action hidden" type="button">Re-index</button>
-      <button id="problems-button" class="secondary hidden" type="button">Problems <span id="problem-count"></span></button>
     </nav>
   </header>
   <main>
@@ -28,24 +28,29 @@
     </section>
 
     <section id="workspace-view" class="hidden">
-      <div class="workspace-line"><div id="workspace-summary" class="muted"></div><div id="workspace-current-path" class="muted"></div></div>
-      <section id="filters" class="filters" aria-label="Gallery filters">
-        <label>Search mode<select id="search-mode"><option value="filename">Filename</option><option value="semantic">Semantic</option></select></label>
-        <label>Search<input id="search" type="search" placeholder="Filename" autocomplete="off"></label>
-        <label>Folder<select id="folder"><option value="">All folders</option></select></label>
-        <label>Type<select id="media-type"><option value="">All media</option><option value="image">Images</option><option value="video">Videos</option></select></label>
-        <label>Sort by<select id="sort-by"><option value="capture_time">Capture time</option><option value="quality">Technical quality</option><option value="filename">Filename</option></select></label>
-        <label>Direction<select id="direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select></label>
-        <label>Page size<select id="page-size"><option value="60">60</option><option value="120">120</option><option value="180">180</option></select></label>
-      </section>
-      <div class="view-tabs" role="tablist" aria-label="Workspace views"><button id="gallery-view-toggle" class="secondary" type="button" role="tab">Gallery</button><button id="groups-view-toggle" class="secondary" type="button" role="tab">Groups</button></div>
-      <section class="review-controls" aria-label="Review filters"><span class="review-label">Review:</span><div id="review-filter-buttons" class="review-filter-buttons" role="group" aria-label="Review filters"><button type="button" data-selection-filter="all">All</button><button type="button" data-selection-filter="representatives">Representatives</button><button type="button" data-selection-filter="recommended">Recommended</button><button type="button" data-selection-filter="selected">Selected</button><button type="button" data-selection-filter="rejected">Rejected</button><button type="button" data-selection-filter="undecided">Undecided</button></div></section>
+      <button id="sidebar-reopen" class="sidebar-reopen hidden" aria-label="Open filters">☰</button>
+      <aside id="filters" class="filters" aria-label="Gallery filters">
+        <div class="sidebar-heading"><strong>Filters</strong><button id="sidebar-collapse" class="icon" aria-label="Collapse filters">‹</button></div>
+        <label class="search-field"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search" autocomplete="off" aria-label="Search"></label>
+        <div id="search-status" class="search-status" role="status"></div><div id="search-count" class="muted"></div>
+        <label>Similarity threshold <output id="similarity-value">0.20</output><input id="similarity-threshold" type="range" min="0" max="1" step="0.01" value="0.20"></label>
+        <div class="button-row" id="sort-buttons"><button data-sort="capture_time">Time</button><button data-sort="quality">Quality</button><button data-sort="search">Search</button><button id="direction-button" aria-label="Toggle sort direction">↓</button></div>
+        <input id="sort-by" type="hidden" value="capture_time"><input id="direction" type="hidden" value="desc">
+        <button id="folder-open" class="secondary">Folders: 📁 <span id="folder-summary">All folders selected</span></button>
+        <label>Auto Review</label><div class="button-row"><button data-auto="all">All</button><button data-auto="representatives">Representative</button><button data-auto="recommended">Recommended</button></div>
+        <label>Recommendation threshold <output id="recommendation-value">0.70</output><input id="recommendation-threshold" type="range" min="0" max="1" step="0.01" value="0.70"></label>
+        <label>Manual Review</label><div class="button-row"><button data-manual="all">All</button><button data-manual="undecided">Undecided</button><button data-manual="selected">Selected</button><button data-manual="rejected">Rejected</button></div>
+        <label>Type</label><div class="button-row"><button data-type="">All</button><button data-type="image">Images</button><button data-type="video">Videos</button></div><input id="media-type" type="hidden">
+        <label>Layout</label><div class="button-row"><button data-layout="">All</button><button data-layout="horizontal">Horizontal</button><button data-layout="vertical">Vertical</button></div>
+        <button id="clear-filters" class="secondary">Clear filters</button>
+      </aside>
+      <div id="browser-content">
       <section id="job-banner" class="job-banner hidden" aria-live="polite"><div id="job-copy" class="job-copy"></div><button id="cancel-job" class="secondary" type="button">Cancel</button><progress id="job-progress" max="1" value="0" aria-label="Indexing progress"></progress></section>
       <div id="status" class="status" role="status"></div>
-      <div id="pager-top" class="pager"><button id="previous-top" class="secondary" type="button" aria-label="Previous page">‹</button><div class="pager-info"><strong id="page-label-top"></strong><span id="range-label-top" class="pager-range"></span></div><button id="next-top" class="secondary" type="button" aria-label="Next page">›</button></div>
       <section id="gallery" class="gallery" aria-live="polite"></section>
-      <div id="pager-bottom" class="pager"><button id="previous-bottom" class="secondary" type="button" aria-label="Previous page">‹</button><div class="pager-info"><strong id="page-label-bottom"></strong><span id="range-label-bottom" class="pager-range"></span></div><button id="next-bottom" class="secondary" type="button" aria-label="Next page">›</button></div>
       <section id="groups-view" class="hidden" aria-live="polite"><div id="groups-status" class="status"></div><div id="groups-pager-top" class="pager"><button id="groups-previous-top" class="secondary" type="button" aria-label="Previous group page">‹</button><div class="pager-info"><strong id="groups-page-label-top"></strong><span id="groups-range-label-top" class="pager-range"></span></div><button id="groups-next-top" class="secondary" type="button" aria-label="Next group page">›</button></div><div id="groups-list"></div><div id="groups-pager-bottom" class="pager"><button id="groups-previous-bottom" class="secondary" type="button" aria-label="Previous group page">‹</button><div class="pager-info"><strong id="groups-page-label-bottom"></strong><span id="groups-range-label-bottom" class="pager-range"></span></div><button id="groups-next-bottom" class="secondary" type="button" aria-label="Next group page">›</button></div></section>
+      <section id="cloud-view" class="empty hidden"><h2>Cloud Map</h2><p>Not implemented yet.</p></section>
+      </div>
     </section>
 
     <section id="setup-view" class="hidden">
@@ -55,11 +60,13 @@
       <section class="setup-section panel"><h2>2. Video</h2><label class="setup-toggle"><input id="setup-include-videos" type="checkbox"> Index supported video files</label><label class="setup-toggle"><input id="setup-video-quality" type="checkbox"> Assess video quality</label><div class="video-sampling-controls"><label>Target samples per second<input id="setup-video-fps" type="number" min="0.1" max="60" step="0.1"></label><label>Minimum frames<input id="setup-video-min-frames" type="number" min="1" max="256" step="1"></label><label>Maximum frames<input id="setup-video-max-frames" type="number" min="1" max="256" step="1"></label></div><p id="setup-video-note" class="muted">Video thumbnails use a center frame. Enabled video quality uses uniformly spaced frame samples; exact sample counts are determined from duration.</p></section>
       <section class="setup-section panel"><h2>3. Quality</h2><label>Rendered-image quality<select id="setup-rendered-quality-provider"><option value="lar-iqa">Lightweight LAR-IQA</option><option value="off">Off</option></select></label><label>RAW-only quality<select id="setup-raw-quality-provider"><option value="off">Off</option><option value="lar-iqa">Lightweight LAR-IQA</option></select></label><p id="setup-quality-note" class="muted"></p></section>
       <section class="setup-section panel"><h2>4. Semantic search</h2><label class="setup-toggle"><input id="setup-semantic-search" type="checkbox"> Enable semantic search</label><label>Embedding model<select id="setup-embedding-provider"><option value="openclip-b16-datacomp-xl">OpenCLIP B/16 — Lightweight</option><option value="siglip2-base-patch16-224">SigLIP2 Base — Higher quality</option></select></label><p id="setup-embedding-status" class="muted"></p><p id="setup-embedding-note" class="muted">Semantic models are installed explicitly and are never downloaded during ordinary indexing.</p></section>
+      <section class="setup-section panel"><h2>Diagnostics</h2><button id="problems-button" class="secondary">Diagnostics <span id="problem-count"></span></button></section>
       <section class="setup-section panel"><h2>Plan</h2><div id="setup-plan" class="setup-plan"></div><div class="setup-actions"><button id="setup-apply" class="primary-action" type="button">Apply &amp; index</button></div></section>
     </section>
   </main>
 
-  <dialog id="viewer" class="viewer" aria-labelledby="viewer-title"><div class="viewer-inner"><div class="viewer-top"><div id="viewer-title" class="viewer-title"></div><div class="viewer-controls"><button id="viewer-grouping" class="hidden" type="button">Grouping</button><button id="viewer-info" type="button">Info</button><button id="viewer-close" type="button">Close</button></div></div><div id="viewer-stage" class="viewer-stage"><button id="viewer-previous" type="button" aria-label="Previous image">‹</button><div id="viewer-media-pane" class="viewer-media-pane"><div id="viewer-media"></div></div><aside id="viewer-details" class="viewer-details hidden"></aside><button id="viewer-next" type="button" aria-label="Next image">›</button></div><div class="viewer-bottom"><span id="viewer-count" class="muted"></span><div id="viewer-selection"></div><label id="smooth-control" class="smooth-control"><input id="viewer-smooth" type="checkbox" checked> Smooth</label></div></div></dialog>
+  <dialog id="viewer" class="viewer" aria-labelledby="viewer-title"><div class="viewer-inner"><div class="viewer-top"><div id="viewer-title" class="viewer-title"></div><div class="viewer-controls"><button id="viewer-similar" type="button">Find similar</button><button id="viewer-grouping" class="hidden" type="button">See group</button><button id="viewer-explorer" type="button">Show in Explorer</button><button id="viewer-info" type="button">Info</button><button id="viewer-close" type="button">Close</button></div></div><div id="viewer-stage" class="viewer-stage"><button id="viewer-previous" type="button" aria-label="Previous image">‹</button><div id="viewer-media-pane" class="viewer-media-pane"><div id="viewer-media"></div></div><aside id="viewer-details" class="viewer-details hidden"></aside><button id="viewer-next" type="button" aria-label="Next image">›</button></div><div class="viewer-bottom"><span id="viewer-count" class="muted"></span><div id="viewer-selection"></div><label id="smooth-control" class="smooth-control"><input id="viewer-smooth" type="checkbox" checked> Smooth</label></div><section id="similar-gallery" class="hidden"></section></div></dialog>
+  <dialog id="folder-dialog"><div class="dialog-inner"><div class="dialog-header"><h2>Folders</h2><button id="folder-close" class="icon" aria-label="Close folders">×</button></div><div id="folder-tree"></div><div class="folder-actions"><button id="folders-none">Deselect all</button><button id="folders-all">Select all</button></div></div></dialog>
   <dialog id="details" aria-labelledby="details-title"></dialog>
   <dialog id="problems-dialog" aria-labelledby="problems-title"></dialog>
   <dialog id="remove-workspace-dialog" aria-labelledby="remove-workspace-title"></dialog>
