@@ -515,14 +515,14 @@ def _index_media_batches(
                 ):
                     pending.append(component)
             if pending:
-                pending_rows.append(row)
+                pending_rows.append((row, pending))
             else:
                 outcomes[row["id"]] = "skipped"
         if not pending_rows:
             return outcomes
         _mark_components_running_batch(workspace, pending_rows, provider)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            batch_results = list(pool.map(prepare, pending_rows))
+            batch_results = list(pool.map(prepare, (row for row, _ in pending_rows)))
         for result in batch_results:
             if timings is not None:
                 for name, seconds in result["timings"].seconds.items():
@@ -581,8 +581,8 @@ def _index_media_batches(
 def _mark_components_running_batch(workspace: Workspace, rows, provider: QualityProvider) -> None:
     now = _timestamp()
     with workspace.transaction() as connection:
-        for row in rows:
-            for component in (METADATA_COMPONENT, THUMBNAIL_COMPONENT):
+        for row, pending in rows:
+            for component in pending:
                 algorithm, version = _provenance(component, row["media_type"], provider, row["extension"])
                 connection.execute(
                     """

@@ -65,6 +65,51 @@ class MediaPipelineTests(unittest.TestCase):
                 ).fetchall()
             self.assertEqual({(row[0], row[1]) for row in statuses}, {("metadata", "complete"), ("thumbnail", "complete")})
 
+    def test_batch_marks_only_thumbnail_when_metadata_is_current(self) -> None:
+        workspace = self._indexed_photo_workspace()
+        self._make_component_stale(workspace, "thumbnail")
+
+        result, snapshots = self._reindex_with_running_snapshot(workspace)
+
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(snapshots, [{"metadata": "complete", "thumbnail": "running"}])
+        self.assertEqual(self._component_statuses(workspace), {"metadata": "complete", "thumbnail": "complete"})
+
+    def test_batch_marks_only_metadata_when_thumbnail_is_current(self) -> None:
+        workspace = self._indexed_photo_workspace()
+        self._make_component_stale(workspace, "metadata")
+
+        result, snapshots = self._reindex_with_running_snapshot(workspace)
+
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(snapshots, [{"metadata": "running", "thumbnail": "complete"}])
+        self.assertEqual(self._component_statuses(workspace), {"metadata": "complete", "thumbnail": "complete"})
+
+    def test_batch_processes_both_components_when_both_are_pending(self) -> None:
+        workspace = self._indexed_photo_workspace()
+        self._make_component_stale(workspace, "metadata")
+        self._make_component_stale(workspace, "thumbnail")
+
+        result, snapshots = self._reindex_with_running_snapshot(workspace)
+
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(snapshots, [{"metadata": "running", "thumbnail": "running"}])
+        self.assertEqual(self._component_statuses(workspace), {"metadata": "complete", "thumbnail": "complete"})
+
+    def test_repeated_media_reindex_is_idempotent_after_component_recovery(self) -> None:
+        workspace = self._indexed_photo_workspace()
+        self._make_component_stale(workspace, "metadata")
+        self._make_component_stale(workspace, "thumbnail")
+
+        first, first_snapshots = self._reindex_with_running_snapshot(workspace)
+        second, second_snapshots = self._reindex_with_running_snapshot(workspace)
+
+        self.assertEqual(first.errors, 0)
+        self.assertEqual(first_snapshots, [{"metadata": "running", "thumbnail": "running"}])
+        self.assertEqual((second.errors, second.skipped), (0, 1))
+        self.assertEqual(second_snapshots, [])
+        self.assertEqual(self._component_statuses(workspace), {"metadata": "complete", "thumbnail": "complete"})
+
     def test_parallel_media_path_isolates_one_thumbnail_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
@@ -602,6 +647,50 @@ class MediaPipelineTests(unittest.TestCase):
                     """
                 ).fetchone()[0]
             self.assertEqual(state, "unsupported")
+
+    def _indexed_photo_workspace(self) -> Workspace:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name) / "archive"
+        root.mkdir()
+        _write_image(root / "photo.jpg", size=(640, 480))
+        workspace = Workspace.create(root)
+        scan(workspace)
+        result = index_workspace(workspace, components=("metadata", "thumbnail"))
+        self.assertEqual(result.errors, 0)
+        return workspace
+
+    def _make_component_stale(self, workspace: Workspace, component: str) -> None:
+        with workspace.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE component_state
+                SET status = 'failed', version = 'stale-test', error_message = 'stale test state'
+                WHERE component = ?
+                """,
+                (component,),
+            )
+
+    def _reindex_with_running_snapshot(self, workspace: Workspace):
+        from archive_index.indexing import media_pipeline
+
+        snapshots = []
+        original = media_pipeline._mark_components_running_batch
+
+        def mark_running(workspace_arg, rows, provider):
+            original(workspace_arg, rows, provider)
+            snapshots.append(self._component_statuses(workspace_arg))
+
+        with patch.object(media_pipeline, "_mark_components_running_batch", side_effect=mark_running):
+            result = index_workspace(workspace, components=("metadata", "thumbnail"))
+        return result, snapshots
+
+    def _component_statuses(self, workspace: Workspace) -> dict[str, str]:
+        with closing(workspace.connect()) as connection:
+            rows = connection.execute(
+                "SELECT component, status FROM component_state ORDER BY component"
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
 
 
 def _write_image(
