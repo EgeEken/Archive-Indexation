@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from threading import Event
 from unittest.mock import patch
@@ -12,6 +13,22 @@ from archive_index.workspace import Workspace
 
 
 class ScannerTests(unittest.TestCase):
+    def test_scan_persists_filesystem_creation_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            workspace = Workspace.create(root)
+
+            scan(workspace)
+
+            with closing(workspace.connect()) as connection:
+                stored = connection.execute(
+                    "SELECT file_created_time FROM physical_file WHERE relative_path = 'photo.jpg'"
+                ).fetchone()[0]
+            self.assertEqual(stored, scanner._file_created_time(photo.stat()))
+
     def test_initial_scan_excludes_index_and_unsupported_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"

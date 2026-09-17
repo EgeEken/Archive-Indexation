@@ -19,7 +19,7 @@ IMAGE_THUMBNAIL_VERSION = "pillow-jpeg-v2"
 VIDEO_THUMBNAIL_ALGORITHM = "ffmpeg-center-frame-jpeg"
 VIDEO_THUMBNAIL_VERSION = "ffmpeg-center-frame-jpeg-v2"
 RAW_THUMBNAIL_ALGORITHM = "rawpy-preview-jpeg"
-RAW_THUMBNAIL_VERSION = "rawpy-preview-jpeg-v1"
+RAW_THUMBNAIL_VERSION = "rawpy-preview-jpeg-v2"
 THUMBNAIL_JPEG_QUALITY = 50
 THUMBNAIL_VERSION = IMAGE_THUMBNAIL_VERSION
 

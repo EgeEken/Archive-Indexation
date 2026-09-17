@@ -18,7 +18,7 @@ from archive_index.indexing.media_pipeline import index_workspace as run_index_w
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
 from archive_index.indexing.reconciliation import reconcile_workspace
-from archive_index.indexing.scanner import scan
+from archive_index.indexing.scanner import _file_created_time, scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
 from archive_index.media.quality_provider import LegacyPillowProvider, OffQualityProvider
@@ -254,6 +254,7 @@ class ApiTests(unittest.TestCase):
         physical = detail["physical_files"][0]
         self.assertEqual(physical["relative_path"], "root.jpg")
         self.assertEqual(physical["absolute_path"], str(self.workspace.root / "root.jpg"))
+        self.assertEqual(physical["file_created_time"], _file_created_time((self.workspace.root / "root.jpg").stat()))
         self.assertEqual(physical["components"]["metadata"]["status"], "complete")
         self.assertEqual(physical["components"]["thumbnail"]["status"], "complete")
         self.assertEqual(physical["components"]["quality"]["status"], "complete")
@@ -417,6 +418,18 @@ class ApiTests(unittest.TestCase):
                 for group in groups["groups"]
                 for member in group["members"]
             )
+        )
+        status, filename_groups = _get_json(self.base_url, "/api/groups?sort_by=filename&direction=asc")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [group["members"][0]["filename"] for group in filename_groups["groups"]],
+            ["nested.jpg", "root.jpg"],
+        )
+        status, reverse_filename_groups = _get_json(self.base_url, "/api/groups?sort_by=filename&direction=desc")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [group["members"][0]["filename"] for group in reverse_filename_groups["groups"]],
+            ["root.jpg", "nested.jpg"],
         )
 
         status, filtered = _get_json(self.base_url, "/api/groups?q=root.jpg")

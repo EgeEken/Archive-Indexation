@@ -25,6 +25,24 @@ def index_workspace(workspace, *args, **kwargs):
 
 
 class MediaPipelineTests(unittest.TestCase):
+    def test_small_image_indexes_metadata_thumbnail_and_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "small.jpg", size=(48, 32))
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            result = index_workspace(workspace, components=("metadata", "thumbnail", "quality"))
+
+            self.assertEqual((result.succeeded, result.errors), (1, 0))
+            row, states = _file_and_states(workspace)
+            thumbnail_path = workspace.index_path(states["thumbnail"]["output_path"])
+            with Image.open(thumbnail_path) as thumbnail:
+                self.assertEqual(thumbnail.size, (48, 32))
+            self.assertEqual((row["width"], row["height"]), (48, 32))
+            self.assertIsNotNone(row["quality_score"])
+
     def test_parallel_media_path_batches_thumbnail_work_and_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"

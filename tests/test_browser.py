@@ -56,6 +56,18 @@ class BrowserTests(unittest.TestCase):
         self.assertIsNone(result["items"][0]["similarity"])
         self.assertEqual(result["search"]["state"], "unavailable")
 
+    def test_filename_sort_is_lexical_in_gallery(self):
+        ascending = self.browser(sort_by="filename", direction="asc")
+        descending = self.browser(sort_by="filename", direction="desc")
+        self.assertEqual(
+            [item["filename"] for item in ascending["items"]],
+            ["filename.jpg", "other.jpg", "third.jpg"],
+        )
+        self.assertEqual(
+            [item["filename"] for item in descending["items"]],
+            ["third.jpg", "other.jpg", "filename.jpg"],
+        )
+
     def test_legacy_workspace_without_embeddings_renders_indexed_assets(self):
         self.assertFalse(self.workspace.semantic_search_enabled())
         self.assertIsNone(_database_fingerprint(self.workspace)[1])

@@ -1773,9 +1773,10 @@ def _browser_assets(workspace, query, handle):
         if sort_by == "search" and text:
             items.sort(key=lambda i: (i["filename_match"], i.get("similarity") if i.get("similarity") is not None else -2), reverse=descending)
         else:
-            field = "quality_score" if sort_by == "quality" else "capture_time"
+            field = "quality_score" if sort_by == "quality" else "filename" if sort_by == "filename" else "capture_time"
             known = [i for i in items if i[field] is not None]
-            known.sort(key=lambda i: i[field], reverse=descending)
+            key = (lambda i: i[field].casefold()) if field == "filename" else (lambda i: i[field])
+            known.sort(key=key, reverse=descending)
             items = known + [i for i in items if i[field] is None]
         cached = (items, status)
         with _browser_lock:
@@ -2489,6 +2490,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
                 "relationships": relationships.get(row["id"], []),
                 "representation_label": _representation_label(row, relationships.get(row["id"], [])),
                 "size_bytes": row["size_bytes"],
+                "file_created_time": row["file_created_time"],
                 "is_online": bool(row["is_online"]),
                 "width": row["width"],
                 "height": row["height"],

@@ -14,7 +14,6 @@ from PIL import Image
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.raw_quality import index_raw_quality
 from archive_index.indexing.scanner import scan
-from archive_index.media.metadata import UnsupportedDecoderError
 from archive_index.media.quality_provider import OffQualityProvider, ProviderResult
 from archive_index.media.raw_preview import RawPreview, extract_embedded_preview
 from archive_index.workspace import Workspace
@@ -75,14 +74,15 @@ class RawQualityTests(unittest.TestCase):
         )
         preview.image.close()
 
-    def test_previewless_raw_is_unsupported(self):
+    def test_small_embedded_raw_preview_is_accepted(self):
         module = types.SimpleNamespace(imread=lambda path: _FakeRaw(_jpeg_payload((64, 64))))
         with patch.dict(sys.modules, {"rawpy": module}):
             with tempfile.TemporaryDirectory() as temporary_directory:
                 source = Path(temporary_directory) / "small.arw"
                 source.write_bytes(b"raw")
-                with self.assertRaises(UnsupportedDecoderError):
-                    extract_embedded_preview(source)
+                preview = extract_embedded_preview(source)
+        self.assertEqual((preview.width, preview.height), (64, 64))
+        preview.image.close()
 
     def test_raw_quality_persists_embedded_preview_provenance(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -155,7 +155,42 @@ class RawQualityTests(unittest.TestCase):
                 state = connection.execute(
                     "SELECT status, algorithm, version FROM component_state WHERE component = 'thumbnail'"
                 ).fetchone()
-            self.assertEqual(tuple(state), ("complete", "rawpy-preview-jpeg", "rawpy-preview-jpeg-v1"))
+            self.assertEqual(tuple(state), ("complete", "rawpy-preview-jpeg", "rawpy-preview-jpeg-v2"))
+
+    def test_old_small_raw_thumbnail_warning_is_retried_after_provenance_bump(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "image.arw").write_bytes(b"raw")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            with closing(workspace.connect()) as connection:
+                raw_id = connection.execute(
+                    "SELECT id FROM physical_file WHERE relative_path = 'image.arw'"
+                ).fetchone()[0]
+            with workspace.transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO component_state(
+                        physical_file_id, component, status, algorithm, version, error_message
+                    ) VALUES (?, 'thumbnail', 'unsupported', 'rawpy-preview-jpeg', 'rawpy-preview-jpeg-v1', ?)
+                    """,
+                    (raw_id, "embedded RAW preview is smaller than 1280px"),
+                )
+            preview = Image.new("RGB", (64, 64), "navy")
+            with patch("archive_index.indexing.media_pipeline.load_raw_preview", return_value=preview):
+                result = index_workspace(
+                    workspace,
+                    components=("thumbnail",),
+                    quality_provider=OffQualityProvider(),
+                )
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status, version, error_message FROM component_state WHERE physical_file_id = ? AND component = 'thumbnail'",
+                    (raw_id,),
+                ).fetchone()
+            self.assertEqual(tuple(state), ("complete", "rawpy-preview-jpeg-v2", None))
 
 
 if __name__ == "__main__":

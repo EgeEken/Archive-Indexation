@@ -1231,6 +1231,8 @@ def _state_ready(
 ) -> bool:
     if state is None:
         return False
+    if state["version"] != version:
+        return False
     if state["status"] == "unsupported":
         return True
     if component == QUALITY_COMPONENT and not provider.enabled:
@@ -1244,8 +1246,6 @@ def _state_ready(
         )
     if component == QUALITY_COMPONENT and row["media_type"] == "video":
         return state["status"] == "not_requested"
-    if state["version"] != version:
-        return False
     if component == METADATA_COMPONENT:
         return state["status"] == "complete" and state["input_fingerprint"] == fingerprint
     if state["status"] != "complete" or state["input_fingerprint"] != fingerprint:

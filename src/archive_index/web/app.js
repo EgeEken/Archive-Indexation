@@ -89,13 +89,13 @@ function filterParams() {
   return params;
 }
 
-function formatCapture(value, kind) {
+function formatCapture(value) {
   if (!value) return "";
   const text = String(value).replace("T", " ");
   const match = text.match(/^(.*:\d{2})(\.\d+)(.*)$/);
   const fraction = match ? match[2].slice(1, 3).replace(/0+$/, "") : "";
   const display = (match ? `${match[1]}${fraction ? `.${fraction}` : ""}${match[3]}` : text).replace(/(?:Z|[+-]\d{2}:?\d{2})$/, "");
-  return `${display}${kind === "exif_local_unknown" ? " · local time; timezone unknown" : ""}`;
+  return display;
 }
 
 function renderReviewFilters() {
@@ -635,7 +635,6 @@ async function loadAssets(requestedOffset = null) {
     const displayedOffset = pending && !data.items.length ? state.windowStart : offset;
     const displayedTotal = pending && !data.items.length ? Math.max(state.total, data.total) : data.total;
     const displayedHasNext = pending && !data.items.length ? state.windowHasNext : data.has_next;
-    const wasAtBottom = typeof document !== "undefined" && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8;
     state.items = displayedItems; state.total = displayedTotal;
     state.galleryLoading = ["loading", "searching"].includes(data.search.state);
     state.windowStart = displayedOffset; state.windowColumns = columns; state.windowHeight = height; state.windowHasNext = displayedHasNext;
@@ -644,9 +643,6 @@ async function loadAssets(requestedOffset = null) {
     renderGalleryWindow({...data, items: displayedItems, total: displayedTotal, has_next: displayedHasNext}, displayedOffset, columns, height);
     if (window.scrollY !== renderScrollY) window.scrollTo(0, renderScrollY);
     syncUrl();
-    if (wasAtBottom && displayedHasNext && displayedOffset + displayedItems.length < displayedTotal) {
-      setTimeout(() => loadAssets(displayedOffset + displayedItems.length), 0);
-    }
   } catch (error) { if(error.name !== "AbortError") { showSearchStatus({state:"failed",message:"Search unavailable"}); showToast(`Gallery request failed: ${error.message}`); } }
   finally { if (requestId === state.assetRequest) state.galleryRequestInFlight = false; }
 }
@@ -931,7 +927,7 @@ function renderDetails(asset, options = {}) {
   const header = options.viewerPanel
     ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>`
     : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted detail-path" title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</div></div><button id="details-close" class="icon" type="button" aria-label="Close details">×</button></div>`;
-  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd>${pathRow}</dl></section>`;
+  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>File created</dt><dd>${escapeHtml(formatCapture(first.file_created_time) || "Unavailable")}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time) || "Unavailable")}</dd>${pathRow}</dl></section>`;
   const technical = renderTechnicalDetails(first);
   const technicalAndQuality = options.viewerPanel ? `<div class="viewer-technical-quality">${technical}<div class="viewer-quality">${quality}</div></div>` : technical;
   const content = `${header}${overview}${technicalAndQuality}${renderRepresentations(asset)}`;

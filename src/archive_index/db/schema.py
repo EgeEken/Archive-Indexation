@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -433,6 +433,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "INSERT INTO workspace_embedding(id, active_provider, active_run_id, updated_at) VALUES (1, NULL, NULL, datetime('now'))",
     ),
     17: ("ALTER TABLE workspace_config ADD COLUMN recommendation_threshold REAL NOT NULL DEFAULT 0.70 CHECK(recommendation_threshold BETWEEN 0 AND 1)",),
+    18: ("ALTER TABLE physical_file ADD COLUMN file_created_time TEXT",),
 }
 
 
@@ -450,6 +451,8 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         with connection:
             for statement in MIGRATIONS[version]:
                 if version == 17 and _has_column(connection, "workspace_config", "recommendation_threshold"):
+                    continue
+                if version == 18 and _has_column(connection, "physical_file", "file_created_time"):
                     continue
                 if (
                     version == 8

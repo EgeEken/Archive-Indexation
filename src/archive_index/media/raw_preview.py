@@ -11,8 +11,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .metadata import UnsupportedDecoderError
 
 RAW_PREVIEW_ALGORITHM = "rawpy-embedded-preview"
-RAW_PREVIEW_VERSION = "1"
-RAW_PREVIEW_MIN_DIMENSION = 1280
+RAW_PREVIEW_VERSION = "2"
 
 
 @dataclass(frozen=True)
@@ -40,10 +39,6 @@ def extract_embedded_preview(source: Path) -> RawPreview:
             if "JPEG" in format_name or isinstance(payload, (bytes, bytearray)):
                 with Image.open(BytesIO(bytes(payload))) as image:
                     oriented = ImageOps.exif_transpose(image).convert("RGB")
-                    if min(oriented.size) < RAW_PREVIEW_MIN_DIMENSION:
-                        raise UnsupportedDecoderError(
-                            f"embedded RAW preview is smaller than {RAW_PREVIEW_MIN_DIMENSION}px"
-                        )
                     preview = oriented.copy()
             else:
                 preview = ImageOps.exif_transpose(Image.fromarray(payload)).convert("RGB").copy()

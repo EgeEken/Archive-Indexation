@@ -23,6 +23,14 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("similarity-chip", javascript)
         self.assertIn("similarity-chip", css)
 
+    def test_filename_sort_control_is_available_before_quality(self) -> None:
+        html = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "index.html").read_text(encoding="utf-8")
+        sort_row = html[html.index('id="sort-buttons"'):html.index("</div>", html.index('id="sort-buttons"'))]
+        self.assertIn('data-sort="filename">Filename</button>', sort_row)
+        self.assertLess(sort_row.index('data-sort="capture_time"'), sort_row.index('data-sort="filename"'))
+        self.assertLess(sort_row.index('data-sort="filename"'), sort_row.index('data-sort="quality"'))
+        self.assertIn('id="search-sort-button" class="hidden"', sort_row)
+
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_review_buttons_and_card_contract(self):
         root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
@@ -71,7 +79,7 @@ class FrontendTests(unittest.TestCase):
             [
                 "2026-09-11 12:28:43.34",
                 "2026-09-11 12:28:43",
-                "2026-09-11 12:28:43 · local time; timezone unknown",
+                "2026-09-11 12:28:43",
             ],
         )
 
@@ -87,7 +95,7 @@ class FrontendTests(unittest.TestCase):
         const renderQuality=()=>'<section class="file-card"><div class="quality-summary">Overall technical quality</div></section>';
         const renderRepresentations=()=>'<section class="section"><h3>Representations</h3></section>';
         {function}
-        const asset={{capture_time:'2026-09-13T19:37:59.270000+03:00',physical_files:[{{filename:'DSC08259.JPG',absolute_path:'C:\\\\Archive\\\\DSC08259.JPG',relative_path:'all-jpgs/DSC08259.JPG',thumbnail_url:'/thumb.jpg',size_bytes:7120000,width:4240,height:2832}}]}};
+        const asset={{capture_time:'2026-09-13T19:37:59.270000+03:00',physical_files:[{{filename:'DSC08259.JPG',absolute_path:'C:\\\\Archive\\\\DSC08259.JPG',relative_path:'all-jpgs/DSC08259.JPG',thumbnail_url:'/thumb.jpg',size_bytes:7120000,width:4240,height:2832,file_created_time:'2026-09-12T10:11:12'}}]}};
         console.log(JSON.stringify({{standalone:renderDetails(asset,{{standalone:true,showThumbnail:true}}),drawer:renderDetails(asset,{{viewerPanel:true}})}}));
         """
         result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
@@ -95,6 +103,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("C:\\Archive\\DSC08259.JPG", output["standalone"])
         self.assertNotIn("<dt>Path</dt>", output["standalone"])
         self.assertEqual(output["standalone"].count("Capture time"), 1)
+        self.assertIn("File created", output["standalone"])
         self.assertLess(output["standalone"].index("detail-thumbnail"), output["standalone"].index("Overall technical quality"))
         self.assertIn("<dt>Path</dt>", output["drawer"])
         self.assertEqual(output["drawer"].count("Overall technical quality"), 1)
@@ -419,6 +428,22 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertEqual(value["afterBottomCalls"],0)
         self.assertEqual((value["first"],value["last"],value["windowStart"]),(72,91,72))
         self.assertEqual(value["scroll"],value["finalScroll"])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_initial_short_gallery_does_not_prefetch_next_window(self):
+        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        gallery=source[source.index("async function loadAssets"):source.index("function bindGalleryCards")]
+        script=gallery+"""
+        const galleryNode={clientWidth:900,getBoundingClientRect:()=>({top:0}),style:{setProperty(){}},setAttribute(){}};
+        const $=()=>galleryNode;const filterParams=()=>new URLSearchParams("q=test");const syncUrl=()=>{};const rendered=[];const renderGalleryWindow=data=>rendered.push(data.items.map(item=>item.filename));const bindGalleryCards=()=>{};
+        let calls=0;const browserData=async()=>{calls+=1;return {items:[{filename:calls===1?'first.jpg':'second-window.jpg'}],total:2,has_next:calls===1,search:{state:"complete"}};};
+        const window={scrollY:0,innerHeight:720,scrollTo(){}};const document={documentElement:{scrollHeight:720}};
+        const state={assetRequest:0,renderKeys:{},browserAbort:null,searchPoll:null,semanticPending:false,galleryLoading:false,galleryRequestInFlight:false,items:[],total:0,windowStart:0,windowColumns:1,windowHeight:360,windowHasNext:false};
+        (async()=>{await loadAssets();await new Promise(resolve=>setImmediate(resolve));console.log(JSON.stringify({calls,rendered,first:state.items[0].filename}));})();
+        """
+        result=subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8")
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout),{"calls":1,"rendered":[["first.jpg"]],"first":"first.jpg"})
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_cached_gallery_and_group_windows_skip_fetch(self):

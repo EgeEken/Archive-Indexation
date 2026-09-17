@@ -102,6 +102,7 @@ def scan(
 
             try:
                 stat_result = path.stat()
+                file_created_time = _file_created_time(stat_result)
                 existing = existing_by_path.get(relative_path)
                 if not path_in_scope(relative_path, configuration):
                     if existing is not None:
@@ -127,6 +128,11 @@ def scan(
                     and existing["size_bytes"] == stat_result.st_size
                     and existing["mtime_ns"] == stat_result.st_mtime_ns
                 ):
+                    if file_created_time is not None and existing["file_created_time"] != file_created_time:
+                        connection.execute(
+                            "UPDATE physical_file SET file_created_time = ?, updated_at = ? WHERE id = ?",
+                            (file_created_time, _timestamp(), existing["id"]),
+                        )
                     counts["unchanged"] += 1
                 else:
                     with timed(timings, "scan.hashing", 1):
@@ -142,6 +148,7 @@ def scan(
                             media_type,
                             stat_result.st_size,
                             stat_result.st_mtime_ns,
+                            file_created_time,
                             file_hash,
                             True,
                         )
@@ -159,6 +166,7 @@ def scan(
                                 media_type,
                                 stat_result.st_size,
                                 stat_result.st_mtime_ns,
+                                file_created_time,
                                 file_hash,
                                 True,
                             )
@@ -171,6 +179,7 @@ def scan(
                                 media_type,
                                 stat_result.st_size,
                                 stat_result.st_mtime_ns,
+                                file_created_time,
                                 file_hash,
                                 True,
                             )
@@ -263,6 +272,7 @@ def _insert_new(
     media_type: str,
     size_bytes: int,
     mtime_ns: int,
+    file_created_time: str | None,
     file_hash: str,
     in_scope: bool,
 ) -> None:
@@ -279,8 +289,8 @@ def _insert_new(
         """
         INSERT INTO physical_file(
             id, logical_asset_id, relative_path, filename, extension, media_type,
-            size_bytes, mtime_ns, sha256, is_online, in_scope, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            size_bytes, mtime_ns, file_created_time, sha256, is_online, in_scope, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
@@ -291,6 +301,7 @@ def _insert_new(
             media_type,
             size_bytes,
             mtime_ns,
+            file_created_time,
             file_hash,
             int(in_scope),
             now,
@@ -307,6 +318,7 @@ def _update_existing(
     media_type: str,
     size_bytes: int,
     mtime_ns: int,
+    file_created_time: str | None,
     file_hash: str,
     in_scope: bool,
 ) -> None:
@@ -316,7 +328,8 @@ def _update_existing(
         """
         UPDATE physical_file
         SET relative_path = ?, filename = ?, extension = ?, media_type = ?,
-            size_bytes = ?, mtime_ns = ?, sha256 = ?, is_online = 1, in_scope = ?, updated_at = ?
+            size_bytes = ?, mtime_ns = ?, file_created_time = COALESCE(?, file_created_time),
+            sha256 = ?, is_online = 1, in_scope = ?, updated_at = ?
         WHERE id = ?
         """,
         (
@@ -326,6 +339,7 @@ def _update_existing(
             media_type,
             size_bytes,
             mtime_ns,
+            file_created_time,
             file_hash,
             int(in_scope),
             now,
@@ -389,3 +403,12 @@ def _mark_missing(connection, paths: set[str], blocked_paths: set[str]) -> int:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _file_created_time(stat_result: os.stat_result) -> str | None:
+    created_ns = getattr(stat_result, "st_birthtime_ns", None)
+    if created_ns is None and os.name == "nt":
+        created_ns = getattr(stat_result, "st_ctime_ns", None)
+    if created_ns is None:
+        return None
+    return datetime.fromtimestamp(created_ns / 1_000_000_000).isoformat(timespec="seconds")
