@@ -1,13 +1,14 @@
 const query = new URLSearchParams(location.search);
 const MAX_VIEWER_ZOOM = 40;
+let workspacePickerInFlight = false;
 const state = {
   workspace: query.get("workspace"),
   total: 0,
   items: [],
   viewerItems: [],
   viewMode: ["groups", "cloud"].includes(query.get("view")) ? query.get("view") : "gallery",
-  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [],
-  scrollPositions: {}, windowStart: 0, windowRows: [], windowColumns: 1, windowHeight: 360,
+  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, semanticEnabled: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [],
+  scrollPositions: {}, windowStart: 0, windowRows: [], windowColumns: 1, windowHeight: 360, windowHasNext: false,
   collapsed: localStorage.getItem("archive-sidebar-collapsed") === "true",
   selectionFilter: query.get("selection") || "all",
   groupPage: Number(query.get("group_page") || 1),
@@ -24,13 +25,34 @@ const state = {
   viewerDetail: null,
   activeJobId: null,
   assetRequest: 0,
+  jobsRequest: 0,
   groupRequest: 0,
+  galleryLoading: false,
+  galleryRequestInFlight: false,
+  similar: null,
   dragging: false,
   viewerClickSuppressed: false,
   setup: null,
 };
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
+function showToast(message) {
+  const region = $("viewer")?.open ? $("viewer-toast-region") : $("toast-region");
+  if (!region) return;
+  const normalized = String(message || "Unexpected error").replace(/\s+/g, " ").slice(0, 300);
+  if ([...region.children].some((toast) => toast.dataset.message === normalized)) return;
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.dataset.message = normalized;
+  const text = document.createElement("span");
+  text.textContent = normalized;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Dismiss";
+  close.addEventListener("click", () => toast.remove());
+  toast.append(text, close);
+  region.appendChild(toast);
+}
 const labels = { offline: "Offline", unsupported: "Unsupported", failed: "Processing failed", processing: "Processing" };
 const reviewFilters = ["all", "representatives", "recommended", "selected", "rejected", "undecided"];
 const supportedImageExtensions = [".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg", ".jpg", ".jxl", ".nef", ".png", ".raf", ".rw2", ".webp"];
@@ -45,8 +67,9 @@ function apiPath(path) {
 
 async function api(path, options) {
   const response = await fetch(apiPath(path), options);
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Request failed");
+  let payload = {};
+  try { payload = await response.json(); } catch {}
+  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
 }
 
@@ -61,7 +84,7 @@ function filterParams() {
   const params = new URLSearchParams({q: $("search").value.trim(), sort_by: $("sort-by").value,
     direction: $("direction").value, threshold: $("similarity-threshold").value,
     media_type: $("media-type").value, layout: state.layout, auto: state.auto, manual: state.manual,
-    semantic: state.semanticPending ? "0" : "1", async: "1"});
+    semantic: state.semanticEnabled && !state.semanticPending ? "1" : "0", async: "1"});
   if (state.folders !== null) params.set("folders", JSON.stringify([...state.folders].sort()));
   return params;
 }
@@ -71,7 +94,7 @@ function formatCapture(value, kind) {
   const text = String(value).replace("T", " ");
   const match = text.match(/^(.*:\d{2})(\.\d+)(.*)$/);
   const fraction = match ? match[2].slice(1, 3).replace(/0+$/, "") : "";
-  const display = match ? `${match[1]}${fraction ? `.${fraction}` : ""}${match[3]}` : text;
+  const display = (match ? `${match[1]}${fraction ? `.${fraction}` : ""}${match[3]}` : text).replace(/(?:Z|[+-]\d{2}:?\d{2})$/, "");
   return `${display}${kind === "exif_local_unknown" ? " · local time; timezone unknown" : ""}`;
 }
 
@@ -89,9 +112,12 @@ function issueMarkup(issues) {
 
 function qualityColor(score) {
   const value = Math.max(0, Math.min(1, Number(score)));
-  const from = [217, 155, 155];
-  const to = [111, 183, 233];
-  return `rgb(${from.map((channel, index) => Math.round(channel + (to[index] - channel) * value)).join(", ")})`;
+  const stops = [[0.4, [128, 48, 64]], [0.7, [205, 185, 222]], [1, [169, 224, 239]]];
+  if (value <= stops[0][0]) return `rgb(${stops[0][1].join(", ")})`;
+  const upper = value <= stops[1][0] ? stops[1] : stops[2];
+  const lower = upper === stops[1] ? stops[0] : stops[1];
+  const progress = (value - lower[0]) / (upper[0] - lower[0]);
+  return `rgb(${lower[1].map((channel, index) => Math.round(channel + (upper[1][index] - channel) * progress)).join(", ")})`;
 }
 
 function scoreMarkup(score) {
@@ -101,7 +127,16 @@ function scoreMarkup(score) {
 function similarityMarkup(item) {
   if (item.similarity == null) return "";
   const timestamp = item.best_match_timestamp == null ? "" : ` · ${Number(item.best_match_timestamp).toFixed(1)} s`;
-  return `<span class="similarity-chip">Similarity: ${Number(item.similarity).toFixed(2)}${timestamp}</span>`;
+  const value = Math.max(0, Math.min(1, Number(item.similarity)));
+  const kind = item.similarity_kind || (item.best_match_timestamp == null ? "image" : "text");
+  const progress = kind === "text" ? Math.max(0, Math.min(1, (value - 0.18) / 0.17)) : value;
+  const from = kind === "text" ? [217, 105, 105] : [217, 105, 105];
+  const middle = [231, 198, 85];
+  const to = [91, 190, 118];
+  const color = value <= (kind === "text" ? 0.18 : 0.5)
+    ? `rgb(${from.map((channel, index) => Math.round(channel + (middle[index] - channel) * (value / (kind === "text" ? 0.18 : 0.5)))).join(", ")})`
+    : `rgb(${middle.map((channel, index) => Math.round(channel + (to[index] - channel) * progress)).join(", ")})`;
+  return `<span class="similarity-chip" style="--similarity-color: ${color}">Similarity: ${Number(item.similarity).toFixed(2)}${timestamp}</span>`;
 }
 
 function selectionState(item) {
@@ -112,7 +147,12 @@ function selectionState(item) {
 }
 
 function selectionStateMarkup(item) {
-  return `${item.is_representative ? '<span class="state-tag representative">Representative</span>' : ''}${item.auto_recommended ? '<span class="state-tag recommended">Recommended</span>' : ''}${item.filename_match ? '<span class="state-tag">Filename match</span>' : ''}`;
+  const automatic = item.auto_recommended
+    ? '<span class="state-tag recommended">Recommended</span>'
+    : item.is_representative
+      ? '<span class="state-tag representative">Representative</span>'
+      : '';
+  return `${automatic}${item.filename_match ? '<span class="state-tag">Filename match</span>' : ''}`;
 }
 
 function selectionActionsMarkup(item) {
@@ -150,7 +190,7 @@ async function setDecision(assetId, decision) {
     if ($("viewer").open) renderViewer();
     if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
   } catch (error) {
-    $("status").textContent = error.message;
+    showToast(`Review update failed: ${error.message}`);
   }
 }
 
@@ -160,7 +200,8 @@ function renderCard(item, index) {
     : `<div class="placeholder">Preview unavailable</div>`;
   const date = item.capture_time?.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2})/);
   const capture = `<div class="capture">${date ? `${date[3]}/${date[2]}/${date[1]} · ${date[4]}` : "Capture time unavailable"}</div>`;
-  return `<article class="photo-card${item.is_representative ? " representative-card" : ""}${item.auto_recommended ? " recommended-card" : ""}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
+  const automaticClass = item.auto_recommended ? " recommended-card" : item.is_representative ? " representative-card" : "";
+  return `<article class="photo-card${automaticClass}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
 }
 
 async function loadHome() {
@@ -185,18 +226,25 @@ async function openWorkspace(path, create) {
     if (payload.indexed && payload.workspace) location.href = `/?workspace=${encodeURIComponent(payload.workspace)}`;
     else showSetup(payload);
   } catch (error) {
-    $("home-status").textContent = error.message;
+    showToast(`Workspace open failed: ${error.message}`);
   }
 }
 
 async function pickWorkspace() {
+  if (workspacePickerInFlight) return;
+  workspacePickerInFlight = true;
+  const button = $("browse-workspace");
+  if (button) button.disabled = true;
   try {
     const response = await fetch("/api/workspaces/pick", { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not choose a folder");
     if (payload.path) $("workspace-path").value = payload.path;
   } catch (error) {
-    $("home-status").textContent = error.message;
+    showToast(`Folder selection failed: ${error.message}`);
+  } finally {
+    workspacePickerInFlight = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -386,7 +434,8 @@ async function loadEmbeddingModelStatus() {
       });
     }
   } catch (error) {
-    if (state.setup) $("setup-embedding-status").textContent = error.message;
+    if (state.setup) $("setup-embedding-status").textContent = "Embedding model status unavailable";
+    showToast(`Embedding model request failed: ${error.message}`);
   }
 }
 
@@ -400,7 +449,7 @@ async function configureWorkspace() {
     if (!response.ok) throw new Error(payload.error || "Could not analyze workspace");
     showSetup(payload);
   } catch (error) {
-    $("status").textContent = error.message;
+    showToast(`Workspace analysis failed: ${error.message}`);
   }
 }
 
@@ -412,14 +461,15 @@ async function applySetup() {
     if (!response.ok) throw new Error(payload.error || "Could not apply workspace setup");
     location.href = `/?workspace=${encodeURIComponent(payload.workspace.id)}`;
   } catch (error) {
-    $("setup-status").textContent = error.message;
+    $("setup-status").textContent = "Workspace setup failed";
+    showToast(`Workspace setup failed: ${error.message}`);
     $("setup-apply").disabled = false;
   }
 }
 
 function cancelSetup() {
   if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); if(state.viewMode === "groups") loadGroups(); else if(state.viewMode === "gallery") loadAssets(); }
-  else { state.setup = null; loadHome().catch((error) => $("home-status").textContent = error.message); }
+  else { state.setup = null; loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 }
 
 function formatBytes(value) {
@@ -437,16 +487,18 @@ async function confirmWorkspaceRemoval(id) {
       return payload;
     });
     const activeMessage = info.active_job ? `<p class="error">Index deletion is unavailable while ${escapeHtml(info.active_job.kind)} is running.</p>` : "";
-    $("remove-workspace-dialog").innerHTML = `<div class="dialog-inner removal-dialog"><div class="dialog-header"><h2 id="remove-workspace-title">Are you sure?</h2><button id="remove-close" class="icon" type="button" aria-label="Close">×</button></div><p>This will only remove the link to this workspace from the app. The actual index (${escapeHtml(formatBytes(info.index_size_bytes))}) in that folder will remain.</p>${activeMessage}<div class="removal-actions"><button id="delete-index" class="danger-button" type="button"${info.active_job ? " disabled" : ""}>Delete the index as well</button><button id="remove-link" class="warning-button" type="button">Yes, only remove the link</button></div></div>`;
+    const unavailableMessage = info.available === false ? `<p class="error">This workspace folder is unavailable. Only its registry entry can be removed.</p>` : "";
+    const deleteIndex = info.available === false ? "" : `<button id="delete-index" class="danger-button" type="button"${info.active_job ? " disabled" : ""}>Delete the index as well</button>`;
+    $("remove-workspace-dialog").innerHTML = `<div class="dialog-inner removal-dialog"><div class="dialog-header"><h2 id="remove-workspace-title">Are you sure?</h2><button id="remove-close" class="icon" type="button" aria-label="Close">×</button></div><p>This will only remove the link to this workspace from the app. The actual index (${escapeHtml(formatBytes(info.index_size_bytes))}) in that folder will remain.</p>${unavailableMessage}${activeMessage}<div class="removal-actions">${deleteIndex}<button id="remove-link" class="warning-button" type="button">Yes, only remove the link</button></div></div>`;
     const dialog = $("remove-workspace-dialog");
     dialog.showModal();
     document.body.classList.add("modal-open");
     const close = () => closeDialog(dialog);
     $("remove-close").addEventListener("click", close);
-    $("delete-index").addEventListener("click", () => finishWorkspaceRemoval(id, true));
+    $("delete-index")?.addEventListener("click", () => finishWorkspaceRemoval(id, true));
     $("remove-link").addEventListener("click", () => finishWorkspaceRemoval(id, false));
   } catch (error) {
-    $("home-status").textContent = error.message;
+    showToast(`Workspace removal check failed: ${error.message}`);
   }
 }
 
@@ -458,7 +510,7 @@ async function finishWorkspaceRemoval(id, deleteIndex) {
     closeDialog($("remove-workspace-dialog"));
     await loadHome();
   } catch (error) {
-    $("home-status").textContent = error.message;
+    showToast(`Workspace removal failed: ${error.message}`);
   }
 }
 
@@ -467,6 +519,11 @@ async function loadWorkspace() {
   $("setup-view").classList.add("hidden");
   $("workspace-view").classList.remove("hidden");
   ["index", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
+  state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.assetRequest++; state.jobsRequest++; state.groupRequest++;
+  state.items = []; state.total = 0; state.windowStart = 0; state.windowHasNext = false; state.groupItems = [];
+  state.activeJobId = null; state.browserRevision = null; state.viewerItems = []; state.viewerDetail = null;
+  state.renderKeys = {}; state.galleryRequestInFlight = false; state.galleryLoading = true; state.semanticPending = false; state.folders = null;
+  $("gallery").innerHTML = ""; $("groups-list").innerHTML = "";
   const data = await api("/api/workspace");
   $("workspace-crumb").textContent = data.name;
   state.folderPaths = (await api("/api/folders")).folders;
@@ -480,6 +537,8 @@ async function loadWorkspace() {
   $("similarity-threshold").value = localStorage.getItem(`archive-threshold-${state.workspace}`) || "0.20";
   $("similarity-value").textContent = Number($("similarity-threshold").value).toFixed(2);
   const config = await api("/api/workspace/configuration");
+  state.semanticEnabled = Boolean(config.configuration?.semantic_search_enabled);
+  renderSemanticControls();
   $("recommendation-threshold").value = config.configuration?.recommendation_threshold ?? 0.70;
   $("recommendation-value").textContent = Number($("recommendation-threshold").value).toFixed(2);
   document.body.classList.toggle("sidebar-collapsed", state.collapsed);
@@ -495,8 +554,16 @@ function showSearchStatus(status, data = null) {
   state.searchState = status.state;
   if(status.provider) state.searchProvider=status.provider;
   $("search-status").dataset.state = status.state;
-  $("search-status").textContent = status.state === "complete" && data ? `Found ${data.media_total} media · ${data.filename_matches} filename matches` : status.message;
-  $("search-count").textContent = data && status.state !== "complete" ? `Found ${data.media_total} media · ${data.filename_matches} filename matches` : "";
+  $("search-status").textContent = status.state === "complete" ? (status.message || "Semantic search complete") : (status.message || "");
+  if (data) {
+    const shown = data.media_shown ?? data.total ?? 0;
+    const total = data.workspace_total ?? data.media_total ?? shown;
+    const queryActive = data.query_active ?? Boolean($("search")?.value?.trim?.());
+    const filename = queryActive && data.filename_matches != null
+      ? ` · ${data.filename_matches} filename ${data.filename_matches === 1 ? "match" : "matches"}`
+      : "";
+    $("search-count").textContent = `${shown} / ${total} media shown${filename}`;
+  }
 }
 
 async function prepareSearch() {
@@ -505,7 +572,7 @@ async function prepareSearch() {
     const status = await api("/api/search/prepare", {method:"POST"});
     if (!$("search").value.trim()) showSearchStatus(status);
     if (status.state === "loading") setTimeout(prepareSearch, 150);
-  } catch (error) { if (!$("search").value.trim()) showSearchStatus({state:"failed",message:`Search failed: ${error.message}`}); }
+  } catch (error) { if (!$("search").value.trim()) showSearchStatus({state:"failed",message:"Search unavailable"}); showToast(`Search preparation failed: ${error.message}`); }
 }
 
 async function browserData(params) {
@@ -527,7 +594,25 @@ async function browserData(params) {
   return data;
 }
 
-async function loadAssets() {
+function renderGalleryWindow(data, offset, columns, height) {
+  const loading = state.galleryLoading || state.semanticPending || ["loading", "searching"].includes(data.search.state);
+  const before = Math.floor(offset / columns) * height;
+  const after = Math.max(0, Math.ceil(Math.max(0, (data.total || 0) - offset - data.items.length) / columns) * height);
+  const spinner = loading || data.has_next ? `<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>${loading ? "Loading media…" : "Loading more media…"}</div>` : "";
+  $("gallery").style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+  $("gallery").innerHTML = data.items.length
+    ? `<div class="window-spacer" style="height:${before}px"></div>${data.items.map(renderCard).join("")}<div class="window-spacer" style="height:${after}px"></div>${loading || data.has_next ? spinner : ""}`
+    : loading
+      ? spinner
+      : `<div class="empty">No media match these filters.</div>`;
+  $("gallery").style.setProperty("--card-height", `${height - 12}px`);
+  $("gallery").setAttribute("aria-busy", String(loading));
+  bindGalleryCards();
+}
+
+async function loadAssets(requestedOffset = null) {
+  if (state.galleryRequestInFlight) return;
+  state.galleryRequestInFlight = true;
   const requestId = ++state.assetRequest;
   try {
     const width = $("gallery").clientWidth || 900;
@@ -535,23 +620,50 @@ async function loadAssets() {
     const height = Math.floor((width - (columns - 1) * 12) / columns) + 184;
     const top = $("gallery").getBoundingClientRect().top + window.scrollY;
     const row = Math.max(0, Math.floor((window.scrollY - top) / height) - 2);
-    const offset = row * columns;
+    const loadedEnd = state.windowStart + state.items.length;
+    const nextWindow = requestedOffset != null && requestedOffset >= loadedEnd && state.windowHasNext;
+    const overlapRows = Math.ceil(window.innerHeight / height) + 2;
+    const offset = requestedOffset == null ? row * columns : nextWindow ? Math.max(0, requestedOffset - overlapRows * columns) : Math.max(0, requestedOffset);
     const limit = Math.min(180, (Math.ceil(window.innerHeight / height) + 5) * columns);
     const params = filterParams(); params.set("offset", offset); params.set("limit", limit);
     const renderKey = `${params}|${columns}`;
     if (state.renderKeys.gallery === renderKey) return;
     const data = await browserData(params);
     if (requestId !== state.assetRequest) return;
-    state.items = data.items; state.total = data.total;
-    state.windowStart = offset; state.windowColumns = columns; state.windowHeight = height;
+    const pending = ["loading", "searching"].includes(data.search.state);
+    const displayedItems = pending && !data.items.length ? state.items : data.items;
+    const displayedOffset = pending && !data.items.length ? state.windowStart : offset;
+    const displayedTotal = pending && !data.items.length ? Math.max(state.total, data.total) : data.total;
+    const displayedHasNext = pending && !data.items.length ? state.windowHasNext : data.has_next;
+    const wasAtBottom = typeof document !== "undefined" && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8;
+    state.items = displayedItems; state.total = displayedTotal;
+    state.galleryLoading = ["loading", "searching"].includes(data.search.state);
+    state.windowStart = displayedOffset; state.windowColumns = columns; state.windowHeight = height; state.windowHasNext = displayedHasNext;
     if (!["loading","searching","failed"].includes(data.search.state)) state.renderKeys.gallery = renderKey;
-    $("gallery").style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
-    const before = Math.floor(offset / columns) * height;
-    const after = Math.max(0, Math.ceil((data.total - offset - data.items.length) / columns) * height);
-    $("gallery").innerHTML = data.items.length ? `<div class="window-spacer" style="height:${before}px"></div>${data.items.map(renderCard).join("")}<div class="window-spacer" style="height:${after}px"></div>` : `<div class="empty">No media match these filters.</div>`;
-    $("gallery").style.setProperty("--card-height", `${height - 12}px`);
-    bindGalleryCards(); syncUrl();
-  } catch (error) { if(error.name !== "AbortError") showSearchStatus({state:"failed",message:`Search failed: ${error.message}`}); }
+    const renderScrollY = window.scrollY;
+    renderGalleryWindow({...data, items: displayedItems, total: displayedTotal, has_next: displayedHasNext}, displayedOffset, columns, height);
+    if (window.scrollY !== renderScrollY) window.scrollTo(0, renderScrollY);
+    syncUrl();
+    if (wasAtBottom && displayedHasNext && displayedOffset + displayedItems.length < displayedTotal) {
+      setTimeout(() => loadAssets(displayedOffset + displayedItems.length), 0);
+    }
+  } catch (error) { if(error.name !== "AbortError") { showSearchStatus({state:"failed",message:"Search unavailable"}); showToast(`Gallery request failed: ${error.message}`); } }
+  finally { if (requestId === state.assetRequest) state.galleryRequestInFlight = false; }
+}
+
+function reflowGallery() {
+  if (state.viewMode !== "gallery" || !state.items.length || $("gallery").classList.contains("hidden")) return;
+  const width = $("gallery").clientWidth || 900;
+  const columns = Math.max(1, Math.floor((width + 12) / 210));
+  const height = Math.floor((width - (columns - 1) * 12) / columns) + 184;
+  state.windowColumns = columns;
+  state.windowHeight = height;
+  renderGalleryWindow({
+    items: state.items,
+    total: state.total,
+    has_next: state.windowHasNext,
+    search: {state: state.galleryLoading ? "loading" : "complete"},
+  }, state.windowStart, columns, height);
 }
 
 function bindGalleryCards() {
@@ -578,7 +690,12 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
   state.viewerGroupId = context.groupId || state.viewerItems[index].current_group_id || null;
   state.viewerInfoOpen = false;
   state.viewerDetail = null;
-  $("similar-gallery").classList.add("hidden");
+  if (!context.keepSimilar) {
+    $("similar-gallery").classList.add("hidden");
+    state.similar = null;
+    state.similarSource = null;
+    $("viewer").onscroll = null;
+  }
   resetViewerZoom();
   renderViewer();
   if (!$("viewer").open) { $("viewer").showModal(); document.body.classList.add("modal-open"); }
@@ -593,6 +710,7 @@ function renderViewer() {
   $("viewer-next").disabled = state.viewerContext === "gallery" ? state.viewerStart + state.viewerIndex >= state.total - 1 : state.viewerIndex >= state.viewerItems.length - 1;
   $("viewer-selection").innerHTML = selectionActionsMarkup(item);
   $("viewer-similar").classList.toggle("hidden", item.media_type === "video");
+  $("viewer-similar").textContent = state.similar ? "Close similar images" : "Show similar images";
   bindSelectionButtons($("viewer-selection"));
   $("viewer-grouping").classList.toggle("hidden", item.media_type === "video" || !state.viewerGroupId);
   $("smooth-control").classList.toggle("hidden", item.media_type === "video");
@@ -672,16 +790,28 @@ function stopViewerMedia() {
 }
 
 function closeDialog(dialog) {
-  if (dialog.id === "viewer") stopViewerMedia();
+  if (dialog.id === "viewer") {
+    stopViewerMedia();
+    state.similar = null;
+    state.similarSource = null;
+    dialog.onscroll = null;
+    $("similar-gallery").classList.add("hidden");
+    $("viewer-toast-region").replaceChildren();
+  }
   if (dialog.open) dialog.close();
   if (!["viewer", "details", "problems-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
 }
 
 function bindBackdropClose(dialog) {
   let pressedOutside = false;
-  dialog.addEventListener("pointerdown", (event) => { pressedOutside = event.target === dialog; });
+  const isBackdrop = (event) => {
+    if (event.target !== dialog) return false;
+    const rect = dialog.getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+  };
+  dialog.addEventListener("pointerdown", (event) => { pressedOutside = isBackdrop(event); });
   dialog.addEventListener("pointerup", (event) => {
-    if (pressedOutside && event.target === dialog) closeDialog(dialog);
+    if (pressedOutside && isBackdrop(event)) closeDialog(dialog);
     pressedOutside = false;
   });
   dialog.addEventListener("pointercancel", () => { pressedOutside = false; });
@@ -702,28 +832,79 @@ async function showDetails(assetId, context = { mode: "gallery", items: state.it
       showViewer(context.index || 0, context.items || [item], context);
     });
   } catch (error) {
-    $("status").textContent = error.message;
+    showToast(`Details request failed: ${error.message}`);
+  }
+}
+
+function renderSimilarResults() {
+  const similar = state.similar;
+  const section = $("similar-gallery");
+  if (!similar) return;
+  const strong = similar.strongCount;
+  const heading = similar.loading && !similar.items.length ? "Similar images" : strong ? String(strong) + " similar images found" : "No strongly similar images found";
+  const loadMore = similar.loading
+    ? '<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Loading similar images…</div>'
+    : similar.hasNext && similar.autoLoad
+      ? '<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Scroll for more</div>'
+      : similar.hasNext
+        ? '<button id="similar-more" class="secondary" type="button">Load more</button>'
+        : '';
+  section.innerHTML = `<div class="dialog-header"><h3>${heading}</h3><button id="similar-close" type="button">Close similar images</button></div><div class="similar-grid">${similar.items.map((item, index) => `<button data-similar-index="${index}" class="similar-result"><img src="${item.thumbnail_url || ''}" alt=""><span>${escapeHtml(item.filename)}</span>${similarityMarkup(item)}</button>`).join("")}</div>${loadMore}`;
+  $("similar-close").onclick = closeSimilar;
+  $("similar-more")?.addEventListener("click", () => { similar.autoLoad = true; loadSimilarPage(); });
+  section.querySelectorAll("[data-similar-index]").forEach(button => button.onclick = () => {
+    state.similarSource ||= {items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart, keepSimilar:true}};
+    showViewer(Number(button.dataset.similarIndex), similar.items, {mode: "similar", keepSimilar:true});
+  });
+}
+
+function closeSimilar() {
+  const source = state.similarSource;
+  state.similar = null;
+  state.similarSource = null;
+  $("viewer").onscroll = null;
+  $("similar-gallery").classList.add("hidden");
+  if (source) showViewer(source.index, source.items, {...source.context, keepSimilar:false});
+  else { renderViewer(); $("viewer").scrollTop = 0; }
+}
+
+async function loadSimilarPage() {
+  const similar = state.similar;
+  if (!similar || similar.loading || !similar.hasNext) return;
+  similar.loading = true;
+  renderSimilarResults();
+  try {
+    const limit = similar.initial ? 12 : 6;
+    const data = await api(`/api/assets/${encodeURIComponent(similar.assetId)}/similar?offset=${similar.offset}&limit=${limit}&initial=${similar.initial ? 1 : 0}`);
+    if (state.similar !== similar) return;
+    similar.items = [...similar.items, ...data.items];
+    similar.offset += data.items.length;
+    similar.total = data.total;
+    similar.strongCount = data.strong_count;
+    similar.hasNext = data.has_next && data.items.length > 0;
+    similar.initial = false;
+  } catch (error) {
+    if (state.similar === similar) similar.error = error.message;
+  } finally {
+    if (state.similar === similar) {
+      similar.loading = false;
+      renderSimilarResults();
+      if (similar.error) { showToast(`Similar images failed: ${similar.error}`); similar.error = null; }
+    }
   }
 }
 
 async function showSimilar(assetId) {
+  const section = $("similar-gallery");
   const source = state.viewerItems[state.viewerIndex];
-  const section = $("similar-gallery"); section.classList.remove("hidden"); section.textContent = "Finding similar images…";
-  try {
-    const data = await api(`/api/assets/${encodeURIComponent(assetId)}/similar`);
-    let count = 6;
-    const render = () => {
-      const strong = data.strong_count;
-      section.innerHTML = `<div class="dialog-header"><h3>${strong ? `${strong} similar images found` : "No strongly similar images found"}</h3><button id="similar-close">Close similar images</button></div><div class="similar-grid">${data.items.slice(0, count).map((item, index) => `<button data-similar-index="${index}" class="similar-result"><img src="${item.thumbnail_url || ''}" alt=""><span>${escapeHtml(item.filename)}</span>${similarityMarkup(item)}</button>`).join("")}</div>${count < data.items.length ? '<button id="similar-more">Load more</button>' : ''}`;
-      $("similar-close").onclick = () => section.classList.add("hidden");
-      $("similar-more")?.addEventListener("click", () => { count += 6; render(); });
-      section.querySelectorAll("[data-similar-index]").forEach(button => button.onclick = () => {
-        state.similarSource ||= {item: source, items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart}};
-        showViewer(Number(button.dataset.similarIndex), data.items, {mode: "similar"});
-      });
-    };
-    render();
-  } catch (error) { section.textContent = error.message; }
+  state.similar = {assetId, source, items: [], offset: 0, total: 0, strongCount: 0, hasNext: true, initial: true, loading: false, autoLoad: false, error: null};
+  section.classList.remove("hidden");
+  section.textContent = "";
+  $("viewer-similar").textContent = "Close similar images";
+  $("viewer").onscroll = () => {
+    if (state.similar?.autoLoad && $("viewer").scrollTop + $("viewer").clientHeight >= $("viewer").scrollHeight - 240) loadSimilarPage();
+  };
+  await loadSimilarPage();
 }
 
 function assetToViewerItem(asset) {
@@ -744,10 +925,17 @@ function renderDetails(asset, options = {}) {
   const first = asset.physical_files?.[0] || {};
   const dimensions = first.width && first.height ? `${first.width} × ${first.height} (${(first.width * first.height / 1000000).toFixed(2)} MP)` : "Unavailable";
   const thumbnail = options.showThumbnail && first.thumbnail_url ? `<button class="detail-thumbnail" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer"><img src="${first.thumbnail_url}" alt=""></button>` : "";
-  const similarButton = "";
-  const header = options.viewerPanel ? `<div class="panel-header"><h2>Details</h2><div>${similarButton}<button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div></div>` : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted">${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Capture time unavailable")}</div></div><div>${similarButton}<button id="details-close" class="secondary" type="button">Close</button></div></div>`;
-  const overview = `<section><h3>Overview</h3><div class="overview-grid"><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd><dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")} <button class="explorer-button" data-reveal="${escapeHtml(first.id)}" aria-label="Reveal file in Explorer">📁</button></dd></dl>${thumbnail}</div></section>`;
-  return `<div class="details-content">${header}${overview}${renderTechnicalDetails(first)}${renderQuality(first, false)}${renderRepresentations(asset)}</div>`;
+  const quality = renderQuality(first, false);
+  const absolutePath = first.absolute_path || first.relative_path || "Path unavailable";
+  const pathRow = options.viewerPanel ? `<dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")}</dd>` : "";
+  const header = options.viewerPanel
+    ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>`
+    : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted detail-path" title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</div></div><button id="details-close" class="icon" type="button" aria-label="Close details">×</button></div>`;
+  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time, asset.capture_time_kind) || "Unavailable")}</dd>${pathRow}</dl></section>`;
+  const technical = renderTechnicalDetails(first);
+  const technicalAndQuality = options.viewerPanel ? `<div class="viewer-technical-quality">${technical}<div class="viewer-quality">${quality}</div></div>` : technical;
+  const content = `${header}${overview}${technicalAndQuality}${renderRepresentations(asset)}`;
+  return `<div class="details-content">${options.showThumbnail ? `<div class="detail-layout"><div class="detail-main">${content}</div><aside class="detail-aside">${thumbnail}${quality}</aside></div>` : content}</div>`;
 }
 
 function renderRepresentations(asset) {
@@ -779,16 +967,18 @@ function renderQuality(file, showFilename) {
 function meterMarkup(label, value, position) {
   if (!value || position == null) return `<dt>${label}</dt><dd>${escapeHtml(value || "Unavailable")}</dd>`;
   const scales = {
-    "Focal length": {ticks:[10,20,30,40,50,70,100,200,300,400,500,600], labels:[[10,"10"],[50,"50"],[100,"100"],[600,"600 mm"]]},
-    "Aperture": {ticks:[1,1.4,2,2.8,4,5.6,8,11,16,22], labels:[[1,"f/1"],[4,"f/4"],[8,"f/8"],[22,"f/22"]]},
-    "Shutter speed": {ticks:[1,3,30,300,3000,30000,240000], labels:[[1,"30 s"],[30,"1 s"],[3000,"1/100"],[240000,"1/8000"]]},
-    "ISO": {ticks:[40,100,200,400,800,1600,3200,6400,12800,25600,40000], labels:[[40,"40"],[400,"400"],[6400,"6400"],[40000,"40000"]]}
+    "Focal length": {values:[10,40,150,600], labels:["10","40","150","600 mm"]},
+    "Aperture": {values:[1,2.8,8,22], labels:["f/1","f/2.8","f/8","f/22"]},
+    "Shutter speed": {values:[30,2,1 / 125,1 / 8000], labels:["30 s","1/2 s","1/125 s","1/8000 s"]},
+    "ISO": {values:[40,400,4000,40000], labels:["40","400","4000","40000"]}
   };
   const scale = scales[label];
-  const positionOf = v => logPosition(v,scale.ticks[0],scale.ticks.at(-1));
-  const ticks = scale.ticks.map(v => `<i class="scale-tick${scale.labels.some(([n])=>n===v) ? " major" : ""}" style="left:${positionOf(v)}%"></i>`).join("");
-  const labels = scale.labels.map(([v,text],index) => `<span class="scale-label${index===0 ? " first" : index===scale.labels.length-1 ? " last" : ""}" style="left:${positionOf(v)}%">${text}</span>`).join("");
-  return `<dt>${label}</dt><dd class="technical-reading"><span class="technical-value">${escapeHtml(value)}</span><span class="measurement-scale" aria-hidden="true"><span class="scale-line">${ticks}<i class="scale-marker${position<0 || position>100 ? " overflow" : ""}" style="left:${Math.max(0,Math.min(100,position))}%"></i></span><span class="scale-labels">${labels}</span></span></dd>`;
+  const positionOf = v => label === "Shutter speed" ? shutterPosition(v) : logPosition(v, scale.values[0], scale.values.at(-1));
+  const majorPositions = [0, 33.333, 66.667, 100];
+  const ticks = scale.values.map((_, index) => `<i class="scale-tick major" style="left:${majorPositions[index]}%"></i>`).join("");
+  const labels = scale.values.map((_,index) => `<span class="scale-label${index===0 ? " first" : index===scale.values.length-1 ? " last" : ""}" style="left:${majorPositions[index]}%">${scale.labels[index]}</span>`).join("");
+  const markerPosition = Math.max(0, Math.min(100, position));
+  return `<dt>${label}</dt><dd class="technical-reading"><span class="technical-value">${escapeHtml(value)}</span><span class="measurement-scale" aria-hidden="true"><span class="scale-line">${ticks}<i class="scale-marker${position<0 || position>100 ? " overflow" : ""}" style="left:${markerPosition}%"></i></span><span class="scale-labels">${labels}</span></span></dd>`;
 }
 
 function logPosition(value, low, high) { return Number.isFinite(value) && value > 0 ? Math.log(value / low) / Math.log(high / low) * 100 : null; }
@@ -803,10 +993,12 @@ function renderTechnicalDetails(file) {
   const shutterNumber = rationalNumber(rawMetadataValue(file, ["ExposureTime"]));
   const isoNumber = rationalNumber(rawMetadataValue(file, ["ISOSpeedRatings", "PhotographicSensitivity"]));
   const focalNumber = rationalNumber(rawMetadataValue(file, ["FocalLength"]));
-  const rows = [["Camera", cameraValue(file)], ["Lens", metadataValue(file, ["LensModel", "LensMake"])]];
+  const camera = cameraValue(file);
+  const lens = metadataValue(file, ["LensModel", "LensMake"]);
+  const rows = [["Camera", camera], ["Lens", lens]];
   const hasMeter = aperture || shutter || iso || focal;
-  if (!rows.some(([, value]) => value) && !hasMeter) return "";
-  return `<section class="section"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${focal ? meterMarkup("Focal length", focal, logPosition(focalNumber, 10, 600), ["10 mm", "600 mm"]) : ""}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22), ["f/1", "f/22"]) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber), ["30 s", "1/8000 s"]) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000), ["ISO 40", "ISO 40000"]) : ""}</dl></section>`;
+  if (!rows.some(([, value]) => value) && !hasMeter) return `<section class="section technical-details"><h3>Technical details</h3><p class="muted">No camera info available</p></section>`;
+  return `<section class="section technical-details"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${focal ? meterMarkup("Focal length", focal, logPosition(focalNumber, 10, 600)) : ""}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22)) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber)) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000)) : ""}</dl></section>`;
 }
 
 function componentProblemMessage(name, component) {
@@ -817,7 +1009,12 @@ function componentProblemMessage(name, component) {
 }
 
 function renderComponentProblems(file) {
-  return ["metadata", "thumbnail", "quality"].flatMap((name) => { const component = file.components?.[name]; return component && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(componentProblemMessage(name, component))}</p>`] : []; }).join("");
+  const raw = [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(file.extension);
+  return ["metadata", "thumbnail", "quality"].flatMap((name) => {
+    const component = file.components?.[name];
+    const expectedRawGap = raw && ["metadata", "thumbnail"].includes(name) && component?.status === "unsupported" && /no image decoder is configured for \.\w+/i.test(component.error || "");
+    return component && !expectedRawGap && ["failed", "unsupported", "pending", "running"].includes(component.status) ? [`<p class="error">${escapeHtml(name[0].toUpperCase() + name.slice(1))}: ${escapeHtml(componentProblemMessage(name, component))}</p>`] : [];
+  }).join("");
 }
 
 function cameraValue(file) { const exif = file.metadata?.exif || {}; return [exif.Make, exif.Model].filter((value) => value != null && readable(value)).map(formatExif).filter((value, index, values) => values.indexOf(value) === index).join(" "); }
@@ -844,7 +1041,8 @@ async function loadViewerDetails() {
       $("viewer-details").querySelector("[data-find-similar]")?.addEventListener("click", () => showSimilar(item.asset_id));
     }
   } catch (error) {
-    $("viewer-details").innerHTML = `<div class="viewer-error">${escapeHtml(error.message)}</div>`;
+    $("viewer-details").innerHTML = '<div class="viewer-error">Details unavailable.</div>';
+    showToast(`Details request failed: ${error.message}`);
   }
 }
 
@@ -857,13 +1055,16 @@ async function toggleViewerInfo(open = !state.viewerInfoOpen) {
 }
 
 async function loadJobs() {
+  const requestId = ++state.jobsRequest;
   try {
     const data = await api("/api/jobs?limit=10");
+    if (requestId !== state.jobsRequest) return;
     const revision = JSON.stringify(data.revision);
     if (state.browserRevision && state.browserRevision !== revision) state.renderKeys = {};
     state.browserRevision = revision;
     if (!$("search").value.trim() && !$("workspace-view").classList.contains("hidden")) {
       const readiness = await api("/api/search-status");
+      if (requestId !== state.jobsRequest) return;
       if (!$("search").value.trim()) showSearchStatus(readiness);
     }
     const active = data.jobs.find((job) => ["pending", "running"].includes(job.status));
@@ -871,7 +1072,8 @@ async function loadJobs() {
       $("job-banner").classList.add("hidden");
       if (state.activeJobId) {
         state.activeJobId = null;
-        const workspace = await api("/api/workspace");
+        await api("/api/workspace");
+        if (requestId !== state.jobsRequest) return;
         state.renderKeys = {};
         if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
         await loadProblemsBadge();
@@ -892,7 +1094,7 @@ async function loadJobs() {
     $("job-progress").value = active.completed_items;
     $("cancel-job").onclick = async () => { await api(`/api/jobs/${active.id}/cancel`, { method: "POST" }); };
   } catch (error) {
-    $("status").textContent = error.message;
+    showToast(`Job status request failed: ${error.message}`);
   }
 }
 
@@ -902,7 +1104,7 @@ async function loadProblemsBadge() {
     $("problems-button").classList.remove("hidden");
     $("problem-count").textContent = data.problems.length ? `(${data.problems.length})` : "";
   } catch (error) {
-    $("status").textContent = error.message;
+    showToast(`Diagnostics request failed: ${error.message}`);
   }
 }
 
@@ -915,13 +1117,13 @@ async function showProblems() {
     $("problems-close").addEventListener("click", () => closeDialog($("problems-dialog")));
     $("problems-index").addEventListener("click", async () => { closeDialog($("problems-dialog")); await startIndex(); });
   } catch (error) {
-    $("status").textContent = error.message;
+    showToast(`Diagnostics request failed: ${error.message}`);
   }
 }
 
 async function startIndex() {
   try { await api("/api/index", { method: "POST" }); $("status").textContent = ""; await loadJobs(); }
-  catch (error) { $("status").textContent = error.message; }
+  catch (error) { showToast(`Index request failed: ${error.message}`); }
 }
 
 function renderFilterButtons() {
@@ -931,10 +1133,24 @@ function renderFilterButtons() {
   $("direction-button").textContent = $("direction").value === "desc" ? "↓" : "↑";
 }
 
+function renderSemanticControls() {
+  $("similarity-control").classList.toggle("hidden", !state.semanticEnabled);
+  $("search-sort-button").classList.toggle("hidden", !state.semanticEnabled);
+  if (!state.semanticEnabled && $("sort-by").value === "search") {
+    $("sort-by").value = "capture_time";
+    $("direction").value = "desc";
+  }
+}
+
 function refreshBrowser() {
   state.renderKeys = {}; state.browserAbort?.abort(); clearTimeout(state.searchPoll);
+  state.galleryRequestInFlight = false;
   state.assetRequest++; state.groupRequest++;
   state.groupPage = 1; state.scrollPositions = {}; window.scrollTo(0, 0);
+  if (state.viewMode === "gallery") {
+    state.galleryLoading = true;
+    renderGalleryWindow({items: state.items, total: state.total, has_next: false, search: {state: "loading"}}, state.windowStart, state.windowColumns, state.windowHeight);
+  }
   renderFilterButtons();
   if (state.viewMode === "groups") loadGroups(); else if (state.viewMode === "gallery") loadAssets();
 }
@@ -949,7 +1165,7 @@ function setupFilters() {
   $("direction-button").onclick = () => { $("direction").value = $("direction").value === "desc" ? "asc" : "desc"; refreshBrowser(); };
   let debounce;
   $("search").addEventListener("input", () => {
-    clearTimeout(debounce); state.semanticPending = Boolean($("search").value.trim());
+    clearTimeout(debounce); state.semanticPending = state.semanticEnabled && Boolean($("search").value.trim());
     if (state.semanticPending) {
       const cold = ["available", "loading"].includes(state.searchState);
       showSearchStatus({state:cold ? "loading" : "searching", message:cold ? `Loading ${state.searchProvider || "OpenCLIP"}…` : "Searching…"});
@@ -963,9 +1179,11 @@ function setupFilters() {
   $("recommendation-threshold").oninput = () => {
     state.renderKeys = {};
     const threshold = Number($("recommendation-threshold").value); $("recommendation-value").textContent = threshold.toFixed(2);
-    thresholdSave = thresholdSave.catch(() => {}).then(() => api("/api/recommendation-threshold", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({threshold})})).then(refreshBrowser).catch(e => {$("status").textContent=e.message;});
+    thresholdSave = thresholdSave.catch(() => {}).then(() => api("/api/recommendation-threshold", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({threshold})})).then(() => {
+      if (Number($("recommendation-threshold").value) === threshold) refreshBrowser();
+    }).catch(e => {$("status").textContent=e.message;});
   };
-  const collapse = value => {state.collapsed = value; localStorage.setItem("archive-sidebar-collapsed", value); document.body.classList.toggle("sidebar-collapsed", value); $("sidebar-reopen").classList.toggle("hidden", !value); if(state.viewMode === "gallery") loadAssets();};
+  const collapse = value => {state.collapsed = value; localStorage.setItem("archive-sidebar-collapsed", value); document.body.classList.toggle("sidebar-collapsed", value); $("sidebar-reopen").classList.toggle("hidden", !value); requestAnimationFrame(reflowGallery); setTimeout(reflowGallery, 240);};
   $("sidebar-collapse").onclick = () => collapse(true); $("sidebar-reopen").onclick = () => collapse(false);
   $("folder-open").onclick = () => { renderFolderTree(); $("folder-dialog").showModal(); document.body.classList.add("modal-open"); };
   $("folder-close").onclick = () => closeDialog($("folder-dialog"));
@@ -985,28 +1203,24 @@ function normalizeFolders() {
 
 function folderSummary() {
   if (state.folders === null) return "All folders selected";
-  const count = [...state.folders].filter(Boolean).length;
+  const count = state.folders.size;
   return `${count} ${count === 1 ? "folder" : "folders"} selected`;
 }
 
 function toggleFolder(path, checked) {
-  const all = state.folderPaths;
-  if(path === null && checked) {state.folders=null;return;}
-  const selected = new Set(state.folders === null ? all : state.folders);
-  const descendants = all.filter(p => path === null || p === path || (path && p.startsWith(path+"/")));
-  descendants.forEach(p => checked ? selected.add(p) : selected.delete(p));
+  const selected = new Set(state.folders === null ? state.folderPaths : state.folders);
+  if (checked) selected.add(path); else selected.delete(path);
   state.folders = selected; normalizeFolders();
 }
 
 function renderFolderTree() {
   normalizeFolders();
-  const nodes = [null, ...state.folderPaths];
-  $("folder-tree").innerHTML = nodes.map((path,index) => `<label class="folder-check" style="padding-left:${path === null ? 0 : (path ? path.split("/").length : 1)*18}px"><input type="checkbox" data-folder-index="${index}">${escapeHtml(path === null ? "Workspace root" : path === "" ? "Files directly in root" : path.split("/").pop())}</label>`).join("");
+  const nodes = state.folderPaths;
+  $("folder-tree").innerHTML = nodes.map((path,index) => `<label class="folder-check" style="padding-left:${(path ? path.split("/").length : 0) * 18}px"><input type="checkbox" data-folder-index="${index}">${escapeHtml(path ? path.split("/").pop() : "Workspace root")}</label>`).join("");
   $("folder-tree").querySelectorAll("[data-folder-index]").forEach(input => {
     const path=nodes[Number(input.dataset.folderIndex)];
-    const descendants=state.folderPaths.filter(p => path === null || p === path || (path && p.startsWith(path+"/")));
-    const selected=descendants.filter(p => state.folders === null || state.folders.has(p)).length;
-    input.checked=path === null ? state.folders === null : descendants.length>0 && selected===descendants.length; input.indeterminate=selected>0 && selected<descendants.length;
+    input.checked = state.folders === null || state.folders.has(path);
+    input.indeterminate = false;
     input.onchange=()=>{toggleFolder(path,input.checked); renderFolderTree(); refreshBrowser();};
   });
   $("folder-summary").textContent=folderSummary();
@@ -1029,7 +1243,8 @@ function setViewMode(mode, load = true) {
 function renderGroup(group) {
   const members = group.members.map((item, index) => {
     const preview = item.thumbnail_url ? `<img class="group-thumb" loading="lazy" src="${item.thumbnail_url}" alt="${escapeHtml(item.filename)}" onerror="this.replaceWith(Object.assign(document.createElement('div'), {className:'group-thumb placeholder', textContent:'Preview unavailable'}))">` : `<div class="group-thumb placeholder">Preview unavailable</div>`;
-    return `<div class="group-member${item.is_representative ? " representative" : ""}${item.auto_recommended ? " recommended" : ""}"><button class="group-photo" type="button" data-group-index="${index}" aria-label="View ${escapeHtml(item.filename)}">${preview}</button><button class="group-info info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="group-caption"><span title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</span>${scoreMarkup(item.quality_score)}${similarityMarkup(item)}<div class="group-state">${selectionStateMarkup(item)}</div><div class="group-actions">${selectionActionsMarkup(item)}</div></div></div>`;
+    const automaticClass = item.auto_recommended ? " recommended" : item.is_representative ? " representative" : "";
+    return `<div class="group-member${automaticClass}"><button class="group-photo" type="button" data-group-index="${index}" aria-label="View ${escapeHtml(item.filename)}">${preview}</button><button class="group-info info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="group-caption"><span title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</span>${scoreMarkup(item.quality_score)}${similarityMarkup(item)}<div class="group-state">${selectionStateMarkup(item)}</div><div class="group-actions">${selectionActionsMarkup(item)}</div></div></div>`;
   }).join("");
   const memberLabel = `${group.member_count} ${group.member_count === 1 ? "member" : "members"}`;
   return `<section class="group-row" data-group-id="${escapeHtml(group.group_id)}"><div class="group-heading"><strong>${escapeHtml(group.label)}</strong><span class="muted">${memberLabel}</span><span class="muted">${escapeHtml(formatCapture(group.first_capture_time, ""))}</span></div>${members || `<div class="empty">No members</div>`}</section>`;
@@ -1064,7 +1279,7 @@ async function loadGroups() {
       syncUrl();
     }
   } catch (error) {
-    if (error.name !== "AbortError") $("groups-status").textContent = error.message;
+    if (error.name !== "AbortError") showToast(`Groups request failed: ${error.message}`);
   }
 }
 
@@ -1105,7 +1320,7 @@ $("index").addEventListener("click", startIndex);
 $("problems-button").addEventListener("click", showProblems);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
 $("cloud-view-toggle").onclick = () => setViewMode("cloud");
-$("viewer-similar").onclick = () => showSimilar(state.viewerItems[state.viewerIndex].asset_id);
+$("viewer-similar").onclick = () => state.similar ? closeSimilar() : showSimilar(state.viewerItems[state.viewerIndex].asset_id);
 $("workspace-explorer").onclick = () => revealFile();
 $("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex].preferred_physical_id);
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));
@@ -1174,11 +1389,13 @@ document.addEventListener("keydown", (event) => {
   }
 });
 setupFilters();
-if (state.workspace) { loadWorkspace().catch((error) => $("status").textContent = error.message); setInterval(() => { loadJobs(); loadProblemsBadge(); }, 1500); } else { loadHome().catch((error) => $("home-status").textContent = error.message); }
+if (state.workspace) {
+  loadWorkspace().then(() => setInterval(() => { loadJobs(); loadProblemsBadge(); }, 1500)).catch((error) => showToast(`Workspace request failed: ${error.message}`));
+} else { loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 
 async function revealFile(file_id) {
   try { await api("/api/reveal", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file_id})}); }
-  catch(error) {$("status").textContent=error.message;}
+  catch(error) { showToast(`Explorer request failed: ${error.message}`); }
 }
 document.addEventListener("click", event => {const button=event.target.closest("[data-reveal]");if(button) revealFile(button.dataset.reveal);});
 let scrollTimer;
@@ -1187,7 +1404,11 @@ window.addEventListener("scroll", () => {
   clearTimeout(scrollTimer); scrollTimer=setTimeout(()=>{
     const top=$("gallery").getBoundingClientRect().top+window.scrollY;
     const start=Math.max(0,Math.floor((window.scrollY-top)/state.windowHeight)-2)*state.windowColumns;
-    if(start!==state.windowStart) loadAssets();
+    const loadedEnd = state.windowStart + state.items.length;
+    const visibleEnd = start + Math.ceil(window.innerHeight / state.windowHeight) * state.windowColumns;
+    if (state.galleryRequestInFlight || !state.total) return;
+    if (start < state.windowStart) loadAssets(start);
+    else if (visibleEnd >= loadedEnd - state.windowColumns && loadedEnd < state.total && state.windowHasNext) loadAssets(loadedEnd);
   },70);
 }, {passive:true});
 

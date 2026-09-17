@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from .workspace import Workspace, WorkspaceError
@@ -42,7 +43,7 @@ class WorkspaceRegistry:
             if entry.get("id") == handle and isinstance(entry.get("path"), str):
                 try:
                     workspace = Workspace.open(entry["path"])
-                except (WorkspaceError, OSError) as error:
+                except (WorkspaceError, OSError, sqlite3.Error) as error:
                     raise WorkspaceError(f"workspace is unavailable: {entry['path']}") from error
                 if workspace_id(workspace) != handle:
                     raise WorkspaceError("workspace identity does not match recent entry")

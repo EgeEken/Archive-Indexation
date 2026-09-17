@@ -12,7 +12,7 @@ from PIL import Image
 
 from archive_index.embeddings.models import OPENCLIP_PROVIDER, SIGLIP_PROVIDER
 from archive_index.embeddings.providers import EmbeddingProvider
-from archive_index.embeddings.search import search_similar, search_text
+from archive_index.embeddings.search import search_similar, search_text, search_vector
 from archive_index.embeddings.vector import blob_to_vector, exact_top_k, vector_to_blob
 from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.scanner import scan
@@ -211,6 +211,45 @@ class EmbeddingTests(unittest.TestCase):
             self.assertAlmostEqual(results[0].best_timestamp, 1.0)
             similar = search_similar(workspace, image_id, top_k=10)
             self.assertNotIn(image_id, {result.asset_id for result in similar})
+
+    def test_search_filter_is_chunked_beyond_sqlite_variable_limit(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Workspace.create(Path(temporary_directory) / "archive")
+            workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": True})
+            now = "now"
+            run_id = "run"
+            ids = [f"asset-{index}" for index in range(805)]
+            blob, _ = vector_to_blob([1.0, 0.0])
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO embedding_run(id, provider, model_id, model_version, embedding_dimension, settings_json, status, created_at) VALUES (?, ?, 'fake', 'fake', 2, '{}', 'complete', ?)",
+                    (run_id, OPENCLIP_PROVIDER, now),
+                )
+                connection.execute(
+                    "UPDATE workspace_embedding SET active_provider = ?, active_run_id = ?, updated_at = ? WHERE id = 1",
+                    (OPENCLIP_PROVIDER, run_id, now),
+                )
+                for asset_id in ids:
+                    file_id = f"file-{asset_id}"
+                    connection.execute(
+                        "INSERT INTO logical_asset(id, media_type, created_at, updated_at) VALUES (?, 'image', ?, ?)",
+                        (asset_id, now, now),
+                    )
+                    connection.execute(
+                        "INSERT INTO physical_file(id, logical_asset_id, relative_path, filename, extension, media_type, is_online, in_scope, created_at, updated_at) VALUES (?, ?, ?, ?, '.jpg', 'image', 1, 1, ?, ?)",
+                        (file_id, asset_id, f"{asset_id}.jpg", f"{asset_id}.jpg", now, now),
+                    )
+                    connection.execute(
+                        "INSERT INTO component_state(physical_file_id, component, status, version, input_fingerprint) VALUES (?, ?, 'complete', 'fake', ?)",
+                        (file_id, f"embedding:{OPENCLIP_PROVIDER}", file_id),
+                    )
+                    connection.execute(
+                        "INSERT INTO logical_asset_embedding(run_id, logical_asset_id, source_physical_file_id, source_kind, input_fingerprint, embedding, embedding_dimension, created_at, updated_at) VALUES (?, ?, ?, 'rendered', ?, ?, 2, ?, ?)",
+                        (run_id, asset_id, file_id, file_id, blob, now, now),
+                    )
+            results = search_vector(workspace, [1.0, 0.0], allowed_asset_ids=set(ids), top_k=3)
+            self.assertEqual(len(results), 3)
+            self.assertTrue({result.asset_id for result in results} <= set(ids))
 
     def test_video_embeddings_run_when_video_quality_is_off(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

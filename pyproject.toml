@@ -45,6 +45,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 "archive_index.web" = ["index.html", "app.css", "app.js"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.uv]
 conflicts = [
     [

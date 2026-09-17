@@ -103,7 +103,7 @@ class MediaPipelineTests(unittest.TestCase):
             self.assertTrue(thumbnail_path.is_file())
             with Image.open(thumbnail_path) as thumbnail:
                 self.assertLessEqual(max(thumbnail.size), 320)
-            self.assertEqual((row["width"], row["height"]), (640, 480))
+            self.assertEqual((row["width"], row["height"]), (480, 640))
             with closing(workspace.connect()) as connection:
                 capture = connection.execute(
                     "SELECT capture_time, capture_time_kind FROM logical_asset WHERE id = ?",
@@ -139,6 +139,49 @@ class MediaPipelineTests(unittest.TestCase):
                 invalidated = index_workspace(workspace, components=("metadata",))
             self.assertEqual((invalidated.succeeded, invalidated.errors), (1, 0))
             extractor.assert_called_once()
+
+    def test_repeated_reindex_keeps_component_states_terminal_and_thumbnails_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "portrait.jpg", size=(100, 180))
+            _write_image(root / "landscape.jpg", size=(180, 100))
+            workspace = Workspace.create(root)
+
+            for _ in range(3):
+                scan(workspace)
+                result = index_workspace(workspace)
+                self.assertEqual(result.errors, 0)
+                with closing(workspace.connect()) as connection:
+                    states = connection.execute(
+                        "SELECT component, status, output_path FROM component_state ORDER BY physical_file_id, component"
+                    ).fetchall()
+                self.assertTrue(states)
+                self.assertTrue(all(row[1] in {"complete", "not_requested", "unsupported", "failed"} for row in states))
+                self.assertTrue(all(row[2] is None or workspace.index_path(row[2]).is_file() for row in states))
+
+    def test_media_persistence_failure_does_not_leave_components_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "photo.jpg", size=(100, 100))
+            workspace = Workspace.create(root)
+            scan(workspace)
+
+            with patch(
+                "archive_index.indexing.media_pipeline._persist_thumbnail_sql",
+                side_effect=RuntimeError("simulated persistence failure"),
+            ):
+                result = index_workspace(workspace, components=("metadata", "thumbnail"))
+
+            self.assertEqual(result.errors, 1)
+            with closing(workspace.connect()) as connection:
+                statuses = [
+                    row[0]
+                    for row in connection.execute("SELECT status FROM component_state ORDER BY component")
+                ]
+            self.assertNotIn("running", statuses)
+            self.assertTrue(set(statuses) <= {"failed"})
 
     def test_thumbnail_orientation_aspect_transaction_and_source_safety(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

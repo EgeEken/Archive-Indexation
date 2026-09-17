@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from threading import RLock
 from time import perf_counter
 import logging
+from pathlib import Path
 
 from .providers import EmbeddingProvider, create_embedding_provider
 from .vector import blob_to_vector, exact_top_k
@@ -30,6 +31,18 @@ _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-search"
 _state_lock = RLock()
 _loads = {}
 _requests = OrderedDict()
+
+
+def _database_fingerprint(workspace: Workspace):
+    fingerprint = []
+    for path in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal")):
+        try:
+            stat_result = Path(path).stat()
+        except FileNotFoundError:
+            fingerprint.append(None)
+        else:
+            fingerprint.append((stat_result.st_mtime_ns, stat_result.st_size))
+    return tuple(fingerprint)
 LAST_SEARCH_TIMINGS = {}
 
 
@@ -82,8 +95,7 @@ def request_text(workspace, text, *, allowed_asset_ids):
     if not loading.done():
         return None, "loading"
     loading.result()
-    fingerprint = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
-                        for p in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal")))
+    fingerprint = _database_fingerprint(workspace)
     key = (str(workspace.root), active["active_run_id"], fingerprint, text, frozenset(allowed_asset_ids))
     with _state_lock:
         future = _requests.get(key)
@@ -163,8 +175,7 @@ def search_text(
             while len(_text_vectors) > 128:
                 _text_vectors.popitem(last=False)
         encode_elapsed = perf_counter() - encode_started
-        fingerprint = tuple((p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
-                            for p in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal")))
+        fingerprint = _database_fingerprint(workspace)
         rank_key = (str(workspace.root), active["active_run_id"], fingerprint, key,
                     None if allowed_asset_ids is None else frozenset(allowed_asset_ids))
         results = _rankings.get(rank_key)
@@ -226,39 +237,39 @@ def search_vector(
     dimension = int(active["embedding_dimension"])
     connection = workspace.connect()
     try:
-        params: list[object] = [run_id]
-        asset_clause = ""
-        if allowed_asset_ids is not None:
-            if not allowed_asset_ids:
-                return []
-            placeholders = ",".join("?" for _ in allowed_asset_ids)
-            asset_clause = f" AND le.logical_asset_id IN ({placeholders})"
-            params.extend(sorted(allowed_asset_ids))
-        image_rows = connection.execute(
-            f"""
-            SELECT le.logical_asset_id, le.embedding, le.embedding_dimension
-            FROM logical_asset_embedding AS le
-            JOIN physical_file AS pf ON pf.id = le.source_physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
-            JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
-            JOIN embedding_run AS er ON er.id = le.run_id AND cs.version = er.model_version
-            WHERE le.run_id = ? AND cs.status = 'complete' AND cs.input_fingerprint = le.input_fingerprint {asset_clause}
-            """,
-            [active["active_provider"], *params],
-        ).fetchall()
-        frame_params: list[object] = [active["active_provider"], run_id]
-        if allowed_asset_ids is not None:
-            frame_params.extend(sorted(allowed_asset_ids))
-        frame_rows = connection.execute(
-            f"""
-            SELECT vfe.logical_asset_id, vfe.timestamp_seconds, vfe.embedding, vfe.embedding_dimension
-            FROM video_frame_embedding AS vfe
-            JOIN physical_file AS pf ON pf.id = vfe.physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
-            JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
-            JOIN embedding_run AS er ON er.id = vfe.run_id AND cs.version = er.model_version
-            WHERE vfe.run_id = ? AND cs.status = 'complete' {('AND vfe.logical_asset_id IN (' + ','.join('?' for _ in allowed_asset_ids) + ')' if allowed_asset_ids is not None else '')}
-            """,
-            frame_params,
-        ).fetchall()
+        if allowed_asset_ids is not None and not allowed_asset_ids:
+            return []
+        chunks = [None] if allowed_asset_ids is None else [
+            sorted(allowed_asset_ids)[start : start + 800]
+            for start in range(0, len(allowed_asset_ids), 800)
+        ]
+        image_rows = []
+        frame_rows = []
+        for chunk in chunks:
+            image_clause = "" if chunk is None else f" AND le.logical_asset_id IN ({','.join('?' for _ in chunk)})"
+            image_rows.extend(connection.execute(
+                f"""
+                SELECT le.logical_asset_id, le.embedding, le.embedding_dimension
+                FROM logical_asset_embedding AS le
+                JOIN physical_file AS pf ON pf.id = le.source_physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
+                JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
+                JOIN embedding_run AS er ON er.id = le.run_id AND cs.version = er.model_version
+                WHERE le.run_id = ? AND cs.status = 'complete' AND cs.input_fingerprint = le.input_fingerprint {image_clause}
+                """,
+                [active["active_provider"], run_id, *(chunk or ())],
+            ).fetchall())
+            frame_clause = "" if chunk is None else f" AND vfe.logical_asset_id IN ({','.join('?' for _ in chunk)})"
+            frame_rows.extend(connection.execute(
+                f"""
+                SELECT vfe.logical_asset_id, vfe.timestamp_seconds, vfe.embedding, vfe.embedding_dimension
+                FROM video_frame_embedding AS vfe
+                JOIN physical_file AS pf ON pf.id = vfe.physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
+                JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
+                JOIN embedding_run AS er ON er.id = vfe.run_id AND cs.version = er.model_version
+                WHERE vfe.run_id = ? AND cs.status = 'complete' {frame_clause}
+                """,
+                [active["active_provider"], run_id, *(chunk or ())],
+            ).fetchall())
     finally:
         connection.close()
     records = []

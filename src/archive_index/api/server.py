@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -47,6 +48,7 @@ from ..indexing.representations import preferred_physical
 
 LOGGER = logging.getLogger(__name__)
 MAX_PAGE_SIZE = 180
+_folder_picker_lock = threading.Lock()
 
 
 class WorkspaceHTTPServer(ThreadingHTTPServer):
@@ -102,7 +104,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 workspace = self._workspaces.get(handle) or self.registry.open(handle)
                 self._register_workspace(workspace)
                 entries.append(_workspace_entry(handle, workspace, recent=True))
-            except WorkspaceError:
+            except (WorkspaceError, OSError, sqlite3.Error):
                 entries.append({"id": handle, "name": Path(path).name, "path": path, "available": False})
             seen.add(handle)
         return entries
@@ -216,29 +218,39 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         return self.registry.remove(handle)
 
     def workspace_removal_info(self, handle: str) -> dict[str, object]:
-        _, workspace = self.resolve_workspace(handle)
+        try:
+            _, workspace = self.resolve_workspace(handle)
+            if not workspace.root.is_dir():
+                raise ResourceNotFound("workspace is unavailable")
+        except ResourceNotFound:
+            entry = next((entry for entry in self.registry.entries() if entry.get("id") == handle), None)
+            if entry is None:
+                raise
+            return {"workspace": handle, "index_size_bytes": 0, "active_job": None, "available": False}
         return {
             "workspace": handle,
             "index_size_bytes": _index_size_bytes(workspace.index_directory),
             "active_job": _active_job(workspace),
+            "available": True,
         }
 
     def remove_workspace_with_index(self, handle: str, delete_index: bool) -> bool:
+        if not delete_index:
+            return self.registry.remove(handle)
         _, workspace = self.resolve_workspace(handle)
-        if delete_index:
-            with self._active_lock:
-                thread = self._active_threads.get(handle)
+        with self._active_lock:
+            thread = self._active_threads.get(handle)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        with self._active_lock:
             if thread is not None and thread.is_alive():
-                thread.join(timeout=5)
-            with self._active_lock:
-                if thread is not None and thread.is_alive():
-                    raise InvalidRequest("the workspace index is still shutting down")
-            active = _active_job(workspace)
-            if active is not None:
-                raise InvalidRequest("the workspace index cannot be deleted while a job is running")
-            _delete_owned_index(workspace)
-            self._workspaces.pop(handle, None)
-            self._recovered_workspaces.discard(handle)
+                raise InvalidRequest("the workspace index is still shutting down")
+        active = _active_job(workspace)
+        if active is not None:
+            raise InvalidRequest("the workspace index cannot be deleted while a job is running")
+        _delete_owned_index(workspace)
+        self._workspaces.pop(handle, None)
+        self._recovered_workspaces.discard(handle)
         return self.registry.remove(handle)
 
     def start_indexing(self, handle: str) -> str | None:
@@ -662,7 +674,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             elif request.path == "/api/recommendations":
                 self._send_json(200, _recommendations(workspace))
             else:
-                self._handle_resource_get(request.path, workspace, handle)
+                self._handle_resource_get(request.path, workspace, handle, query)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
         except InvalidRequest as error:
@@ -671,9 +683,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": str(error)})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
-        except Exception:
+        except Exception as error:
             LOGGER.exception("GET %s failed", request.path)
-            self._send_json(500, {"error": "internal server error"})
+            self._send_json(500, {"error": _safe_server_error(error)})
 
     def do_POST(self) -> None:
         request = urlsplit(self.path)
@@ -862,6 +874,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": str(error)})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+        except Exception as error:
+            LOGGER.exception("POST %s failed", request.path)
+            self._send_json(500, {"error": _safe_server_error(error)})
 
     def _workspace(self, query: Mapping[str, list[str]]) -> tuple[str, Workspace]:
         return self.server.resolve_workspace(_first(query, "workspace", ""))
@@ -878,7 +895,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             raise InvalidRequest("request body must be an object")
         return value
 
-    def _handle_resource_get(self, path: str, workspace: Workspace, handle: str) -> None:
+    def _handle_resource_get(self, path: str, workspace: Workspace, handle: str, query: Mapping[str, list[str]]) -> None:
         parts = path.strip("/").split("/")
         if len(parts) == 4 and parts[:2] == ["api", "assets"] and parts[3] == "thumbnail":
             self._serve_asset_thumbnail(workspace, parts[2])
@@ -887,7 +904,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, _asset_detail(workspace, parts[2], handle))
             return
         if len(parts) == 4 and parts[:2] == ["api", "assets"] and parts[3] == "similar":
-            self._send_json(200, _similar_assets(workspace, parts[2], handle))
+            self._send_json(200, _similar_assets(workspace, parts[2], handle, query))
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "original":
             self._serve_original(workspace, parts[2])
@@ -1059,6 +1076,11 @@ class ResourceNotFound(LookupError):
     pass
 
 
+def _safe_server_error(error: Exception) -> str:
+    message = " ".join(str(error).split())
+    return (message or error.__class__.__name__)[:300]
+
+
 def serve(workspace: Workspace | None = None, host: str = "127.0.0.1", port: int = 8765) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("the localhost server must bind to 127.0.0.1 or localhost")
@@ -1086,19 +1108,90 @@ def _ui_resource(name: str) -> str:
 
 
 def _pick_workspace_path() -> str:
+    if not _folder_picker_lock.acquire(blocking=False):
+        return ""
     try:
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
-            [sys.executable, "-m", "archive_index.folder_picker"],
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=creation_flags,
-            timeout=300,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "folder picker failed")
-        return result.stdout.strip()
+        return _pick_windows_folder()
+    finally:
+        _folder_picker_lock.release()
+
+
+def _pick_windows_folder() -> str:
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD), ("Data4", wintypes.BYTE * 8)]
+
+            def com_method(interface, index, restype, *argtypes):
+                vtable = ctypes.cast(interface, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
+
+            clsid_file_open_dialog = GUID(0xDC1C5A9C, 0xE88A, 0x4DDE, (0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7))
+            iid_file_open_dialog = GUID(0xD57C7288, 0xD4AD, 0x4768, (0xBE, 0x02, 0x9D, 0x96, 0x95, 0x32, 0xD9, 0x60))
+            ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+            ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            ole32.CoInitializeEx.restype = ctypes.c_long
+            ole32.CoCreateInstance.argtypes = [ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+            ole32.CoCreateInstance.restype = ctypes.c_long
+            ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+            ole32.CoTaskMemFree.restype = None
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetForegroundWindow.argtypes = []
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            dialog = ctypes.c_void_p()
+            initialized = ole32.CoInitializeEx(None, 0x2)
+            if initialized < 0:
+                raise OSError(f"COM initialization failed: 0x{initialized & 0xFFFFFFFF:08X}")
+            try:
+                result = ole32.CoCreateInstance(ctypes.byref(clsid_file_open_dialog), None, 0x1, ctypes.byref(iid_file_open_dialog), ctypes.byref(dialog))
+                if result < 0:
+                    raise OSError(f"folder picker creation failed: 0x{result & 0xFFFFFFFF:08X}")
+                try:
+                    options = ctypes.c_uint()
+                    result = com_method(dialog, 10, ctypes.c_long, ctypes.POINTER(ctypes.c_uint))(dialog, ctypes.byref(options))
+                    if result < 0:
+                        raise OSError(f"folder picker options failed: 0x{result & 0xFFFFFFFF:08X}")
+                    options.value |= 0x20 | 0x40 | 0x800
+                    result = com_method(dialog, 9, ctypes.c_long, ctypes.c_uint)(dialog, options)
+                    if result < 0:
+                        raise OSError(f"folder picker configuration failed: 0x{result & 0xFFFFFFFF:08X}")
+                    com_method(dialog, 17, ctypes.c_long, ctypes.c_wchar_p)(dialog, "Choose archive workspace folder")
+                    owner = user32.GetForegroundWindow()
+                    result = com_method(dialog, 3, ctypes.c_long, ctypes.c_void_p)(dialog, owner)
+                    if result != 0:
+                        return ""
+                    item = ctypes.c_void_p()
+                    result = com_method(dialog, 20, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p))(dialog, ctypes.byref(item))
+                    if result < 0:
+                        raise OSError(f"folder picker result failed: 0x{result & 0xFFFFFFFF:08X}")
+                    try:
+                        path = ctypes.c_wchar_p()
+                        result = com_method(item, 5, ctypes.c_long, ctypes.c_uint, ctypes.POINTER(ctypes.c_wchar_p))(item, 0x80058000, ctypes.byref(path))
+                        if result < 0:
+                            raise OSError(f"folder path lookup failed: 0x{result & 0xFFFFFFFF:08X}")
+                        try:
+                            return path.value or ""
+                        finally:
+                            ole32.CoTaskMemFree(path)
+                    finally:
+                        com_method(item, 2, ctypes.c_ulong)(item)
+                finally:
+                    com_method(dialog, 2, ctypes.c_ulong)(dialog)
+            finally:
+                ole32.CoUninitialize()
+        import tkinter
+        from tkinter import filedialog
+
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            return filedialog.askdirectory(title="Choose archive workspace folder") or ""
+        finally:
+            root.destroy()
     except Exception as error:
         raise InvalidRequest("the native folder picker is unavailable; enter the path manually") from error
 
@@ -1497,9 +1590,59 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     }
 
 
+def _path_revision(path: Path):
+    try:
+        stat_result = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
 def _browser_revision(workspace):
-    return [(p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
-            for p in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal"))]
+    return [_path_revision(path) for path in (workspace.database_path, workspace.database_path.with_name("index.sqlite-wal"))]
+
+
+def _browser_catalog_revision(workspace):
+    connection = workspace.connect()
+    try:
+        physical = connection.execute(
+            "SELECT COUNT(*), MAX(updated_at) FROM physical_file"
+        ).fetchone()
+        logical = connection.execute(
+            "SELECT COUNT(*), MAX(updated_at) FROM logical_asset"
+        ).fetchone()
+        components = connection.execute(
+            """SELECT COUNT(*),
+                      COALESCE(SUM(status = 'complete'), 0),
+                      COALESCE(SUM(status = 'pending'), 0),
+                      COALESCE(SUM(status = 'running'), 0),
+                      COALESCE(SUM(status = 'failed'), 0),
+                      COALESCE(SUM(status = 'unsupported'), 0),
+                      MAX(started_at), MAX(completed_at)
+                   FROM component_state"""
+        ).fetchone()
+        config = connection.execute(
+            """SELECT include_rendered_images, include_raw, include_videos,
+                      image_extensions_json, video_extensions_json,
+                      rendered_quality_provider, raw_quality_provider,
+                      video_quality_enabled, semantic_search_enabled, embedding_provider
+                   FROM workspace_config WHERE id = 1"""
+        ).fetchone()
+        folder_rules = connection.execute(
+            "SELECT GROUP_CONCAT(path || ':' || included, '|') FROM folder_scope_rule"
+        ).fetchone()[0]
+        runs = connection.execute(
+            """SELECT
+                      (SELECT active_run_id FROM workspace_grouping WHERE id = 1),
+                      (SELECT updated_at FROM workspace_grouping WHERE id = 1),
+                      (SELECT active_run_id FROM workspace_recommendation WHERE id = 1),
+                      (SELECT updated_at FROM workspace_recommendation WHERE id = 1),
+                      (SELECT active_run_id FROM workspace_reconciliation WHERE id = 1),
+                      (SELECT updated_at FROM workspace_reconciliation WHERE id = 1)"""
+        ).fetchone()
+    finally:
+        connection.close()
+    return (tuple(_browser_revision(workspace)), tuple(physical) + tuple(logical) + tuple(components) + (folder_rules,) + tuple(config or ()) + tuple(runs or ()))
 
 
 _browser_cache = {}
@@ -1550,13 +1693,15 @@ def _browser_assets(workspace, query, handle):
     if not 0 <= threshold <= 1:
         raise InvalidRequest("threshold must be between 0 and 1")
     signature = tuple(sorted((k, tuple(v)) for k, v in query.items() if k not in {"offset", "limit", "view", "group_id", "async"}))
-    fingerprint = tuple(_browser_revision(workspace))
-    key = (str(workspace.root), handle, fingerprint, signature)
+    catalog_revision = _browser_catalog_revision(workspace)
+    key = (str(workspace.root), handle, catalog_revision, signature)
     with _browser_lock:
         cached = _browser_cache.get(key)
+    if cached is not None and _first(query, "auto", "all") == "recommended":
+        cached = None
     if cached is None:
         base_query = {"page_size": ["180"], "sort_by": ["capture_time"], "direction": ["desc"]}
-        catalog_key = (str(workspace.root), handle, fingerprint)
+        catalog_key = (str(workspace.root), handle, catalog_revision)
         with _browser_lock:
             catalog = _browser_catalogs.get(catalog_key)
         items = [] if catalog is None else list(catalog)
@@ -1586,6 +1731,12 @@ def _browser_assets(workspace, query, handle):
         layout = _first(query, "layout", "")
         manual = _first(query, "manual", "all")
         auto = _first(query, "auto", "all")
+        recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+        items = [
+            {**item, "auto_recommended": item["asset_id"] in recommendation_ids,
+             "recommendation_run_id": recommendation_run_id}
+            for item in items
+        ]
         items = [i for i in items if
                  (folder_ids is None or i["asset_id"] in folder_ids)
                  and (not media_type or i["media_type"] == media_type)
@@ -1596,7 +1747,7 @@ def _browser_assets(workspace, query, handle):
         if text:
             scores = {}
             if _first(query, "semantic", "1") == "0":
-                status = {**status, "state": "loading" if status["state"] in {"available", "loading"} else "searching", "message": f"Loading {status['provider']}…" if status["state"] in {"available", "loading"} else "Searching…"}
+                status = {**status, "message": "Filename search complete"}
             elif status["state"] in {"ready", "available", "loading", "failed"}:
                 try:
                     allowed = {i["asset_id"] for i in items}
@@ -1614,6 +1765,7 @@ def _browser_assets(workspace, query, handle):
                 filename_match = item["asset_id"] in filename_ids
                 if filename_match or (result is not None and result.similarity >= threshold):
                     merged.append({**item, "filename_match": filename_match, "similarity": result.similarity if result else None,
+                                   "similarity_kind": "text" if result else None,
                                    "best_match_timestamp": result.best_timestamp if result else None})
             items = merged
         sort_by = _first(query, "sort_by", "capture_time")
@@ -1634,7 +1786,11 @@ def _browser_assets(workspace, query, handle):
     items, status = cached
     if not text:
         status = _search_status(workspace)
-    result = {"total": len(items), "media_total": len(items), "search": status, "filename_matches": sum(bool(i.get("filename_match")) for i in items)}
+    media_shown = len(items)
+    workspace_total = len(_browser_catalogs.get((str(workspace.root), handle, catalog_revision), items))
+    result = {"total": media_shown, "media_shown": media_shown, "media_total": media_shown,
+              "workspace_total": workspace_total, "query_active": bool(text), "search": status,
+              "filename_matches": sum(bool(i.get("filename_match")) for i in items)}
     if _first(query, "view", "gallery") == "groups":
         groups = {}
         for item in items:
@@ -1671,27 +1827,35 @@ def _semantic_search(workspace: Workspace, query: Mapping[str, list[str]], handl
     return _search_response(workspace, handle, results, page, page_size, text)
 
 
-IMAGE_SIMILARITY_SUMMARY_THRESHOLD = 0.70
+IMAGE_SIMILARITY_SUMMARY_THRESHOLD = 0.90
 
 
-def _similar_assets(workspace: Workspace, asset_id: str, handle: str) -> dict[str, object]:
+def _similar_assets(workspace: Workspace, asset_id: str, handle: str, query: Mapping[str, list[str]] | None = None) -> dict[str, object]:
     allowed = _semantic_asset_filter(workspace, {"media_type": ["image"]})
+    offset = _positive_int(_first(query or {}, "offset", "0"), "offset") if _first(query or {}, "offset", "0") != "0" else 0
+    limit = min(_positive_int(_first(query or {}, "limit", "12"), "limit"), MAX_PAGE_SIZE)
     try:
         results = search_similar(workspace, asset_id, allowed_asset_ids=allowed, top_k=len(allowed))
     except (RuntimeError, ValueError) as error:
         raise InvalidRequest(str(error)) from error
-    response = _search_response(workspace, handle, results, 1, max(1, len(results)), None)
-    response["strong_count"] = sum(r.similarity >= IMAGE_SIMILARITY_SUMMARY_THRESHOLD for r in results)
+    strong_count = sum(r.similarity >= IMAGE_SIMILARITY_SUMMARY_THRESHOLD for r in results)
+    initial = _first(query or {}, "initial", "") == "1"
+    if initial:
+        response = _search_response(workspace, handle, results, 1, limit, None, start_offset=0, selection_limit=min(strong_count, limit))
+    else:
+        response = _search_response(workspace, handle, results, 1, limit, None, start_offset=offset)
+    response["strong_count"] = strong_count
     return response
 
 
-def _search_response(workspace: Workspace, handle: str, results: list[SearchResult], page: int, page_size: int, query_text: str | None) -> dict[str, object]:
+def _search_response(workspace: Workspace, handle: str, results: list[SearchResult], page: int, page_size: int, query_text: str | None, start_offset: int | None = None, selection_limit: int | None = None) -> dict[str, object]:
     total = len(results)
-    start = (page - 1) * page_size
-    selected = results[start : start + page_size]
+    start = (page - 1) * page_size if start_offset is None else start_offset
+    end = start + (page_size if selection_limit is None else selection_limit)
+    selected = results[start : end]
     asset_ids = [result.asset_id for result in selected]
     if not asset_ids:
-        return {"items": [], "query": query_text, "page": page, "page_size": page_size, "total": total, "has_next": False, "similarity_sort": True}
+        return {"items": [], "query": query_text, "page": page, "page_size": page_size, "total": total, "has_next": start + len(selected) < total, "similarity_sort": True}
     placeholders = ",".join("?" for _ in asset_ids)
     connection = workspace.connect()
     try:
@@ -1719,6 +1883,7 @@ def _search_response(workspace: Workspace, handle: str, results: list[SearchResu
             groups.get(result.asset_id),
         )
         item["similarity"] = result.similarity
+        item["similarity_kind"] = "text" if query_text is not None else "image"
         item["best_match_timestamp"] = result.best_timestamp
         items.append(item)
     return {
@@ -1727,7 +1892,7 @@ def _search_response(workspace: Workspace, handle: str, results: list[SearchResu
         "page": page,
         "page_size": page_size,
         "total": total,
-        "has_next": page * page_size < total,
+        "has_next": start + len(selected) < total,
         "similarity_sort": True,
     }
 
@@ -2200,6 +2365,7 @@ def _asset_summary(
     )
     if representative is None:
         raise ResourceNotFound("asset has no physical representation")
+    width, height = _effective_dimensions(active_physical)
     rendered_quality = [
         row for row in active_physical
         if row["media_type"] != "image" or not is_raw_extension(row["extension"])
@@ -2232,9 +2398,30 @@ def _asset_summary(
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
         "preferred_physical_id": representative["id"],
-        "width": representative["width"],
-        "height": representative["height"],
+        "width": width,
+        "height": height,
     }
+
+
+def _effective_dimensions(physical):
+    active = [row for row in physical if row["in_scope"]] or list(physical)
+    preferred = preferred_physical(active)
+    candidates = ([preferred] if preferred is not None else []) + [
+        row for row in active if row is not preferred
+    ]
+    for row in candidates:
+        if row["width"] and row["height"]:
+            width, height = row["width"], row["height"]
+            metadata = _json_or_none(row["metadata_json"]) or {}
+            orientation = (metadata.get("exif") or {}).get("Orientation")
+            try:
+                orientation = int(orientation)
+            except (TypeError, ValueError):
+                orientation = None
+            if orientation in {5, 6, 7, 8}:
+                width, height = height, width
+            return width, height
+    return None, None
 
 
 def _asset_issues(physical) -> list[str]:
@@ -2254,6 +2441,13 @@ def _asset_issues(physical) -> list[str]:
     if any(status == "failed" for status in statuses):
         issues.append("failed")
     return issues
+
+
+def _safe_absolute_path(workspace: Workspace, relative_path: str) -> str | None:
+    try:
+        return str(workspace.absolute_path(relative_path))
+    except WorkspaceError:
+        return None
 
 
 def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str, object]:
@@ -2286,6 +2480,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
             {
                 "id": row["id"],
                 "relative_path": row["relative_path"],
+                "absolute_path": _safe_absolute_path(workspace, row["relative_path"]),
                 "filename": row["filename"],
                 "extension": row["extension"],
                 "media_type": row["media_type"],
@@ -2502,7 +2697,7 @@ def _folders(workspace: Workspace) -> list[str]:
         paths = [row[0] for row in connection.execute("SELECT relative_path FROM physical_file WHERE in_scope = 1")]
     finally:
         connection.close()
-    folders: set[str] = set()
+    folders: set[str] = {""}
     for path in paths:
         parts = Path(path).parts[:-1]
         for index in range(1, len(parts) + 1):

@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from archive_index.api.server import _browser_assets, _asset_detail, _set_user_decision, _search_status
-from archive_index.embeddings.search import SearchResult, search_text, clear_search_sessions, _text_vectors
+from archive_index.api.server import _browser_assets, _asset_detail, _folders, _set_user_decision, _search_status
+from archive_index.embeddings.search import SearchResult, search_text, clear_search_sessions, _database_fingerprint, _text_vectors
 from archive_index.indexing.scanner import scan
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.grouping import extract_visual_features, build_groups
@@ -56,16 +56,69 @@ class BrowserTests(unittest.TestCase):
         self.assertIsNone(result["items"][0]["similarity"])
         self.assertEqual(result["search"]["state"], "unavailable")
 
+    def test_legacy_workspace_without_embeddings_renders_indexed_assets(self):
+        self.assertFalse(self.workspace.semantic_search_enabled())
+        self.assertIsNone(_database_fingerprint(self.workspace)[1])
+        data = self.browser(semantic=0)
+        self.assertEqual(data["total"], 3)
+        self.assertEqual({item["filename"] for item in data["items"]}, {"filename.jpg", "other.jpg", "third.jpg"})
+
     def test_folders_layout_windows_and_timestamp_contract(self):
         self.assertEqual(self.browser(folders=json.dumps([]))["total"], 0)
         nested = self.browser(folders=json.dumps(["nested", "nested/child"]))
         self.assertEqual(nested["total"], 2)
-        self.assertEqual(self.browser(layout="vertical")["items"][0]["filename"], "other.jpg")
+        horizontal = self.browser(layout="horizontal")
+        vertical = self.browser(layout="vertical")
+        self.assertEqual(vertical["items"][0]["filename"], "other.jpg")
+        self.assertEqual({item["filename"] for item in horizontal["items"]}, {"filename.jpg", "third.jpg"})
+        self.assertEqual({item["filename"] for item in vertical["items"]}, {"other.jpg"})
         first = self.browser(limit=1)
         second = self.browser(limit=1, offset=1)
         self.assertNotEqual(first["items"][0]["asset_id"], second["items"][0]["asset_id"])
         self.assertIn("capture_time", first["items"][0])
         self.assertIn("width", first["items"][0])
+
+    def test_folder_selection_is_exact_and_root_is_not_synthetic_select_all(self):
+        self.assertIn("", _folders(self.workspace))
+        cases = {
+            "root": ({""}, {"filename.jpg"}),
+            "parent": ({"nested"}, {"other.jpg"}),
+            "child": ({"nested/child"}, {"third.jpg"}),
+            "parent_child": ({"nested", "nested/child"}, {"other.jpg", "third.jpg"}),
+            "all": (None, {"filename.jpg", "other.jpg", "third.jpg"}),
+            "none": (set(), set()),
+        }
+        for name, (folders, expected) in cases.items():
+            value = None if folders is None else json.dumps(sorted(folders))
+            data = self.browser(folders=value) if value is not None else self.browser()
+            self.assertEqual({item["filename"] for item in data["items"]}, expected, name)
+
+    def test_layout_applies_exif_orientation_to_existing_cached_metadata(self):
+        asset_id = self.ids["filename.jpg"]
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE physical_file SET width = 4240, height = 2832, metadata_json = ?, updated_at = '2026-09-17T00:00:00+00:00' WHERE logical_asset_id = ?",
+                (json.dumps({"exif": {"Orientation": 8}}), asset_id),
+            )
+        self.assertIn("filename.jpg", {item["filename"] for item in self.browser(layout="vertical")["items"]})
+        self.assertNotIn("filename.jpg", {item["filename"] for item in self.browser(layout="horizontal")["items"]})
+
+    def test_layout_uses_rendered_dimensions_for_a_reconciled_raw_jpeg_asset(self):
+        (self.workspace.root / "portrait.arw").write_bytes(b"raw")
+        scan(self.workspace)
+        with self.workspace.transaction() as connection:
+            jpeg_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'nested/other.jpg'"
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE physical_file SET logical_asset_id = ?, width = 240, height = 120 WHERE relative_path = 'portrait.arw'",
+                (jpeg_id,),
+            )
+            connection.execute(
+                "UPDATE physical_file SET width = 120, height = 240 WHERE relative_path = 'nested/other.jpg'"
+            )
+        self.assertIn("other.jpg", {item["filename"] for item in self.browser(layout="vertical")["items"]})
+        self.assertNotIn("other.jpg", {item["filename"] for item in self.browser(layout="horizontal")["items"]})
 
     def test_manual_decisions_survive_filters_and_threshold_configuration(self):
         asset_id = self.ids["filename.jpg"]

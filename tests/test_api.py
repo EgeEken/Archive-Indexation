@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from archive_index.api.server import WorkspaceHTTPServer, _pick_workspace_path, _quality_readiness
+from archive_index.api.server import WorkspaceHTTPServer, _path_revision, _pick_workspace_path, _quality_readiness
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
@@ -181,6 +181,47 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["asset_id"], asset_id)
         self.assertAlmostEqual(result["items"][0]["similarity"], 0.8123)
 
+    def test_similar_route_accepts_paging_query(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            asset_ids = [row[0] for row in connection.execute("SELECT logical_asset_id FROM physical_file ORDER BY logical_asset_id")]
+        asset_id = asset_ids[0]
+        results = [SearchResult(other_id, 0.81 - index * 0.01) for index, other_id in enumerate(asset_ids[1:])]
+        with patch(
+            "archive_index.api.server.search_similar",
+            return_value=results,
+        ):
+            pages = []
+            for offset in (0, 1):
+                status, result = _get_json(self.base_url, f"/api/assets/{asset_id}/similar?offset={offset}&limit=1")
+                self.assertEqual(status, 200)
+                pages.append(result)
+        self.assertEqual([page["items"][0]["asset_id"] for page in pages], asset_ids[1:])
+        self.assertEqual([page["total"] for page in pages], [len(results), len(results)])
+
+    def test_similar_initial_page_caps_strong_results_and_keeps_alternatives(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            asset_ids = [row[0] for row in connection.execute("SELECT logical_asset_id FROM physical_file ORDER BY logical_asset_id")]
+        asset_id = asset_ids[0]
+        other_id = asset_ids[1]
+        cases = [
+            ([0.89], 0, 0, True),
+            ([0.95], 1, 1, False),
+            ([0.95] * 7 + [0.89], 7, 7, True),
+            ([0.95] * 14 + [0.89], 14, 12, True),
+        ]
+        for scores, expected_strong, expected_items, expected_next in cases:
+            results = [SearchResult(other_id, score) for score in scores]
+            with patch("archive_index.api.server.search_similar", return_value=results):
+                status, initial = _get_json(self.base_url, f"/api/assets/{asset_id}/similar?offset=0&limit=12&initial=1")
+            self.assertEqual(status, 200)
+            self.assertEqual((initial["strong_count"], len(initial["items"]), initial["has_next"]), (expected_strong, expected_items, expected_next))
+
+    def test_unexpected_server_errors_keep_a_concise_safe_message(self) -> None:
+        with patch("archive_index.api.server._browser_assets", side_effect=RuntimeError("catalog query failed")):
+            status, error = _get_json(self.base_url, "/api/browser")
+        self.assertEqual(status, 500)
+        self.assertEqual(error["error"], "catalog query failed")
+
     def test_configuration_plan_and_scoped_gallery(self) -> None:
         status, configuration = _get_json(self.base_url, "/api/workspace/configuration")
         self.assertEqual(status, 200)
@@ -212,12 +253,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(detail["physical_files"]), 1)
         physical = detail["physical_files"][0]
         self.assertEqual(physical["relative_path"], "root.jpg")
+        self.assertEqual(physical["absolute_path"], str(self.workspace.root / "root.jpg"))
         self.assertEqual(physical["components"]["metadata"]["status"], "complete")
         self.assertEqual(physical["components"]["thumbnail"]["status"], "complete")
         self.assertEqual(physical["components"]["quality"]["status"], "complete")
         self.assertIsNotNone(physical["quality_score"])
         self.assertIsNotNone(physical["original_url"])
         self.assertIsNotNone(physical["thumbnail_url"])
+
+    def test_missing_wal_is_a_normal_revision_state(self) -> None:
+        wal = self.workspace.database_path.with_name("index.sqlite-wal")
+        self.assertFalse(wal.exists())
+        self.assertIsNone(_path_revision(wal))
 
     def test_detail_exposes_multiple_physical_representations_and_preferred_view(self) -> None:
         original = self.workspace.root / "root.jpg"
@@ -586,13 +633,55 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("workspace", payload["error"])
 
-    def test_folder_picker_returns_helper_output_and_cancel_is_empty(self) -> None:
-        completed = type("Completed", (), {"returncode": 0, "stdout": "C:\\Photos\\Archive\n", "stderr": ""})()
-        with patch("archive_index.api.server.subprocess.run", return_value=completed):
-            self.assertEqual(_pick_workspace_path(), "C:\\Photos\\Archive")
-        completed.stdout = "\n"
-        with patch("archive_index.api.server.subprocess.run", return_value=completed):
+    def test_folder_picker_uses_native_dialog_and_cancel_is_empty(self) -> None:
+        with patch("archive_index.api.server._pick_windows_folder", return_value="C:\\Photos\\Arşivi") as pick:
+            self.assertEqual(_pick_workspace_path(), "C:\\Photos\\Arşivi")
+        pick.assert_called_once_with()
+        with patch("archive_index.api.server._pick_windows_folder", return_value=""):
             self.assertEqual(_pick_workspace_path(), "")
+        source = (Path(__file__).parents[1] / "src" / "archive_index" / "api" / "server.py").read_text(encoding="utf-8")
+        self.assertIn("iid_file_open_dialog", source)
+        self.assertNotIn("FolderBrowserDialog", source)
+        self.assertIn("_folder_picker_lock", source)
+        self.assertIn("blocking=False", source)
+        self.assertIn("GetForegroundWindow", source)
+
+    def test_folder_picker_ignores_duplicate_in_flight_requests(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        result = []
+
+        def blocking_picker() -> str:
+            started.set()
+            release.wait(2)
+            return "C:\\Photos\\Arşivi"
+
+        with patch("archive_index.api.server._pick_windows_folder", side_effect=blocking_picker) as pick:
+            thread = threading.Thread(target=lambda: result.append(_pick_workspace_path()))
+            thread.start()
+            self.assertTrue(started.wait(2))
+            self.assertEqual(_pick_workspace_path(), "")
+            release.set()
+            thread.join(2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, ["C:\\Photos\\Arşivi"])
+        pick.assert_called_once_with()
+
+    def test_unavailable_workspace_can_be_removed_from_registry(self) -> None:
+        missing = self.root / "Arşiv yok"
+        self.registry_path.write_text(
+            json.dumps([{"id": "missing-workspace", "path": str(missing)}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        status, home = _get_json(self.base_url, "/api/workspaces")
+        self.assertEqual((status, home["workspaces"][0]["available"]), (200, False))
+        status, info = _post_json(self.base_url, "/api/workspaces/remove-info", {"workspace": "missing-workspace"})
+        self.assertEqual((status, info["available"]), (200, False))
+        status, removed = _post_json(self.base_url, "/api/workspaces/remove", {"workspace": "missing-workspace"})
+        self.assertEqual((status, removed["removed"]), (200, True))
+        self.assertFalse(missing.exists())
+        self.assertEqual(_get_json(self.base_url, "/api/workspaces")[1]["workspaces"], [])
 
     def test_workspace_removal_preflight_and_delete_preserve_media(self) -> None:
         source = self.root / "photo.jpg"

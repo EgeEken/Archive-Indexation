@@ -530,32 +530,52 @@ def _index_media_batches(
         try:
             with timed(timings, "media.persistence"):
                 persist_batch(batch_results)
-        except Exception:
+        except Exception as batch_error:
             for result in batch_results:
                 try:
                     persist_batch([result])
                 except Exception as error:
                     for component in result["pending"]:
                         result["errors"].setdefault(component, error)
+                    _mark_unresolved_components(
+                        workspace,
+                        result["row"]["id"],
+                        result["pending"],
+                        error,
+                    )
+            if not batch_results:
+                raise batch_error
         for result in batch_results:
             errors = result["errors"]
             outcomes[result["row"]["id"]] = next(iter(errors.values())) if errors else None
         return outcomes
 
-    return run_batches(
-        workspace,
-        "media_index",
-        rows,
-        worker,
-        batch_size=MEDIA_BATCH_SIZE,
-        item_key=lambda row: row["id"],
-        job_id=job_id,
-        cancel_event=cancel_event,
-        progress=progress,
-        physical_file_id=lambda row: row["id"],
-        relative_path=lambda row: row["relative_path"],
-        stage="metadata + thumbnails",
-    )
+    try:
+        result = run_batches(
+            workspace,
+            "media_index",
+            rows,
+            worker,
+            batch_size=MEDIA_BATCH_SIZE,
+            item_key=lambda row: row["id"],
+            job_id=job_id,
+            cancel_event=cancel_event,
+            progress=progress,
+            physical_file_id=lambda row: row["id"],
+            relative_path=lambda row: row["relative_path"],
+            stage="metadata + thumbnails",
+        )
+    except Exception as error:
+        _mark_unresolved_states(workspace, rows, (METADATA_COMPONENT, THUMBNAIL_COMPONENT), error)
+        raise
+    if not result.cancelled:
+        _mark_unresolved_states(
+            workspace,
+            rows,
+            (METADATA_COMPONENT, THUMBNAIL_COMPONENT),
+            RuntimeError("media job completed before component state was persisted"),
+        )
+    return result
 
 
 def _mark_components_running_batch(workspace: Workspace, rows, provider: QualityProvider) -> None:
@@ -628,6 +648,41 @@ def _mark_failed_sql(connection, file_id: str, component: str, error: Exception)
         """,
         (status, str(error), file_id, component),
     )
+
+
+def _mark_unresolved_components(
+    workspace: Workspace,
+    file_id: str,
+    components: Iterable[str],
+    error: Exception,
+) -> None:
+    with workspace.transaction() as connection:
+        for component in components:
+            _mark_failed_sql(connection, file_id, component, error)
+
+
+def _mark_unresolved_states(
+    workspace: Workspace,
+    rows,
+    components: Iterable[str],
+    error: Exception,
+) -> None:
+    file_ids = [row["id"] for row in rows]
+    components = list(components)
+    if not file_ids or not components:
+        return
+    file_placeholders = ",".join("?" for _ in file_ids)
+    component_placeholders = ",".join("?" for _ in components)
+    status = "unsupported" if isinstance(error, UnsupportedDecoderError) else "failed"
+    with workspace.transaction() as connection:
+        connection.execute(
+            f"""UPDATE component_state
+                SET status = ?, completed_at = NULL, error_message = ?
+                WHERE physical_file_id IN ({file_placeholders})
+                  AND component IN ({component_placeholders})
+                  AND status IN ('pending', 'running')""",
+            [status, str(error), *file_ids, *components],
+        )
 
 
 def _process_file(
@@ -975,20 +1030,32 @@ def _index_quality_batches(
                         outcomes[row["id"]] = None
             return outcomes
 
-        return run_batches(
-            workspace,
-            "media_index",
-            rows,
-            worker,
-            batch_size=batch_size * 2,
-            item_key=lambda row: row["id"],
-            job_id=job_id,
-            cancel_event=cancel_event,
-            progress=progress,
-            physical_file_id=lambda row: row["id"],
-            relative_path=lambda row: row["relative_path"],
-            stage="quality",
-        )
+        try:
+            result = run_batches(
+                workspace,
+                "media_index",
+                rows,
+                worker,
+                batch_size=batch_size * 2,
+                item_key=lambda row: row["id"],
+                job_id=job_id,
+                cancel_event=cancel_event,
+                progress=progress,
+                physical_file_id=lambda row: row["id"],
+                relative_path=lambda row: row["relative_path"],
+                stage="quality",
+            )
+        except Exception as error:
+            _mark_unresolved_states(workspace, rows, (QUALITY_COMPONENT,), error)
+            raise
+        if not result.cancelled:
+            _mark_unresolved_states(
+                workspace,
+                rows,
+                (QUALITY_COMPONENT,),
+                RuntimeError("quality job completed before component state was persisted"),
+            )
+        return result
 
     if not pending_exists:
         result = run(provider.score_paths)

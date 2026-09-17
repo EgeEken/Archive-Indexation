@@ -97,12 +97,15 @@ def _extract_image_metadata(path: Path) -> MediaMetadata:
             gps = _normalized_gps(exif)
             if gps:
                 values["gps"] = gps
+            width, height = image.width, image.height
+            if exif.get(274) in {5, 6, 7, 8}:
+                width, height = height, width
             return MediaMetadata(
                 values=values,
                 capture_time=capture_time,
                 capture_time_kind=capture_time_kind,
-                width=image.width,
-                height=image.height,
+                width=width,
+                height=height,
             )
     except UnidentifiedImageError as error:
         if path.suffix.casefold() in DECODER_GAP_EXTENSIONS:
