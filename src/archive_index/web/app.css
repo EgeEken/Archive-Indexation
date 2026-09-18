@@ -217,8 +217,9 @@
 .setup-section > p { max-width: 70rem; font-size: .85rem; }
 .setup-diagnostics { margin: 2rem 0 .5rem; padding-top: 1rem; border-top: 1px solid #39444f; }
 .setup-control-heading { display:flex; justify-content:space-between; align-items:center; gap:1rem; }
-.setup-control-heading label { display:inline-flex; align-items:center; gap:.55rem; cursor:pointer; }
-.setup-control-heading input { width:auto; }
+.setup-control-heading label { display:inline-flex; align-items:center; gap:.55rem; min-width:0; padding:.2rem .1rem; color:inherit; font-size:inherit; line-height:1.25; cursor:pointer; }
+.setup-control-heading label:focus-within { outline:2px solid #9bb8d2; outline-offset:2px; border-radius:.25rem; }
+.setup-control-heading input { width:1.15em; height:1.15em; flex:0 0 auto; margin:0; accent-color:#9bb8d2; }
 .setup-toggle { display: flex; align-items: center; gap: .45rem; width: fit-content; font-size: .9rem; }
 .setup-toggle input { width: auto; }
 .setup-row { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:.55rem .65rem; border:1px solid #303841; border-radius:.4rem; background:#1a2026; font-size:.9rem; }

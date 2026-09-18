@@ -19,6 +19,10 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('id="setup-video-participation"', html)
         self.assertIn('id="setup-video-section"', html)
         self.assertIn("OpenCLIP ViT-B/16 DataComp XL", javascript)
+        for removed in ("Provider/model:", "Workspace ETA:", "Runtime and checkpoint", "Active semantic provider"):
+            self.assertNotIn(removed, javascript)
+        self.assertIn("font-size:inherit", css)
+        self.assertIn("height:1.15em", css)
         self.assertNotIn("siglip", html.lower())
         self.assertNotIn("siglip", javascript.lower())
         for removed in ("Index rendered images", "Index RAW files", "Index videos", "Assess RAW-only image quality", "Include videos in semantic search"):

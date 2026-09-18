@@ -130,6 +130,106 @@ class GroupingTests(unittest.TestCase):
             self.assertEqual(state, "complete")
             self.assertFalse(server._problems(workspace, {}))
 
+    def test_failed_raw_feature_becomes_not_requested_after_pairing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "camera.arw").write_bytes(b"raw placeholder")
+            Image.new("RGB", (80, 60), (40, 80, 120)).save(root / "camera.jpg", format="JPEG")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            with closing(workspace.connect()) as connection:
+                raw_id = connection.execute(
+                    "SELECT id FROM physical_file WHERE extension = '.arw'"
+                ).fetchone()[0]
+            job_id = JobStore(workspace).create("visual_features", 1)
+            JobStore(workspace).record_error(
+                job_id,
+                RuntimeError("no image decoder is configured for .arw"),
+                physical_file_id=raw_id,
+                relative_path="camera.arw",
+            )
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO component_state(physical_file_id, component, status, algorithm, version, error_message) VALUES (?, 'group_feature', 'failed', ?, ?, ?)",
+                    (raw_id, grouping.FEATURE_ALGORITHM, "3", "no image decoder is configured for .arw"),
+                )
+            reconcile_workspace(workspace)
+            with patch.object(grouping, "load_raw_preview", side_effect=AssertionError("secondary RAW feature decoded")):
+                result = extract_visual_features(workspace, job_id=job_id)
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status, error_message FROM component_state WHERE physical_file_id = ? AND component = 'group_feature'",
+                    (raw_id,),
+                ).fetchone()
+            self.assertEqual(tuple(state), ("not_requested", None))
+            self.assertFalse(server._problems(workspace, {}))
+
+    def test_raw_becomes_requested_when_paired_jpeg_goes_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            raw_path = root / "camera.arw"
+            jpeg_path = root / "camera.jpg"
+            raw_path.write_bytes(b"raw placeholder")
+            Image.new("RGB", (80, 60), (40, 80, 120)).save(jpeg_path, format="JPEG")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            reconcile_workspace(workspace)
+            with patch.object(grouping, "load_raw_preview", side_effect=AssertionError("secondary RAW feature decoded")):
+                self.assertEqual(extract_visual_features(workspace).errors, 0)
+            jpeg_path.unlink()
+            scan(workspace)
+            reconcile_workspace(workspace)
+            preview = Image.new("RGB", (240, 160), "navy")
+            with patch.object(grouping, "load_raw_preview", return_value=preview):
+                result = extract_visual_features(workspace)
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status FROM component_state JOIN physical_file ON physical_file.id = component_state.physical_file_id WHERE component = 'group_feature' AND extension = '.arw'"
+                ).fetchone()[0]
+                feature_id = connection.execute(
+                    "SELECT physical_file_id FROM visual_feature WHERE physical_file_id = (SELECT id FROM physical_file WHERE extension = '.arw')"
+                ).fetchone()[0]
+            self.assertEqual(state, "complete")
+            self.assertIsNotNone(feature_id)
+
+    def test_completed_secondary_raw_feature_is_preserved_after_pairing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            raw_path = root / "camera.arw"
+            raw_path.write_bytes(b"raw placeholder")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            preview = Image.new("RGB", (240, 160), "navy")
+            with patch.object(grouping, "load_raw_preview", return_value=preview):
+                self.assertEqual(extract_visual_features(workspace).errors, 0)
+            with closing(workspace.connect()) as connection:
+                raw_id = connection.execute(
+                    "SELECT id FROM physical_file WHERE extension = '.arw'"
+                ).fetchone()[0]
+                before = connection.execute(
+                    "SELECT dhash FROM visual_feature WHERE physical_file_id = ?", (raw_id,)
+                ).fetchone()[0]
+            Image.new("RGB", (80, 60), (40, 80, 120)).save(root / "camera.jpg", format="JPEG")
+            scan(workspace)
+            reconcile_workspace(workspace)
+            with patch.object(grouping, "load_raw_preview", side_effect=AssertionError("secondary RAW feature decoded")):
+                self.assertEqual(extract_visual_features(workspace).errors, 0)
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status FROM component_state WHERE physical_file_id = ? AND component = 'group_feature'",
+                    (raw_id,),
+                ).fetchone()[0]
+                after = connection.execute(
+                    "SELECT dhash FROM visual_feature WHERE physical_file_id = ?", (raw_id,)
+                ).fetchone()[0]
+            self.assertEqual(state, "complete")
+            self.assertEqual(after, before)
+
     def test_near_identical_images_within_window_group(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene"})
         self._set_times(workspace, {"a.jpg": "2026-09-03T12:00:00+03:00", "b.jpg": "2026-09-03T12:00:05+03:00"})

@@ -314,7 +314,7 @@ function renderSetupPlanData(plan) {
   const qualityVisible = configuration.rendered_quality_provider === "lar-iqa";
   qualityDetails.classList.toggle("hidden", !qualityVisible);
   if (qualityVisible) {
-    qualityDetails.innerHTML = `<strong>LAR-IQA · ${qualityModel.installed ? "Installed" : "Not installed"}</strong><span>Provider/model: ${escapeHtml(qualityModel.model_id || "lar-iqa-2branch-kan")}</span><span>Size: ${formatBytes(qualityModel.size_bytes)}</span><span>Workspace ETA: +${formatEta(qualityEta)}</span>${qualityModel.installed ? "" : `<button id="setup-quality-install" class="secondary" type="button">Install model</button>`}${quality.message ? `<span class="muted">${escapeHtml(quality.message)}</span>` : ""}`;
+    qualityDetails.innerHTML = `<strong>LAR-IQA</strong><span>${qualityModel.installed ? "Installed" : "Not installed"} · ${formatBytes(qualityModel.size_bytes)}</span>${qualityModel.installed ? "" : `<button id="setup-quality-install" class="secondary" type="button">Install model</button>`}`;
     $("setup-quality-install")?.addEventListener("click", installQualityModel);
   }
   $("setup-folder-tree").innerHTML = renderSetupFolder(state.setup.analysis.root, configuration);
@@ -426,7 +426,7 @@ async function loadEmbeddingModelStatus() {
     if (state.setup) {
       const model = payload.models.find(candidate => candidate.provider === "openclip-b16-datacomp-xl");
       if (!model) throw new Error("OpenCLIP model status unavailable");
-      $("setup-embedding-status").innerHTML = `<div class="model-card active"><strong>OpenCLIP ViT-B/16 DataComp XL</strong><span>Active semantic provider</span><span>${model.installed ? "Installed" : "Not installed"} · ${formatBytes(model.installed ? model.cache_bytes : model.expected_download_bytes)}</span>${model.installed ? "" : `<button type="button" class="secondary model-install" data-install-model="${model.provider}">Install model</button>`}</div>`;
+      $("setup-embedding-status").innerHTML = `<div class="model-card active"><strong>OpenCLIP ViT-B/16 DataComp XL</strong><span>${model.installed ? "Installed" : "Not installed"} · ${formatBytes(model.installed ? model.cache_bytes : model.expected_download_bytes)}</span>${model.installed ? "" : `<button type="button" class="secondary model-install" data-install-model="${model.provider}">Install model</button>`}</div>`;
       $("setup-embedding-status").querySelectorAll("[data-install-model]").forEach(button => button.onclick = async (event) => {
         event.stopPropagation();
         button.disabled = true; button.textContent = "Installing…";

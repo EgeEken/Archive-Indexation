@@ -14,6 +14,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from archive_index.api.server import WorkspaceHTTPServer, _configuration_quality_readiness, _path_revision, _pick_workspace_path, _quality_readiness
+from archive_index.app_state import workspace_id
 from archive_index.configuration import default_configuration
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
@@ -724,6 +725,27 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.assertEqual((status, removed["removed"]), (200, True))
         self.assertFalse(missing.exists())
         self.assertEqual(_get_json(self.base_url, "/api/workspaces")[1]["workspaces"], [])
+
+    def test_home_listing_keeps_healthy_workspace_when_another_read_only_open_fails(self) -> None:
+        healthy_root = self.root / "healthy"
+        healthy = Workspace.create(healthy_root)
+        broken_root = self.root / "broken"
+        (broken_root / ".archive-index").mkdir(parents=True)
+        (broken_root / ".archive-index" / "index.sqlite").write_bytes(b"not sqlite")
+        self.registry_path.write_text(
+            json.dumps([
+                {"id": workspace_id(healthy), "path": str(healthy_root)},
+                {"id": "broken-workspace", "path": str(broken_root)},
+            ]),
+            encoding="utf-8",
+        )
+
+        status, home = _get_json(self.base_url, "/api/workspaces")
+
+        self.assertEqual(status, 200)
+        entries = {entry["id"]: entry for entry in home["workspaces"]}
+        self.assertTrue(entries[workspace_id(healthy)]["available"])
+        self.assertFalse(entries["broken-workspace"]["available"])
 
     def test_cached_workspace_with_missing_database_can_be_removed_without_reopening_it(self) -> None:
         stale_root = self.root / "stale"

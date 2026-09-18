@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..app_state import WorkspaceRegistry, workspace_id
-from ..configuration import default_configuration, normalize_configuration, path_in_scope
+from ..configuration import configuration_from_connection, default_configuration, normalize_configuration, path_in_scope
 from ..embeddings.models import (
     OPENCLIP_PROVIDER,
     SIGLIP_PROVIDER,
@@ -70,6 +70,24 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         if workspace is not None:
             self.default_handle = self._register_workspace(workspace)
 
+    def stop_background_jobs(self, timeout: float = 10.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._active_lock:
+                events = list(set(self._cancel_events.values()))
+                threads = list(self._active_threads.values())
+            for event in events:
+                event.set()
+            alive = [thread for thread in threads if thread.is_alive()]
+            if not alive:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                LOGGER.warning("workspace jobs did not stop before server shutdown")
+                return False
+            for thread in alive:
+                thread.join(timeout=min(0.25, remaining))
+
     def _register_workspace(self, workspace: Workspace) -> str:
         handle = workspace_id(workspace)
         self._workspaces[handle] = workspace
@@ -104,10 +122,13 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             if not isinstance(handle, str) or not isinstance(path, str) or handle in seen:
                 continue
             try:
-                workspace = self._workspaces.get(handle) or self.registry.open(handle)
-                self._register_workspace(workspace)
-                entries.append(_workspace_entry(handle, workspace, recent=True))
-            except (WorkspaceError, OSError, sqlite3.Error):
+                workspace = self._workspaces.get(handle)
+                entries.append(
+                    _workspace_entry(handle, workspace, recent=True)
+                    if workspace is not None
+                    else _read_only_workspace_entry(handle, path)
+                )
+            except (WorkspaceError, OSError, sqlite3.Error, ValueError):
                 entries.append({"id": handle, "name": Path(path).name, "path": path, "available": False})
             seen.add(handle)
         return entries
@@ -541,6 +562,8 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             with self._active_lock:
                 for active_job_id in job_ids:
                     self._cancel_events.pop((handle, active_job_id), None)
+                if self._active_threads.get(handle) is threading.current_thread():
+                    self._active_threads.pop(handle, None)
 
     def _run_embeddings_only(
         self,
@@ -1183,7 +1206,10 @@ def serve(workspace: Workspace | None = None, host: str = "127.0.0.1", port: int
     webbrowser.open(url, new=2)
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nArchive Indexation UI stopped.", flush=True)
     finally:
+        server.stop_background_jobs()
         server.server_close()
 
 
@@ -1345,40 +1371,64 @@ def _workspace_entry(handle: str, workspace: Workspace, recent: bool) -> dict[st
 def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
     connection = workspace.connect()
     try:
-        assets = connection.execute(
-            """SELECT COUNT(DISTINCT la.id) FROM logical_asset AS la
-               JOIN physical_file AS pf ON pf.logical_asset_id = la.id
-               WHERE pf.in_scope = 1"""
-        ).fetchone()[0]
-        physical_files = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1").fetchone()[0]
-        online = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1 AND is_online = 1").fetchone()[0]
-        out_of_scope = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 0").fetchone()[0]
-        latest = connection.execute("SELECT MAX(finished_at) FROM job WHERE status = 'complete'").fetchone()[0]
-        embedding_storage = connection.execute(
-            "SELECT COALESCE((SELECT SUM(length(embedding)) FROM logical_asset_embedding), 0) + COALESCE((SELECT SUM(length(embedding)) FROM video_frame_embedding), 0)"
-        ).fetchone()[0]
+        return _workspace_summary_from_connection(connection, handle, workspace.root)
     finally:
         connection.close()
+
+
+def _read_only_workspace_entry(handle: str, path: str) -> dict[str, object]:
+    root = Path(path).expanduser().resolve(strict=False)
+    database_path = root / ".archive-index" / "index.sqlite"
+    if not database_path.is_file():
+        raise WorkspaceError(f"workspace database is missing: {database_path}")
+    connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0.25)
+    connection.row_factory = sqlite3.Row
+    try:
+        identity = connection.execute("SELECT workspace_id FROM workspace_info WHERE id = 1").fetchone()
+        if identity is None or identity["workspace_id"] != handle:
+            raise WorkspaceError("workspace identity does not match recent entry")
+        summary = _workspace_summary_from_connection(connection, handle, root)
+    finally:
+        connection.close()
+    summary["recent"] = True
+    summary["available"] = True
+    return summary
+
+
+def _workspace_summary_from_connection(connection, handle: str, root: Path) -> dict[str, object]:
+    assets = connection.execute(
+        """SELECT COUNT(DISTINCT la.id) FROM logical_asset AS la
+           JOIN physical_file AS pf ON pf.logical_asset_id = la.id
+           WHERE pf.in_scope = 1"""
+    ).fetchone()[0]
+    physical_files = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1").fetchone()[0]
+    online = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 1 AND is_online = 1").fetchone()[0]
+    out_of_scope = connection.execute("SELECT COUNT(*) FROM physical_file WHERE in_scope = 0").fetchone()[0]
+    latest = connection.execute("SELECT MAX(finished_at) FROM job WHERE status = 'complete'").fetchone()[0]
+    embedding_storage = connection.execute(
+        "SELECT COALESCE((SELECT SUM(length(embedding)) FROM logical_asset_embedding), 0) + COALESCE((SELECT SUM(length(embedding)) FROM video_frame_embedding), 0)"
+    ).fetchone()[0]
+    configuration = configuration_from_connection(connection)
     return {
         "id": handle,
-        "name": workspace.root.name or str(workspace.root),
-        "path": str(workspace.root),
-        "root": str(workspace.root),
+        "name": root.name or str(root),
+        "path": str(root),
+        "root": str(root),
         "assets": assets,
         "physical_files": physical_files,
         "online_files": online,
         "offline_files": physical_files - online,
         "out_of_scope_files": out_of_scope,
         "last_indexed": latest,
-        "quality_provider": workspace.quality_provider(),
+        "quality_provider": configuration["quality_provider"],
         "quality_providers": ["off", "lar-iqa"],
-        "rendered_quality_provider": workspace.rendered_quality_provider(),
-        "raw_quality_provider": workspace.raw_quality_provider(),
-        "video_quality_enabled": workspace.video_quality_enabled(),
-        "include_videos_in_semantic_search": workspace.configuration()["include_videos_in_semantic_search"],
-        "semantic_search_enabled": workspace.semantic_search_enabled(),
-        "embedding_provider": workspace.embedding_provider(),
-        "embedding_model": _embedding_model_status(workspace.embedding_provider()),
+        "rendered_quality_provider": configuration["rendered_quality_provider"],
+        "raw_quality_provider": configuration["raw_quality_provider"],
+        "video_quality_enabled": configuration["video_quality_enabled"],
+        "include_videos_in_semantic_search": configuration["include_videos_in_semantic_search"],
+        "semantic_search_enabled": configuration["semantic_search_enabled"],
+        "embedding_provider": configuration["embedding_provider"],
+        "embedding_model": _embedding_model_status(configuration["embedding_provider"]),
         "embedding_storage_bytes": embedding_storage,
     }
 

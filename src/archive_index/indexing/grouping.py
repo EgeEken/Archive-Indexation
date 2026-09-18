@@ -137,7 +137,9 @@ def extract_visual_features(
         ).fetchall()
     finally:
         connection.close()
-    rows = _feature_processing_rows(rows)
+    processing_rows = _feature_processing_rows(rows)
+    _mark_secondary_feature_states(workspace, rows, processing_rows)
+    rows = processing_rows
     state_map = _prepare_feature_states(workspace, rows)
     worker_count = workers or FEATURE_WORKERS
     if worker_count < 1:
@@ -385,6 +387,26 @@ def _feature_processing_rows(rows):
         rendered = [row for row in asset_rows if not is_raw_extension(row["extension"])]
         selected.append(preferred_physical(rendered or asset_rows, component=FEATURE_COMPONENT))
     return sorted(selected, key=lambda row: row["relative_path"])
+
+
+def _mark_secondary_feature_states(workspace: Workspace, rows, selected_rows) -> None:
+    selected_ids = {row["id"] for row in selected_rows}
+    secondary_ids = [row["id"] for row in rows if row["id"] not in selected_ids]
+    if not secondary_ids:
+        return
+    placeholders = ",".join("?" for _ in secondary_ids)
+    settings = json.dumps(FEATURE_SETTINGS, sort_keys=True)
+    with workspace.transaction() as connection:
+        connection.execute(
+            f"""
+            UPDATE component_state
+            SET status = 'not_requested', algorithm = ?, version = ?, settings_json = ?,
+                input_fingerprint = NULL, started_at = NULL, completed_at = NULL, error_message = NULL
+            WHERE component = ? AND status IN ('pending', 'running', 'failed', 'unsupported')
+              AND physical_file_id IN ({placeholders})
+            """,
+            [FEATURE_ALGORITHM, FEATURE_VERSION, settings, FEATURE_COMPONENT, *secondary_ids],
+        )
 
 
 def _record_sort_key(record: AssetRecord):
