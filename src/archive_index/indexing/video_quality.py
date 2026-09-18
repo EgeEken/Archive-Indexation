@@ -433,7 +433,187 @@ def video_quality_details(workspace: Workspace, physical_file_id: str) -> dict[s
     }
 
 
-def _process_video(workspace, row, provider, algorithm, version, settings, cancel_event, timings=None, substage=None):
+def prepare_shared_video_quality(
+    workspace: Workspace,
+    *,
+    job_id: str,
+    cancel_event: Event | None = None,
+    timings: dict[str, float] | None = None,
+    quality_provider=None,
+):
+    configuration = workspace.configuration()
+    provider = quality_provider or create_quality_provider(
+        workspace.quality_provider() if configuration["video_quality_enabled"] else "off"
+    )
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            "SELECT * FROM physical_file WHERE media_type = 'video' AND is_online = 1 AND in_scope = 1 ORDER BY relative_path"
+        ).fetchall()
+    finally:
+        connection.close()
+    algorithm, version, settings = video_quality_provenance(provider, configuration)
+    _ensure_quality_states(workspace, rows, algorithm, version, settings, provider.enabled)
+    if not provider.enabled:
+        return None
+    return _SharedVideoQualityConsumer(
+        workspace,
+        rows,
+        provider,
+        algorithm,
+        version,
+        settings,
+        job_id,
+        cancel_event,
+        timings,
+    )
+
+
+class _SharedVideoQualityConsumer:
+    def __init__(self, workspace, rows, provider, algorithm, version, settings, job_id, cancel_event, timings):
+        self.workspace = workspace
+        self.rows = {row["id"]: row for row in rows}
+        self.provider = provider
+        self.algorithm = algorithm
+        self.version = version
+        self.settings = settings
+        self.job_id = job_id
+        self.cancel_event = cancel_event
+        self.timings = timings
+        self.store = JobStore(workspace)
+        self.processed = 0
+        self.succeeded = 0
+        self.errors = 0
+        self.skipped = 0
+        self.completed_ids = set()
+        self.store.set_total(job_id, len(rows))
+        self.store.set_stage(job_id, "video quality")
+        self.store.start(job_id)
+        pending = [
+            row for row in rows
+            if not _video_state_ready(workspace, row, algorithm, version, settings)
+        ]
+        self.preflight_error = None
+        if pending:
+            try:
+                provider.preflight()
+            except Exception as error:
+                self.preflight_error = error
+
+    def consume(self, source, embedding_sample_rows, frames):
+        file_id = source["physical_file_id"]
+        row = self.rows.get(file_id)
+        if row is None or file_id in self.completed_ids:
+            return
+        self.completed_ids.add(file_id)
+        try:
+            if _video_state_ready(self.workspace, row, self.algorithm, self.version, self.settings):
+                self.skipped += 1
+                return
+            if self.preflight_error is not None:
+                _mark_failed(self.workspace, row, self.algorithm, self.version, self.settings, self.preflight_error)
+                self.errors += 1
+                self.store.record_error(self.job_id, self.preflight_error, physical_file_id=file_id, relative_path=row["relative_path"])
+                return
+            frame_by_index = {
+                sample["sample_index"]: frame
+                for sample, frame in zip(embedding_sample_rows, frames)
+            }
+            duration = float(row["duration_seconds"] or 0)
+            count = sample_count(
+                duration,
+                float(self.settings["target_fps"]),
+                int(self.settings["min_frames"]),
+                int(self.settings["max_frames"]),
+            )
+            settings_json = json.dumps(self.settings, ensure_ascii=False, sort_keys=True)
+            input_fingerprint = _video_input_fingerprint(row, duration)
+            run = _get_or_create_run(
+                self.workspace, row, self.algorithm, self.version, settings_json, input_fingerprint, duration, count
+            )
+            selected = [
+                frame_by_index[sample["sample_index"]]
+                for sample in _sample_rows(self.workspace, run["id"])
+                if (sample["quality_status"] != "complete" or sample["quality_score"] is None)
+                and sample["sample_index"] in frame_by_index
+            ]
+            outcome = _process_video(
+                self.workspace,
+                row,
+                self.provider,
+                self.algorithm,
+                self.version,
+                self.settings,
+                self.cancel_event,
+                self.timings,
+                extracted_frames=selected,
+            )
+            if outcome == "cancelled":
+                self._cancel()
+                return
+            self.succeeded += 1
+        except Exception as error:
+            _mark_failed(self.workspace, row, self.algorithm, self.version, self.settings, error)
+            self.errors += 1
+            self.store.record_error(self.job_id, error, physical_file_id=file_id, relative_path=row["relative_path"])
+        finally:
+            self.processed += 1
+            self.store.checkpoint(self.job_id, self.processed, self.errors, self.skipped)
+
+    def finish(self):
+        for row in self.rows.values():
+            if row["id"] in self.completed_ids:
+                continue
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                return self._cancel()
+            self.completed_ids.add(row["id"])
+            try:
+                if _video_state_ready(self.workspace, row, self.algorithm, self.version, self.settings):
+                    self.skipped += 1
+                elif self.preflight_error is not None:
+                    _mark_failed(self.workspace, row, self.algorithm, self.version, self.settings, self.preflight_error)
+                    self.errors += 1
+                    self.store.record_error(self.job_id, self.preflight_error, physical_file_id=row["id"], relative_path=row["relative_path"])
+                else:
+                    outcome = _process_video(
+                        self.workspace,
+                        row,
+                        self.provider,
+                        self.algorithm,
+                        self.version,
+                        self.settings,
+                        self.cancel_event,
+                        self.timings,
+                    )
+                    if outcome == "cancelled":
+                        return self._cancel()
+                    self.succeeded += 1
+            except Exception as error:
+                _mark_failed(self.workspace, row, self.algorithm, self.version, self.settings, error)
+                self.errors += 1
+                self.store.record_error(self.job_id, error, physical_file_id=row["id"], relative_path=row["relative_path"])
+            self.processed += 1
+            self.store.checkpoint(self.job_id, self.processed, self.errors, self.skipped)
+        self.store.complete(self.job_id, self.processed, self.errors, self.skipped)
+        return JobRunResult(self.job_id, self.processed, self.succeeded, self.errors, False, self.skipped)
+
+    def _cancel(self):
+        self.store.cancel(self.job_id, self.processed, self.errors, self.skipped)
+        return JobRunResult(self.job_id, self.processed, self.succeeded, self.errors, True, self.skipped)
+
+
+def _process_video(
+    workspace,
+    row,
+    provider,
+    algorithm,
+    version,
+    settings,
+    cancel_event,
+    timings=None,
+    substage=None,
+    extracted_frames=None,
+):
     duration = row["duration_seconds"]
     count = sample_count(
         float(duration) if duration is not None else 0.0,
@@ -468,32 +648,36 @@ def _process_video(workspace, row, provider, algorithm, version, settings, cance
         if cancel_event is not None and cancel_event.is_set():
             _mark_cancelled(workspace, row["id"], run["id"])
             return "cancelled"
-        try:
-            extraction_start = perf_counter()
-            extract_args = (
-                workspace.absolute_path(row["relative_path"]),
-                [sample["requested_timestamp"] for sample in pending_samples],
-                cancel_event,
-            )
-            extract_kwargs = {}
-            if substage:
-                substage("Extracting frames", 0, len(pending_samples))
-                extract_kwargs["progress"] = lambda current, total: substage("Extracting frames", current, total)
-            if float(duration) > VIDEO_SINGLE_PROCESS_MAX_DURATION_SECONDS:
-                extract_kwargs["seek_per_frame"] = True
-            if timings is not None:
-                extract_kwargs["timings"] = timings
-            extracted = extract_video_frames(*extract_args, **extract_kwargs)
-            if timings is not None:
-                timings["extraction_total"] = timings.get("extraction_total", 0.0) + perf_counter() - extraction_start
-        except VideoExtractionCancelled:
-            _mark_cancelled(workspace, row["id"], run["id"])
-            return "cancelled"
-        except Exception as error:
-            extraction_error = error
-            extracted = []
-        else:
+        if extracted_frames is not None:
+            extracted = list(extracted_frames)
             extraction_error = None
+        else:
+            try:
+                extraction_start = perf_counter()
+                extract_args = (
+                    workspace.absolute_path(row["relative_path"]),
+                    [sample["requested_timestamp"] for sample in pending_samples],
+                    cancel_event,
+                )
+                extract_kwargs = {}
+                if substage:
+                    substage("Extracting frames", 0, len(pending_samples))
+                    extract_kwargs["progress"] = lambda current, total: substage("Extracting frames", current, total)
+                if float(duration) > VIDEO_SINGLE_PROCESS_MAX_DURATION_SECONDS:
+                    extract_kwargs["seek_per_frame"] = True
+                if timings is not None:
+                    extract_kwargs["timings"] = timings
+                extracted = extract_video_frames(*extract_args, **extract_kwargs)
+                if timings is not None:
+                    timings["extraction_total"] = timings.get("extraction_total", 0.0) + perf_counter() - extraction_start
+            except VideoExtractionCancelled:
+                _mark_cancelled(workspace, row["id"], run["id"])
+                return "cancelled"
+            except Exception as error:
+                extraction_error = error
+                extracted = []
+            else:
+                extraction_error = None
         assessed = 0
         if substage:
             substage("Assessing frames", 0, len(extracted))

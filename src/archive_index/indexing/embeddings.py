@@ -72,6 +72,7 @@ def index_embeddings(
     batch_size: int = 16,
     precision: str = "fp32",
     preparation_workers: int = DEFAULT_EMBEDDING_PREPARATION_WORKERS,
+    video_frame_consumer: Callable | None = None,
 ) -> JobRunResult:
     configuration = workspace.configuration()
     sources = _embedding_sources(workspace, configuration)
@@ -184,8 +185,19 @@ def index_embeddings(
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
             try:
-                _process_video(workspace, source, provider, run["id"], settings_json, cancel_event, infer,
-                    lambda stage, current, total: report_substage(identifier, stage, current, total, source["relative_path"]))
+                _process_video(
+                    workspace,
+                    source,
+                    provider,
+                    run["id"],
+                    settings_json,
+                    cancel_event,
+                    infer,
+                    lambda stage, current, total: report_substage(
+                        identifier, stage, current, total, source["relative_path"]
+                    ),
+                    video_frame_consumer,
+                )
             except EmbeddingCancelled:
                 _finish_run(workspace, run["id"], "cancelled")
                 store.cancel(identifier, processed, errors, skipped)
@@ -559,7 +571,17 @@ def _store_image_embedding(workspace, source, provider, run_id, vector):
         )
 
 
-def _process_video(workspace, source, provider, run_id, settings_json, cancel_event, infer, substage=None):
+def _process_video(
+    workspace,
+    source,
+    provider,
+    run_id,
+    settings_json,
+    cancel_event,
+    infer,
+    substage=None,
+    video_frame_consumer=None,
+):
     duration = float(source["duration_seconds"] or 0)
     count = _video_sample_count(source)
     sample_run_id, sample_rows = _sample_context(workspace, source, duration, count)
@@ -619,6 +641,10 @@ def _process_video(workspace, source, provider, run_id, settings_json, cancel_ev
                         """,
                         (run_id, source["asset_id"], source["physical_file_id"], sample_run_id, sample["sample_index"], sample["requested_timestamp"], frame_fingerprint, blob, dimension, now, now),
                     )
+        if video_frame_consumer is not None:
+            video_frame_consumer(source, rows, frames)
+            if cancel_event is not None and cancel_event.is_set():
+                raise EmbeddingCancelled("embedding cancelled")
         fingerprint = _input_fingerprint(source, provider)
         with workspace.transaction() as connection:
             connection.execute(

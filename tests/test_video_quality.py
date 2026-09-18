@@ -7,17 +7,22 @@ from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 
+import numpy as np
 from PIL import Image
 
+from archive_index.embeddings.providers import EmbeddingProvider
+from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.scanner import scan
 from archive_index.indexing.video_quality import (
     ExtractedVideoFrame,
     VideoQualityError,
     aggregate_scores,
     index_video_quality,
+    prepare_shared_video_quality,
     sample_count,
     sample_timestamps,
 )
+from archive_index.jobs.engine import JobStore
 from archive_index.media.quality_provider import OffQualityProvider, ProviderResult
 from archive_index.workspace import Workspace
 
@@ -42,6 +47,32 @@ class FakeVideoProvider:
         return [ProviderResult({"model_output": score}, score) for score in [next(self.scores) for _ in images]]
 
 
+class FakeEmbeddingProvider(EmbeddingProvider):
+    provider_id = "fake-video-embedding"
+    model_id = "fake-video-embedding"
+    version = "1"
+    dimension = 3
+    batch_size = 8
+
+    @property
+    def settings(self):
+        return {
+            "model_id": self.model_id,
+            "version": self.version,
+            "dimension": self.dimension,
+            "normalization": "unit_l2",
+        }
+
+    def preflight(self):
+        return None
+
+    def encode_images(self, images):
+        return [np.array([image.width, image.height, 1.0], dtype=np.float32) for image in images]
+
+    def encode_text(self, text):
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+
 class VideoQualityTests(unittest.TestCase):
     @staticmethod
     def _fake_frames(timestamps):
@@ -49,6 +80,123 @@ class VideoQualityTests(unittest.TestCase):
             ExtractedVideoFrame(timestamp, Image.new("RGB", (64, 64), "navy"))
             for timestamp in timestamps
         ]
+
+    @staticmethod
+    def _video_workspace(temporary_directory):
+        root = Path(temporary_directory) / "archive"
+        root.mkdir()
+        (root / "clip.mp4").write_bytes(b"video")
+        workspace = Workspace.create(root)
+        scan(workspace)
+        with workspace.transaction() as connection:
+            connection.execute("UPDATE physical_file SET duration_seconds = 2.0 WHERE relative_path = 'clip.mp4'")
+        workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": True, "include_videos_in_semantic_search": True})
+        return workspace
+
+    def test_shared_video_frames_feed_quality_and_embeddings_once(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = self._video_workspace(temporary_directory)
+            quality_job_id = JobStore(workspace).create("video_quality")
+            quality = prepare_shared_video_quality(
+                workspace,
+                job_id=quality_job_id,
+                quality_provider=FakeVideoProvider([0.2, 0.4, 0.8, 0.6]),
+            )
+
+            def fake_extract(source, timestamps, cancel_event=None, **kwargs):
+                return self._fake_frames(timestamps)
+
+            with patch("archive_index.indexing.embeddings.extract_video_frames", side_effect=fake_extract) as extractor:
+                embeddings = index_embeddings(
+                    workspace,
+                    provider=FakeEmbeddingProvider(),
+                    video_frame_consumer=quality.consume,
+                )
+                video_quality = quality.finish()
+
+            self.assertEqual((embeddings.errors, video_quality.errors, extractor.call_count), (0, 0, 1))
+            with closing(workspace.connect()) as connection:
+                states = connection.execute(
+                    "SELECT component, status FROM component_state WHERE component IN ('quality', 'embedding:fake-video-embedding') ORDER BY component"
+                ).fetchall()
+                frame_count = connection.execute("SELECT COUNT(*) FROM video_frame_embedding").fetchone()[0]
+                score = connection.execute("SELECT quality_score FROM physical_file").fetchone()[0]
+            self.assertEqual([tuple(row) for row in states], [("embedding:fake-video-embedding", "complete"), ("quality", "complete")])
+            self.assertEqual(frame_count, 4)
+            self.assertAlmostEqual(score, 0.8)
+
+    def test_shared_video_quality_skips_cached_quality_while_embedding_decodes(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = self._video_workspace(temporary_directory)
+            provider = FakeVideoProvider([0.2, 0.4, 0.8, 0.6])
+            with patch("archive_index.indexing.video_quality.extract_video_frames", side_effect=lambda source, timestamps, cancel_event=None, **kwargs: self._fake_frames(timestamps)):
+                index_video_quality(workspace, quality_provider=provider)
+            quality_job_id = JobStore(workspace).create("video_quality")
+            cached_quality_provider = FakeVideoProvider()
+            quality = prepare_shared_video_quality(
+                workspace,
+                job_id=quality_job_id,
+                quality_provider=cached_quality_provider,
+            )
+            with patch(
+                "archive_index.indexing.embeddings.extract_video_frames",
+                side_effect=lambda source, timestamps, cancel_event=None, **kwargs: self._fake_frames(timestamps),
+            ) as extractor:
+                embeddings = index_embeddings(
+                    workspace,
+                    provider=FakeEmbeddingProvider(),
+                    video_frame_consumer=quality.consume,
+                )
+                video_quality = quality.finish()
+            self.assertEqual((embeddings.errors, video_quality.skipped, extractor.call_count), (0, 1, 1))
+            self.assertEqual(cached_quality_provider.preflight_calls, 0)
+
+    def test_cached_embeddings_leave_quality_to_its_normal_decode_path(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = self._video_workspace(temporary_directory)
+            with patch(
+                "archive_index.indexing.embeddings.extract_video_frames",
+                side_effect=lambda source, timestamps, cancel_event=None, **kwargs: self._fake_frames(timestamps),
+            ):
+                index_embeddings(workspace, provider=FakeEmbeddingProvider())
+            quality_job_id = JobStore(workspace).create("video_quality")
+            quality = prepare_shared_video_quality(
+                workspace,
+                job_id=quality_job_id,
+                quality_provider=FakeVideoProvider([0.2, 0.4, 0.8, 0.6]),
+            )
+            with patch(
+                "archive_index.indexing.video_quality.extract_video_frames",
+                side_effect=lambda source, timestamps, cancel_event=None, **kwargs: self._fake_frames(timestamps),
+            ) as extractor:
+                video_quality = quality.finish()
+            self.assertEqual((video_quality.errors, video_quality.succeeded, extractor.call_count), (0, 1, 1))
+
+    def test_quality_failure_does_not_fail_shared_embeddings(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = self._video_workspace(temporary_directory)
+            quality_job_id = JobStore(workspace).create("video_quality")
+            quality = prepare_shared_video_quality(
+                workspace,
+                job_id=quality_job_id,
+                quality_provider=FakeVideoProvider([0.8]),
+            )
+            with patch(
+                "archive_index.indexing.embeddings.extract_video_frames",
+                side_effect=lambda source, timestamps, cancel_event=None, **kwargs: self._fake_frames(timestamps),
+            ):
+                embeddings = index_embeddings(
+                    workspace,
+                    provider=FakeEmbeddingProvider(),
+                    video_frame_consumer=quality.consume,
+                )
+                video_quality = quality.finish()
+            self.assertEqual((embeddings.errors, video_quality.errors), (0, 1))
+            with closing(workspace.connect()) as connection:
+                status = connection.execute(
+                    "SELECT status FROM component_state WHERE component = 'quality'"
+                ).fetchone()[0]
+            self.assertEqual(status, "failed")
 
     def test_sampling_rule_and_top_quartile_aggregation(self):
         self.assertEqual(sample_count(1.01, 2, 2, 32), 3)

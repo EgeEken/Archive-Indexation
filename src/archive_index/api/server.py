@@ -35,7 +35,7 @@ from ..indexing.embeddings import EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, index_e
 from ..indexing.grouping import build_groups, extract_visual_features
 from ..indexing.media_pipeline import index_workspace
 from ..indexing.raw_quality import index_raw_quality
-from ..indexing.video_quality import index_video_quality, video_quality_details
+from ..indexing.video_quality import index_video_quality, prepare_shared_video_quality, video_quality_details
 from ..indexing.recommendation import build_recommendations
 from ..indexing.reconciliation import reconcile_workspace
 from ..indexing.scanner import scan
@@ -497,23 +497,40 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 self._cancel_events[(handle, video_quality_job_id)] = cancel_event
             job_ids.append(video_quality_job_id)
             current_job_id = video_quality_job_id
-            video_quality_result = index_video_quality(
-                workspace,
-                job_id=video_quality_job_id,
-                cancel_event=cancel_event,
-            )
-            if video_quality_result.cancelled:
-                return
+            shared_video_quality = None
+            configuration = workspace.configuration()
+            if configuration["include_videos_in_semantic_search"] and configuration["semantic_search_enabled"]:
+                shared_video_quality = prepare_shared_video_quality(
+                    workspace,
+                    job_id=video_quality_job_id,
+                    cancel_event=cancel_event,
+                    timings=timings,
+                )
+            if shared_video_quality is None:
+                video_quality_result = index_video_quality(
+                    workspace,
+                    job_id=video_quality_job_id,
+                    cancel_event=cancel_event,
+                )
+                if video_quality_result.cancelled:
+                    return
             embedding_job_id = JobStore(workspace).create("embeddings")
             with self._active_lock:
                 self._cancel_events[(handle, embedding_job_id)] = cancel_event
             job_ids.append(embedding_job_id)
             current_job_id = embedding_job_id
             embedding_result = index_embeddings(
-                workspace, job_id=embedding_job_id, cancel_event=cancel_event
+                workspace,
+                job_id=embedding_job_id,
+                cancel_event=cancel_event,
+                video_frame_consumer=shared_video_quality.consume if shared_video_quality is not None else None,
             )
             if embedding_result.cancelled:
+                if shared_video_quality is not None:
+                    shared_video_quality.finish()
                 return
+            if shared_video_quality is not None:
+                shared_video_quality.finish()
             feature_job_id = JobStore(workspace).create("visual_features")
             with self._active_lock:
                 self._cancel_events[(handle, feature_job_id)] = cancel_event
