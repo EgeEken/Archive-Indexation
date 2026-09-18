@@ -45,3 +45,21 @@ The cache stores one active workspace/run matrix in normalized fp32 form, allows
 | 100,000 | 5.43 s | 1.30 s | 216.6 MB | 569.3 MB |
 
 The repeated query improved from 0.43/2.28/4.66 s to 0.12/0.72/1.30 s at 10k/50k/100k. Exact cosine ranking, video MAX-frame collapse, filtering, and run/provider/workspace provenance are unchanged.
+
+## Final repeat after all Phase 9.3B units
+
+A final rerun of the same harness on 2026-09-18 produced the following comparison values. The difference from the earlier after-unit measurements is normal local filesystem and allocation-tracing variance.
+
+| Logical assets | Browser cold | Browser warm | Folder filter | Filename sort | Quality sort | Semantic cold | Semantic warm |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 1.38 s | 0.15 s | 0.22 s | 0.17 s | 0.17 s | 0.38 s | 0.11 s |
+| 50,000 | 6.99 s | 0.78 s | 1.08 s | 0.79 s | 0.78 s | 2.11 s | 0.43 s |
+| 100,000 | 14.36 s | 1.45 s | 2.14 s | 1.54 s | 1.83 s | 4.35 s | 0.94 s |
+
+The final semantic allocation tracing remained 21.8/108.4/216.6 MB current and 56.8/284.8/569.3 MB peak at 10k/50k/100k. The browser peak remained about 53.3/265.8/530.8 MB.
+
+## Shared video decode validation
+
+The real Sony `ODA8_7563.MP4` clip is 3840×2160 HEVC `yuv422p10le` at approximately 119.88 fps. The configured 9.009-second sample set contains 19 frames. On the CPU FFmpeg path, two sequential decode passes took 28.425 s and one shared pass took 14.294 s. With installed LAR-IQA and OpenCLIP inference on the RTX 3070 Ti Laptop GPU, the shared run measured 14.536 s decode, 1.368 s quality inference, and 0.446 s embedding inference, for 16.350 s total. The equivalent separate-pass total was approximately 30.239 s using the two-pass decode measurement and the same inference measurements. No sampled-frame directory is persisted; frames remain transient and are released after both consumers finish.
+
+The remaining scaling limits are the bounded in-memory browser catalog and exact full-matrix semantic ranking. The active matrix cache is intentionally bounded to two workspace entries; an ANN index, persistent sample-frame cache, and external cache service remain out of scope.
