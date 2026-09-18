@@ -66,6 +66,21 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('<span>Assess</span> <span class="setup-accent">video</span> <span>quality</span> <span class="setup-accent">too</span>', source)
         self.assertIn('<span class="setup-accent">Include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>', source)
 
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_home_cards_format_counts_timestamps_and_thumbnails(self) -> None:
+        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        timestamp=source[source.index("function formatHomeTimestamp"):source.index("function workspaceAssetCount")]
+        count=source[source.index("function workspaceAssetCount"):source.index("function scoreMarkup")]
+        script=timestamp+count+"console.log(JSON.stringify({time:formatHomeTimestamp('2026-09-18T20:27:12+00:00'),one:workspaceAssetCount(1),many:workspaceAssetCount(2)}));"
+        result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",check=True).stdout)
+        self.assertEqual(result["time"], "18/09/2026 · 23:27")
+        self.assertIn('<strong class="workspace-asset-count">1</strong> indexed asset', result["one"])
+        self.assertIn('<strong class="workspace-asset-count">2</strong> indexed assets', result["many"])
+        self.assertIn("home-active", source)
+        self.assertIn('class="recent-thumb" loading="lazy"', source)
+        self.assertIn("workspace.thumbnail_url", source)
+        self.assertNotIn("${workspace.assets ?? 0} indexed assets", source)
+
     def test_filename_sort_control_is_available_before_quality(self) -> None:
         html = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "index.html").read_text(encoding="utf-8")
         sort_row = html[html.index('id="sort-buttons"'):html.index("</div>", html.index('id="sort-buttons"'))]

@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from contextlib import closing
+from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -715,6 +716,13 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.root = base / "new archive"
         self.root.mkdir()
         Image.new("RGB", (80, 60), color=(100, 140, 200)).save(self.root / "photo.jpg")
+        self.home_root = base / "home workspace"
+        self.home_root.mkdir()
+        Image.new("RGB", (80, 60), color=(40, 80, 120)).save(self.home_root / "home.jpg")
+        Image.new("RGB", (80, 60), color=(120, 80, 40)).save(self.home_root / "home-second.jpg")
+        self.workspace = Workspace.create(self.home_root)
+        scan(self.workspace)
+        run_index_workspace(self.workspace, components=("metadata", "thumbnail"), quality_provider=OffQualityProvider())
         self.registry_path = base / "recent.json"
         self.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=self.registry_path)
         self.quality_provider_patch = patch(
@@ -899,6 +907,81 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         entries = {entry["id"]: entry for entry in home["workspaces"]}
         self.assertTrue(entries[workspace_id(healthy)]["available"])
         self.assertFalse(entries["broken-workspace"]["available"])
+
+    def test_home_thumbnail_prefers_highest_quality_existing_thumbnail(self) -> None:
+        handle = workspace_id(self.workspace)
+        self.server.registry.add(self.workspace)
+        with self.workspace.transaction() as connection:
+            rows = connection.execute(
+                "SELECT id, relative_path FROM physical_file WHERE media_type = 'image' ORDER BY relative_path"
+            ).fetchall()
+            for index, row in enumerate(rows):
+                name = f"home-{index}.jpg"
+                Image.new("RGB", (8, 8), color=(index * 90, 10, 10)).save(self.workspace.index_path(f"thumbnails/{name}"))
+                connection.execute("UPDATE physical_file SET quality_score = ? WHERE id = ?", (0.2 + index * 0.7, row["id"]))
+                connection.execute(
+                    "UPDATE component_state SET output_path = ?, status = 'complete' WHERE physical_file_id = ? AND component = 'thumbnail'",
+                    (f"thumbnails/{name}", row["id"]),
+                )
+
+        selected = self.server.home_thumbnail(handle)
+
+        self.assertEqual(selected.name, "home-1.jpg")
+        status, home = _get_json(self.base_url, "/api/workspaces")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(home["workspaces"][0]["thumbnail_url"])
+        status, payload = _get_bytes(self.base_url, home["workspaces"][0]["thumbnail_url"])
+        self.assertEqual(status, 200)
+        pixel = Image.open(BytesIO(payload)).getpixel((0, 0))
+        for actual, expected in zip(pixel, (90, 10, 10)):
+            self.assertAlmostEqual(actual, expected, delta=3)
+
+    def test_home_thumbnail_falls_back_deterministically_without_quality(self) -> None:
+        handle = workspace_id(self.workspace)
+        self.server.registry.add(self.workspace)
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE physical_file SET quality_score = NULL")
+            rows = connection.execute(
+                "SELECT id FROM physical_file WHERE media_type = 'image' ORDER BY relative_path"
+            ).fetchall()
+            for index, row in enumerate(rows):
+                name = f"fallback-{index}.jpg"
+                Image.new("RGB", (8, 8), color=(10, index * 90, 10)).save(self.workspace.index_path(f"thumbnails/{name}"))
+                connection.execute(
+                    "UPDATE component_state SET output_path = ?, status = 'complete' WHERE physical_file_id = ? AND component = 'thumbnail'",
+                    (f"thumbnails/{name}", row["id"]),
+                )
+
+        self.assertEqual(self.server.home_thumbnail(handle).name, "fallback-0.jpg")
+
+    def test_home_listing_omits_missing_thumbnails_and_unavailable_entries(self) -> None:
+        self.server.registry.add(self.workspace)
+        with self.workspace.transaction() as connection:
+            connection.execute("DELETE FROM component_state WHERE component = 'thumbnail'")
+        status, home = _get_json(self.base_url, "/api/workspaces")
+        self.assertEqual(status, 200)
+        self.assertIsNone(home["workspaces"][0]["thumbnail_url"])
+
+        missing = self.root / "missing-home-workspace"
+        self.server.registry.path.write_text(
+            json.dumps([{"id": "missing-home-workspace", "path": str(missing)}]),
+            encoding="utf-8",
+        )
+        status, home = _get_json(self.base_url, "/api/workspaces")
+        unavailable = next(entry for entry in home["workspaces"] if entry["id"] == "missing-home-workspace")
+        self.assertEqual((status, unavailable["available"], unavailable.get("thumbnail_url")), (200, False, None))
+
+    def test_home_registry_inspection_does_not_full_open_workspace(self) -> None:
+        registry = self.root / "home-registry.json"
+        handle = workspace_id(self.workspace)
+        registry.write_text(json.dumps([{"id": handle, "path": str(self.home_root)}]), encoding="utf-8")
+        server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=registry)
+        try:
+            with patch("archive_index.api.server.Workspace.open", side_effect=AssertionError("Home listing opened workspace")):
+                entries = server.list_workspaces()
+            self.assertEqual((len(entries), entries[0]["id"], entries[0]["available"]), (1, handle, True))
+        finally:
+            server.server_close()
 
     def test_cached_workspace_with_missing_database_can_be_removed_without_reopening_it(self) -> None:
         stale_root = self.root / "stale"

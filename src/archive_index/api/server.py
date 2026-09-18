@@ -138,6 +138,30 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             seen.add(handle)
         return entries
 
+    def home_thumbnail(self, handle: str) -> Path:
+        workspace = self._workspaces.get(handle)
+        root = workspace.root if workspace is not None else None
+        if root is None:
+            entry = next((candidate for candidate in self.registry.entries() if candidate.get("id") == handle), None)
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise ResourceNotFound("workspace is unavailable")
+            root = Path(entry["path"]).expanduser().resolve(strict=False)
+        database_path = root / ".archive-index" / "index.sqlite"
+        if not database_path.is_file():
+            raise ResourceNotFound("workspace database is unavailable")
+        connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0.25)
+        connection.row_factory = sqlite3.Row
+        try:
+            identity = connection.execute("SELECT workspace_id FROM workspace_info WHERE id = 1").fetchone()
+            if identity is None or identity["workspace_id"] != handle:
+                raise ResourceNotFound("workspace identity does not match recent entry")
+            output_path = _home_thumbnail_path(connection, root)
+        finally:
+            connection.close()
+        if output_path is None:
+            raise ResourceNotFound("thumbnail is not available")
+        return Workspace(root).index_path(output_path)
+
     def offline_media_info(self, handle: str) -> dict[str, int]:
         _, workspace = self.resolve_workspace(handle)
         _require_workspace_root(workspace)
@@ -799,6 +823,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if request.path == "/api/workspaces":
                 self._send_json(200, {"workspaces": self.server.list_workspaces()})
+                return
+            if request.path == "/api/workspaces/thumbnail":
+                self._send_file(self.server.home_thumbnail(_first(query, "workspace", "")), "image/jpeg")
                 return
             if request.path == "/api/embedding-models":
                 self._send_json(200, {"models": _embedding_model_statuses()})
@@ -1536,6 +1563,7 @@ def _workspace_summary_from_connection(connection, handle: str, root: Path) -> d
         "SELECT COALESCE((SELECT SUM(length(embedding)) FROM logical_asset_embedding), 0) + COALESCE((SELECT SUM(length(embedding)) FROM video_frame_embedding), 0)"
     ).fetchone()[0]
     configuration = configuration_from_connection(connection)
+    thumbnail = _home_thumbnail_path(connection, root)
     return {
         "id": handle,
         "name": root.name or str(root),
@@ -1557,7 +1585,41 @@ def _workspace_summary_from_connection(connection, handle: str, root: Path) -> d
         "embedding_provider": configuration["embedding_provider"],
         "embedding_model": _embedding_model_status(configuration["embedding_provider"]),
         "embedding_storage_bytes": embedding_storage,
+        "thumbnail_url": _url("/api/workspaces/thumbnail", handle) if thumbnail else None,
     }
+
+
+def _home_thumbnail_path(connection, root: Path) -> str | None:
+    workspace = Workspace(root)
+    rows = connection.execute(
+        """
+        SELECT pf.logical_asset_id, thumbnails.output_path,
+               (SELECT MAX(pf_quality.quality_score)
+                  FROM physical_file AS pf_quality
+                 WHERE pf_quality.logical_asset_id = pf.logical_asset_id
+                   AND pf_quality.media_type = 'image'
+                   AND pf_quality.in_scope = 1
+                   AND pf_quality.is_online = 1) AS asset_quality,
+               pf.relative_path, pf.id
+          FROM physical_file AS pf
+          JOIN component_state AS thumbnails
+            ON thumbnails.physical_file_id = pf.id
+           AND thumbnails.component = 'thumbnail'
+           AND thumbnails.status = 'complete'
+         WHERE pf.media_type = 'image'
+           AND pf.in_scope = 1
+           AND pf.is_online = 1
+           AND thumbnails.output_path IS NOT NULL
+         ORDER BY asset_quality IS NULL, asset_quality DESC, pf.relative_path, pf.id
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            if workspace.index_path(row["output_path"]).is_file():
+                return row["output_path"]
+        except WorkspaceError:
+            continue
+    return None
 
 
 def _workspace_plan(workspace: Workspace, configuration: Mapping[str, object]) -> dict[str, object]:

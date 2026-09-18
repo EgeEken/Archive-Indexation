@@ -11,6 +11,8 @@
     button:disabled { cursor: default; opacity: .45; }
     a { color: #a9c9e6; }
     .app-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .8rem max(1rem, calc((100vw - 1500px) / 2)); border-bottom: 1px solid #303841; background: #1c2127; position: sticky; top: 0; z-index: 3; }
+    body.home-active .app-header { display: none; }
+    body.home-active main { margin-top: 0; }
     .brand { display: flex; gap: .7rem; align-items: baseline; min-width: 0; }
     .brand a { color: #fff; text-decoration: none; font-weight: 700; letter-spacing: .01em; }
     .crumb { color: #9faab5; font-size: .86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -27,7 +29,12 @@
     .workspace-form { display: flex; gap: .55rem; max-width: 760px; margin: 0 auto 2rem; }
     .workspace-form input { flex: 1; min-width: 0; }
     .recent-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .7rem; }
-    .recent-card { display: flex; flex-direction: column; gap: .45rem; justify-content: space-between; min-height: 150px; }
+    .recent-card { display: flex; flex-direction: column; gap: .45rem; justify-content: space-between; min-height: 190px; }
+    .recent-card-content { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: .7rem; align-items: start; min-width: 0; }
+    .recent-card:not(.has-thumbnail) .recent-card-content { display: block; }
+    .recent-thumb { width: 5.5rem; height: 5.5rem; object-fit: cover; border-radius: .35rem; background: #0e1114; }
+    .recent-card-copy { min-width: 0; }
+    .workspace-asset-count { color: #edf0f3; }
     .recent-card h3 { overflow-wrap: anywhere; margin-bottom: 0; }
     .recent-card .path { font-size: .78rem; color: #9faab5; overflow-wrap: anywhere; }
     .recent-actions { display: flex; gap: .45rem; margin-top: .45rem; }

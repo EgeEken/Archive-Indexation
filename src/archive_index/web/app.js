@@ -125,6 +125,18 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${value.toLocaleString()} ${value === 1 ? singular : plural}`;
 }
 
+function formatHomeTimestamp(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = number => String(number).padStart(2, "0");
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} · ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function workspaceAssetCount(count) {
+  const value = Number(count || 0);
+  return `<strong class="workspace-asset-count">${value.toLocaleString()}</strong> ${value === 1 ? "indexed asset" : "indexed assets"}`;
+}
+
 function scoreMarkup(score) {
   return score == null ? "" : `<span class="quality-chip" style="--quality-color: ${qualityColor(score)}">Quality: ${Number(score).toFixed(2)}</span>`;
 }
@@ -210,6 +222,7 @@ function renderCard(item, index) {
 }
 
 async function loadHome() {
+  document.body.classList.add("home-active");
   $("home-view").classList.remove("hidden");
   $("workspace-view").classList.add("hidden");
   $("setup-view").classList.add("hidden");
@@ -219,7 +232,12 @@ async function loadHome() {
   $("problems-button").classList.add("hidden");
   $("workspace-crumb").classList.add("hidden");
   const data = await api("/api/workspaces");
-  $("recent-list").innerHTML = data.workspaces.map((workspace) => `<article class="panel recent-card"><div><h3>${escapeHtml(workspace.name || "Workspace")}</h3><div class="path">${escapeHtml(workspace.path || "")}</div><div class="muted">${workspace.available === false ? "Unavailable" : `${workspace.assets ?? 0} indexed assets${workspace.last_indexed ? ` · indexed ${escapeHtml(workspace.last_indexed)}` : ""}`}</div></div><div class="recent-actions">${workspace.available === false ? "" : `<button type="button" data-open="${escapeHtml(workspace.id)}">Open</button>`}<button class="danger-button" type="button" data-remove="${escapeHtml(workspace.id)}">Remove</button></div></article>`).join("") || `<div class="empty">No recent workspaces yet.</div>`;
+  $("recent-list").innerHTML = data.workspaces.map((workspace) => {
+    const available = workspace.available !== false;
+    const thumbnail = available && workspace.thumbnail_url ? `<img class="recent-thumb" loading="lazy" src="${escapeHtml(workspace.thumbnail_url)}" alt="${escapeHtml(workspace.name || "Workspace")} thumbnail" onerror="this.remove()">` : "";
+    const indexed = available ? `<div class="muted">${workspaceAssetCount(workspace.assets)}${workspace.last_indexed ? ` · indexed ${escapeHtml(formatHomeTimestamp(workspace.last_indexed))}` : ""}</div>` : "<div class=\"muted\">Unavailable</div>";
+    return `<article class="panel recent-card${thumbnail ? " has-thumbnail" : ""}"><div class="recent-card-content">${thumbnail}<div class="recent-card-copy"><h3>${escapeHtml(workspace.name || "Workspace")}</h3><div class="path">${escapeHtml(workspace.path || "")}</div>${indexed}</div></div><div class="recent-actions">${available ? `<button type="button" data-open="${escapeHtml(workspace.id)}">Open</button>` : ""}<button class="danger-button" type="button" data-remove="${escapeHtml(workspace.id)}">Remove</button></div></article>`;
+  }).join("") || `<div class="empty">No recent workspaces yet.</div>`;
   $("recent-list").querySelectorAll("[data-open]").forEach((button) => button.addEventListener("click", () => { location.href = `/?workspace=${encodeURIComponent(button.dataset.open)}`; }));
   $("recent-list").querySelectorAll("[data-remove]").forEach((button) => button.addEventListener("click", () => confirmWorkspaceRemoval(button.dataset.remove)));
 }
@@ -378,6 +396,7 @@ function bindSetupControls() {
 }
 
 function showSetup(payload) {
+  document.body.classList.remove("home-active");
   state.setup = {
     path: payload.path,
     indexed: Boolean(payload.indexed),
@@ -524,6 +543,7 @@ async function finishWorkspaceRemoval(id, deleteIndex) {
 }
 
 async function loadWorkspace() {
+  document.body.classList.remove("home-active");
   $("home-view").classList.add("hidden");
   $("setup-view").classList.add("hidden");
   $("setup-header-summary").classList.add("hidden");
