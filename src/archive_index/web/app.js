@@ -120,6 +120,11 @@ function qualityColor(score) {
   return `rgb(${lower[1].map((channel, index) => Math.round(channel + (upper[1][index] - channel) * progress)).join(", ")})`;
 }
 
+function countLabel(count, singular, plural = `${singular}s`) {
+  const value = Number(count);
+  return `${value.toLocaleString()} ${value === 1 ? singular : plural}`;
+}
+
 function scoreMarkup(score) {
   return score == null ? "" : `<span class="quality-chip" style="--quality-color: ${qualityColor(score)}">Quality: ${Number(score).toFixed(2)}</span>`;
 }
@@ -861,7 +866,7 @@ function renderSimilarResults() {
   const section = $("similar-gallery");
   if (!similar) return;
   const strong = similar.strongCount;
-  const heading = similar.loading && !similar.items.length ? "Similar images" : strong ? String(strong) + " similar images found" : "No strongly similar images found";
+  const heading = similar.loading && !similar.items.length ? "Similar images" : strong ? countLabel(strong, "similar image found", "similar images found") : "No strongly similar images found";
   const loadMore = similar.loading
     ? '<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Loading similar images…</div>'
     : similar.hasNext && similar.autoLoad
@@ -873,9 +878,22 @@ function renderSimilarResults() {
   $("similar-close").onclick = closeSimilar;
   $("similar-more")?.addEventListener("click", () => { similar.autoLoad = true; loadSimilarPage(); });
   section.querySelectorAll("[data-similar-index]").forEach(button => button.onclick = () => {
-    state.similarSource ||= {items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart, keepSimilar:true}};
-    showViewer(Number(button.dataset.similarIndex), similar.items, {mode: "similar", keepSimilar:true});
+    showViewer(Number(button.dataset.similarIndex) + 1, similarViewerItems(), {mode: "similar", keepSimilar:true});
   });
+}
+
+function similarViewerItems() {
+  if (!state.similar) return [];
+  const sourceId = state.similar.source.asset_id;
+  return [state.similar.source, ...state.similar.items.filter(item => item.asset_id !== sourceId)];
+}
+
+function syncSimilarViewer() {
+  if (state.viewerContext !== "similar" || !state.similar) return;
+  const currentId = state.viewerItems[state.viewerIndex]?.asset_id || state.similar.source.asset_id;
+  state.viewerItems = similarViewerItems();
+  state.viewerIndex = Math.max(0, state.viewerItems.findIndex(item => item.asset_id === currentId));
+  renderViewer();
 }
 
 function closeSimilar() {
@@ -897,12 +915,14 @@ async function loadSimilarPage() {
     const limit = similar.initial ? 12 : 6;
     const data = await api(`/api/assets/${encodeURIComponent(similar.assetId)}/similar?offset=${similar.offset}&limit=${limit}&initial=${similar.initial ? 1 : 0}`);
     if (state.similar !== similar) return;
-    similar.items = [...similar.items, ...data.items];
+    const existing = new Set(similar.items.map(item => item.asset_id));
+    similar.items = [...similar.items, ...data.items.filter(item => !existing.has(item.asset_id) && item.asset_id !== similar.source.asset_id)];
     similar.offset += data.items.length;
     similar.total = data.total;
     similar.strongCount = data.strong_count;
-    similar.hasNext = data.has_next && data.items.length > 0;
+    similar.hasNext = Boolean(data.has_next);
     similar.initial = false;
+    syncSimilarViewer();
   } catch (error) {
     if (state.similar === similar) similar.error = error.message;
   } finally {
@@ -917,10 +937,12 @@ async function loadSimilarPage() {
 async function showSimilar(assetId) {
   const section = $("similar-gallery");
   const source = state.viewerItems[state.viewerIndex];
+  state.similarSource = {items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart}};
   state.similar = {assetId, source, items: [], offset: 0, total: 0, strongCount: 0, hasNext: true, initial: true, loading: false, autoLoad: false, error: null};
   section.classList.remove("hidden");
   section.textContent = "";
   $("viewer-similar").textContent = "Close similar images";
+  showViewer(0, [source], {mode: "similar", keepSimilar:true});
   $("viewer").onscroll = () => {
     if (state.similar?.autoLoad && $("viewer").scrollTop + $("viewer").clientHeight >= $("viewer").scrollHeight - 240) loadSimilarPage();
   };

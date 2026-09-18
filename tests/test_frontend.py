@@ -511,7 +511,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         html=(Path(__file__).parents[1]/"src/archive_index/web/index.html").read_text(encoding="utf-8")
         self.assertIn("async function loadSimilarPage",source)
         self.assertIn("id=\"similar-more\"",source)
-        self.assertIn("similar.items = [...similar.items, ...data.items]",source)
+        self.assertIn("similar.items = [...similar.items, ...data.items.filter",source)
         self.assertNotIn("slice(-18)",source)
         self.assertIn("similar.autoLoad",source)
         self.assertIn("Close similar images",source)
@@ -530,11 +530,11 @@ class CorrectionFrontendTests(unittest.TestCase):
         source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
         render=source[source.index("function renderSimilarResults"):source.index("function closeSimilar")]
         loader=source[source.index("async function loadSimilarPage"):source.index("async function showSimilar")]
-        script="const escapeHtml=String;"+render+loader+"""
+        script="const escapeHtml=String;const countLabel=(count,singular,plural=`${singular}s`)=>`${count} ${count===1?singular:plural}`;"+render+loader+"""
         const section={innerHTML:'',querySelectorAll:()=>[],classList:{},scrollHeight:100,clientHeight:500,addEventListener(){}};
         const $=id=>section;const requestAnimationFrame=()=>{};const similarityMarkup=()=>'';const closeSimilar=()=>{};
-        const state={similar:{assetId:'source',items:[],offset:0,total:0,strongCount:0,hasNext:true,loading:false,autoLoad:true,error:null}};
-        let calls=0;const api=async()=>{const start=calls++*6;return {items:Array.from({length:6},(_,index)=>({filename:`item-${start+index}`})),total:24,strong_count:24,has_next:calls<4};};
+        const state={viewerContext:'gallery',viewerItems:[],viewerIndex:0,similar:{assetId:'source',source:{asset_id:'source'},items:[],offset:0,total:0,strongCount:0,hasNext:true,loading:false,autoLoad:true,error:null}};
+        let calls=0;const api=async()=>{const start=calls++*6;return {items:Array.from({length:6},(_,index)=>({asset_id:`asset-${start+index}`,filename:`item-${start+index}`})),total:24,strong_count:24,has_next:calls<4};};
         (async()=>{for(let i=0;i<4;i++) await loadSimilarPage();console.log(JSON.stringify({calls,items:state.similar.items.map(item=>item.filename)}));})();
         """
         completed=subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8")
@@ -542,6 +542,57 @@ class CorrectionFrontendTests(unittest.TestCase):
         result=json.loads(completed.stdout)
         self.assertEqual(result["calls"],4)
         self.assertEqual(result["items"],[f"item-{index}" for index in range(24)])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_similar_empty_initial_page_keeps_load_more_and_count_labels(self):
+        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        render=source[source.index("function renderSimilarResults"):source.index("function closeSimilar")]
+        script="const escapeHtml=String;const countLabel=(count,singular,plural=`${singular}s`)=>`${count} ${count===1?singular:plural}`;"+render+"""
+        const section={innerHTML:'',querySelectorAll:()=>[],classList:{},addEventListener(){}};
+        const $=id=>section;const similarityMarkup=()=>'';const closeSimilar=()=>{};const states=[];let state;
+        for (const hasNext of [true,false]) {
+          state={similar:{loading:false,items:[],strongCount:0,hasNext,autoLoad:false}};
+          renderSimilarResults(); states.push(section.innerHTML);
+        }
+        console.log(JSON.stringify(states));
+        """
+        result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",check=True).stdout)
+        self.assertIn("No strongly similar images found", result[0])
+        self.assertIn('id="similar-more"', result[0])
+        self.assertIn("No strongly similar images found", result[1])
+        self.assertNotIn('id="similar-more"', result[1])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_similar_one_strong_then_weaker_page_has_no_duplicate(self):
+        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        loader=source[source.index("async function loadSimilarPage"):source.index("async function showSimilar")]
+        script=loader+"""
+        const renderSimilarResults=()=>{};const syncSimilarViewer=()=>{};
+        const state={similar:{assetId:'source',source:{asset_id:'source'},items:[],offset:0,total:0,strongCount:0,hasNext:true,initial:true,loading:false,autoLoad:false,error:null}};
+        const requests=[];const api=async path=>{requests.push(path);return path.includes('initial=1')
+          ? {items:[{asset_id:'strong',filename:'strong.jpg'}],total:3,strong_count:1,has_next:true}
+          : {items:[{asset_id:'weak-1',filename:'weak-1.jpg'},{asset_id:'weak-2',filename:'weak-2.jpg'}],total:3,strong_count:1,has_next:false};};
+        (async()=>{await loadSimilarPage();await loadSimilarPage();console.log(JSON.stringify({requests,offset:state.similar.offset,items:state.similar.items.map(item=>item.asset_id)}));})();
+        """
+        result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",check=True).stdout)
+        self.assertIn("initial=1", result["requests"][0])
+        self.assertIn("offset=1", result["requests"][1])
+        self.assertEqual(result["items"], ["strong", "weak-1", "weak-2"])
+        self.assertEqual(result["offset"], 3)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_similar_viewer_sequence_keeps_source_at_index_zero(self):
+        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        helper=source[source.index("function similarViewerItems"):source.index("function syncSimilarViewer")]
+        script=helper+"""
+        const state={similar:{source:{asset_id:'source'},items:[{asset_id:'source'},{asset_id:'similar-1'},{asset_id:'similar-2'}]}};
+        console.log(JSON.stringify(similarViewerItems().map(item=>item.asset_id)));
+        """
+        result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",check=True).stdout)
+        self.assertEqual(result, ["source", "similar-1", "similar-2"])
+        self.assertIn("showViewer(Number(button.dataset.similarIndex) + 1, similarViewerItems()", source)
+        self.assertIn('showViewer(0, [source], {mode: "similar", keepSimilar:true})', source)
+        self.assertIn("syncSimilarViewer();", source)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_gallery_bottom_scroll_keeps_virtual_window_at_end(self):
