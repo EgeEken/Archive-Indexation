@@ -1000,6 +1000,7 @@ function meterMarkup(label, value, position) {
   if (!value || position == null) return `<dt>${label}</dt><dd>${escapeHtml(value || "Unavailable")}</dd>`;
   const scales = {
     "Focal length": {values:[10,40,150,600], labels:["10","40","150","600 mm"]},
+    "Focal length (35mm eq.)": {values:[10,40,150,600], labels:["10","40","150","600 mm"]},
     "Aperture": {values:[1,2.8,8,22], labels:["f/1","f/2.8","f/8","f/22"]},
     "Shutter speed": {values:[30,2,1 / 125,1 / 8000], labels:["30 s","1/2 s","1/125 s","1/8000 s"]},
     "ISO": {values:[40,400,4000,40000], labels:["40","400","4000","40000"]}
@@ -1020,17 +1021,20 @@ function renderTechnicalDetails(file) {
   const aperture = metadataValue(file, ["FNumber", "ApertureValue"]);
   const shutter = metadataValue(file, ["ExposureTime", "ShutterSpeedValue"]);
   const iso = metadataValue(file, ["ISOSpeedRatings", "PhotographicSensitivity"]);
-  const focal = metadataValue(file, ["FocalLength", "FocalLengthIn35mmFilm"]);
+  const equivalentFocalNumber = rationalNumber(rawMetadataValue(file, ["FocalLengthIn35mmFilm"]));
+  const hasEquivalentFocal = Number.isFinite(equivalentFocalNumber) && equivalentFocalNumber > 0;
+  const focalLabel = hasEquivalentFocal ? "Focal length (35mm eq.)" : "Focal length";
+  const focal = hasEquivalentFocal ? `${numberText(equivalentFocalNumber)} mm` : metadataValue(file, ["FocalLength"]);
   const apertureNumber = rationalNumber(rawMetadataValue(file, ["FNumber"]));
   const shutterNumber = rationalNumber(rawMetadataValue(file, ["ExposureTime"]));
   const isoNumber = rationalNumber(rawMetadataValue(file, ["ISOSpeedRatings", "PhotographicSensitivity"]));
-  const focalNumber = rationalNumber(rawMetadataValue(file, ["FocalLength"]));
+  const focalNumber = hasEquivalentFocal ? equivalentFocalNumber : rationalNumber(rawMetadataValue(file, ["FocalLength"]));
   const camera = cameraValue(file);
   const lens = metadataValue(file, ["LensModel", "LensMake"]);
   const rows = [["Camera", camera], ["Lens", lens]];
   const hasMeter = aperture || shutter || iso || focal;
   if (!rows.some(([, value]) => value) && !hasMeter) return `<section class="section technical-details"><h3>Technical details</h3><p class="muted">No camera info available</p></section>`;
-  return `<section class="section technical-details"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${focal ? meterMarkup("Focal length", focal, logPosition(focalNumber, 10, 600)) : ""}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22)) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber)) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000)) : ""}</dl></section>`;
+  return `<section class="section technical-details"><h3>Technical details</h3><dl class="kv">${rows.filter(([, value]) => value).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join("")}${focal ? meterMarkup(focalLabel, focal, logPosition(focalNumber, 10, 600)) : ""}${aperture ? meterMarkup("Aperture", aperture, logPosition(apertureNumber, 1, 22)) : ""}${shutter ? meterMarkup("Shutter speed", shutter, shutterPosition(shutterNumber)) : ""}${iso ? meterMarkup("ISO", iso, logPosition(isoNumber, 40, 40000)) : ""}</dl></section>`;
 }
 
 function componentProblemMessage(name, component) {

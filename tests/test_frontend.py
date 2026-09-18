@@ -314,6 +314,25 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn('left:66.667%',result['normal'])
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_focal_length_prefers_valid_35mm_equivalent(self):
+        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        functions = source[source.index("function meterMarkup"):source.index("async function loadViewerDetails")]
+        script = "const escapeHtml=String;" + functions + """
+        const base={metadata:{exif:{FocalLength:[554,100],FocalLengthIn35mmFilm:23}}};
+        const absent={metadata:{exif:{FocalLength:[554,100]}}};
+        const invalid={metadata:{exif:{FocalLength:[554,100],FocalLengthIn35mmFilm:'0/0'}}};
+        console.log(JSON.stringify({equivalent:renderTechnicalDetails(base),absent:renderTechnicalDetails(absent),invalid:renderTechnicalDetails(invalid)}));
+        """
+        result = json.loads(subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout)
+        self.assertIn("Focal length (35mm eq.)", result["equivalent"])
+        self.assertIn("23 mm", result["equivalent"])
+        self.assertNotIn("5.54 mm", result["equivalent"])
+        self.assertIn("Focal length", result["absent"])
+        self.assertIn("5.54 mm", result["absent"])
+        self.assertIn("Focal length", result["invalid"])
+        self.assertIn("5.54 mm", result["invalid"])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_backdrop_detection_ignores_dialog_scrollbar_and_content(self):
         result=self.run_js([("bindBackdropClose", "showDetails")], """
         const events={};const closed=[];

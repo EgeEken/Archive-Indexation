@@ -110,11 +110,23 @@ class BrowserTests(unittest.TestCase):
         asset_id = self.ids["filename.jpg"]
         with self.workspace.transaction() as connection:
             connection.execute(
-                "UPDATE physical_file SET width = 4240, height = 2832, metadata_json = ?, updated_at = '2026-09-17T00:00:00+00:00' WHERE logical_asset_id = ?",
+                "UPDATE physical_file SET width = 2832, height = 4240, metadata_json = ?, updated_at = '2026-09-17T00:00:00+00:00' WHERE logical_asset_id = ?",
                 (json.dumps({"exif": {"Orientation": 8}}), asset_id),
             )
         self.assertIn("filename.jpg", {item["filename"] for item in self.browser(layout="vertical")["items"]})
         self.assertNotIn("filename.jpg", {item["filename"] for item in self.browser(layout="horizontal")["items"]})
+
+    def test_persisted_portrait_dimensions_are_not_rotated_again(self):
+        asset_id = self.ids["filename.jpg"]
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE physical_file SET width = 3060, height = 4080, metadata_json = ? WHERE logical_asset_id = ?",
+                (json.dumps({"exif": {"Orientation": 6}}), asset_id),
+            )
+        self.assertIn("filename.jpg", {item["filename"] for item in self.browser(layout="vertical")["items"]})
+        self.assertNotIn("filename.jpg", {item["filename"] for item in self.browser(layout="horizontal")["items"]})
+        self.assertIn("third.jpg", {item["filename"] for item in self.browser(layout="horizontal")["items"]})
+        self.assertIn("filename.jpg", {item["filename"] for item in self.browser(layout="vertical")["items"]})
 
     def test_layout_uses_rendered_dimensions_for_a_reconciled_raw_jpeg_asset(self):
         (self.workspace.root / "portrait.arw").write_bytes(b"raw")

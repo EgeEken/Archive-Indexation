@@ -2740,16 +2740,7 @@ def _effective_dimensions(physical):
     ]
     for row in candidates:
         if row["width"] and row["height"]:
-            width, height = row["width"], row["height"]
-            metadata = _json_or_none(row["metadata_json"]) or {}
-            orientation = (metadata.get("exif") or {}).get("Orientation")
-            try:
-                orientation = int(orientation)
-            except (TypeError, ValueError):
-                orientation = None
-            if orientation in {5, 6, 7, 8}:
-                width, height = height, width
-            return width, height
+            return row["width"], row["height"]
     return None, None
 
 
