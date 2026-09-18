@@ -39,7 +39,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Show image group", html)
         self.assertIn("similarity-chip", javascript)
         self.assertIn("similarity-chip", css)
-        self.assertIn('<span class="setup-accent">Index</span> these folders:', html)
+        self.assertIn('Index</span> <span class="setup-accent">these folders:</span>', html)
         self.assertNotIn("1 —", html)
         self.assertNotIn("2 —", html)
         self.assertNotIn("3 —", html)
@@ -48,8 +48,8 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("Enable semantic search", html)
         self.assertNotIn("Models are installed explicitly", html)
         self.assertNotIn("Estimated from local completed-job timings", javascript)
-        self.assertEqual(html.count("Automatically</span> assess media quality"), 1)
-        self.assertEqual(html.count("Let me</span> search in plain English"), 1)
+        self.assertEqual(html.count('<span>Automatically</span><span class="setup-accent"> assess media quality</span>'), 1)
+        self.assertEqual(html.count('<span>Let me</span><span class="setup-accent"> search in plain English</span>'), 1)
         self.assertNotIn("Let me search by semantic content", html)
         self.assertIn("setup-accent", javascript)
         self.assertIn("Estimated indexing time", javascript)
@@ -59,6 +59,12 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("class=\"model-card", html)
         self.assertNotIn("<h2>Diagnostics</h2>", html)
         self.assertNotIn("Intentionally skipped work is not a problem", html)
+
+    def test_configure_accent_fragments_are_inverted(self) -> None:
+        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('<span>Assess</span> <span class="setup-accent">video</span> <span>quality and</span> <span class="setup-accent">include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>', source)
+        self.assertIn('<span>Assess</span> <span class="setup-accent">video</span> <span>quality</span> <span class="setup-accent">too</span>', source)
+        self.assertIn('<span class="setup-accent">Include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>', source)
 
     def test_filename_sort_control_is_available_before_quality(self) -> None:
         html = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "index.html").read_text(encoding="utf-8")

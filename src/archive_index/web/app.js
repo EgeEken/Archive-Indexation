@@ -328,8 +328,8 @@ function renderSetupPlanData(plan) {
   const videoParticipation = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search;
   $("setup-video-section").classList.toggle("hidden", !videoFeaturesAvailable);
   $("setup-video-participation-label").innerHTML = configuration.quality_enabled && configuration.semantic_search_enabled
-    ? '<span class="setup-accent">Assess</span> video <span class="setup-accent">quality and</span> include videos <span class="setup-accent">in semantic search</span> too'
-    : configuration.quality_enabled ? '<span class="setup-accent">Assess</span> video <span class="setup-accent">quality</span> too' : 'Include videos <span class="setup-accent">in semantic search</span> too';
+    ? '<span>Assess</span> <span class="setup-accent">video</span> <span>quality and</span> <span class="setup-accent">include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>'
+    : configuration.quality_enabled ? '<span>Assess</span> <span class="setup-accent">video</span> <span>quality</span> <span class="setup-accent">too</span>' : '<span class="setup-accent">Include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>';
   $("setup-video-sampling").classList.toggle("hidden", !videoParticipation);
 }
 
