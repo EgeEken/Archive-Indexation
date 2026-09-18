@@ -9,7 +9,7 @@ from pathlib import Path
 from .media_types import IMAGE_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS
 
 JPEG_EXTENSIONS = frozenset({".jpeg", ".jpg"})
-CONFIGURATION_VERSION = 3
+CONFIGURATION_VERSION = 5
 EMBEDDING_PROVIDERS = frozenset({"openclip-b16-datacomp-xl", "siglip2-base-patch16-224"})
 VIDEO_SAMPLING_DEFAULT_FPS = 2.0
 VIDEO_SAMPLING_DEFAULT_MIN_FRAMES = 2
@@ -19,6 +19,8 @@ VIDEO_SAMPLING_DEFAULT_MAX_FRAMES = 32
 def default_configuration() -> dict[str, object]:
     return {
         "configuration_version": CONFIGURATION_VERSION,
+        "quality_enabled": True,
+        "video_processing_enabled": True,
         "include_rendered_images": True,
         "include_raw": True,
         "include_images": True,
@@ -27,14 +29,15 @@ def default_configuration() -> dict[str, object]:
         "video_extensions": sorted(VIDEO_EXTENSIONS),
         "folder_rules": [],
         "rendered_quality_provider": "lar-iqa",
-        "raw_quality_provider": "off",
+        "raw_quality_provider": "lar-iqa",
         "video_quality_enabled": True,
         "quality_provider": "lar-iqa",
         "video_sampling_fps": VIDEO_SAMPLING_DEFAULT_FPS,
         "video_sampling_min_frames": VIDEO_SAMPLING_DEFAULT_MIN_FRAMES,
         "video_sampling_max_frames": VIDEO_SAMPLING_DEFAULT_MAX_FRAMES,
         "recommendation_threshold": 0.70,
-        "semantic_search_enabled": False,
+        "semantic_search_enabled": True,
+        "include_videos_in_semantic_search": True,
         "embedding_provider": "openclip-b16-datacomp-xl",
     }
 
@@ -44,42 +47,63 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
     if not isinstance(value, Mapping):
         raise ValueError("configuration must be an object")
     version = value.get("configuration_version", CONFIGURATION_VERSION)
-    if version not in {1, 2, CONFIGURATION_VERSION}:
+    if version not in {1, 2, 3, 4, CONFIGURATION_VERSION}:
         raise ValueError(f"unsupported configuration version: {version}")
     legacy_include_images = _bool(value.get("include_images", defaults["include_images"]), "include_images")
-    legacy_quality_provider = value.get("quality_provider", defaults["quality_provider"])
-    include_rendered_images = _bool(
+    _bool(
         value.get("include_rendered_images", legacy_include_images),
         "include_rendered_images",
     )
-    include_raw = _bool(value.get("include_raw", legacy_include_images), "include_raw")
-    rendered_quality_provider = value.get("rendered_quality_provider", legacy_quality_provider)
-    if version == 1 and "quality_provider" in value:
-        rendered_quality_provider = legacy_quality_provider
+    _bool(value.get("include_raw", legacy_include_images), "include_raw")
+    _bool(value.get("include_videos", defaults["include_videos"]), "include_videos")
+    include_rendered_images = include_raw = include_videos = True
+    legacy_quality_provider = value.get("quality_provider", defaults["quality_provider"])
+    for name in ("quality_provider", "rendered_quality_provider", "raw_quality_provider"):
+        if name in value and value[name] not in {"off", "lar-iqa"}:
+            raise ValueError(f"{name} must be off or lar-iqa")
+    quality_enabled_value = value.get("quality_enabled")
+    if quality_enabled_value is None and not any(
+        name in value for name in ("rendered_quality_provider", "raw_quality_provider", "video_quality_enabled")
+    ):
+        quality_enabled_value = legacy_quality_provider == "lar-iqa"
+    if quality_enabled_value is None:
+        quality_enabled_value = defaults["quality_enabled"]
+    quality_enabled = _bool(quality_enabled_value, "quality_enabled")
+    rendered_quality_provider = value.get(
+        "rendered_quality_provider",
+        "lar-iqa" if quality_enabled else "off",
+    )
     raw_quality_provider = value.get("raw_quality_provider", defaults["raw_quality_provider"])
     video_quality_enabled = _bool(
-        value.get("video_quality_enabled", legacy_quality_provider == "lar-iqa"),
+        value.get("video_quality_enabled", quality_enabled),
         "video_quality_enabled",
     )
-    compatibility_quality_provider = rendered_quality_provider
-    if (
-        version == CONFIGURATION_VERSION
-        and "quality_provider" in value
-        and value.get("quality_provider") not in {"off", "lar-iqa"}
-    ):
-        compatibility_quality_provider = value.get("quality_provider")
+    if not quality_enabled:
+        rendered_quality_provider = raw_quality_provider = "off"
+        video_quality_enabled = False
+    video_processing_value = value.get(
+        "video_processing_enabled",
+        bool(video_quality_enabled or value.get("include_videos_in_semantic_search", defaults["include_videos_in_semantic_search"])),
+    )
+    video_processing_enabled = _bool(video_processing_value, "video_processing_enabled")
+    semantic_search_enabled = _bool(
+        value.get("semantic_search_enabled", defaults["semantic_search_enabled"]),
+        "semantic_search_enabled",
+    )
     result = {
         "configuration_version": CONFIGURATION_VERSION,
+        "quality_enabled": quality_enabled,
+        "video_processing_enabled": video_processing_enabled,
         "include_rendered_images": include_rendered_images,
         "include_raw": include_raw,
         "include_images": include_rendered_images or include_raw,
-        "include_videos": _bool(value.get("include_videos", defaults["include_videos"]), "include_videos"),
-        "image_extensions": _extensions(value.get("image_extensions", defaults["image_extensions"]), IMAGE_EXTENSIONS, "image_extensions"),
-        "video_extensions": _extensions(value.get("video_extensions", defaults["video_extensions"]), VIDEO_EXTENSIONS, "video_extensions"),
+        "include_videos": include_videos,
+        "image_extensions": sorted(IMAGE_EXTENSIONS),
+        "video_extensions": sorted(VIDEO_EXTENSIONS),
         "rendered_quality_provider": rendered_quality_provider,
         "raw_quality_provider": raw_quality_provider,
         "video_quality_enabled": video_quality_enabled,
-        "quality_provider": compatibility_quality_provider,
+        "quality_provider": rendered_quality_provider,
         "folder_rules": _folder_rules(value.get("folder_rules", []), root),
         "video_sampling_fps": _positive_float(
             value.get("video_sampling_fps", defaults["video_sampling_fps"]),
@@ -96,9 +120,12 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
             "video_sampling_max_frames",
             maximum=256,
         ),
-        "semantic_search_enabled": _bool(
-            value.get("semantic_search_enabled", defaults["semantic_search_enabled"]),
-            "semantic_search_enabled",
+        "semantic_search_enabled": semantic_search_enabled,
+        "include_videos_in_semantic_search": _bool(
+            value.get("include_videos_in_semantic_search", defaults["include_videos_in_semantic_search"])
+            and semantic_search_enabled
+            and include_videos,
+            "include_videos_in_semantic_search",
         ),
         "embedding_provider": value.get("embedding_provider", defaults["embedding_provider"]),
     }
@@ -109,10 +136,10 @@ def normalize_configuration(value: Mapping[str, object], root: Path | None = Non
     for name in ("rendered_quality_provider", "raw_quality_provider", "quality_provider"):
         if result[name] not in {"off", "lar-iqa"}:
             raise ValueError(f"{name} must be off or lar-iqa")
-    if result["embedding_provider"] not in EMBEDDING_PROVIDERS:
-        raise ValueError("embedding_provider is not supported")
     if result["video_sampling_min_frames"] > result["video_sampling_max_frames"]:
         raise ValueError("video_sampling_min_frames must not exceed video_sampling_max_frames")
+    if result["embedding_provider"] not in EMBEDDING_PROVIDERS:
+        raise ValueError("embedding_provider is not supported")
     return result
 
 
@@ -120,16 +147,19 @@ def configuration_from_connection(connection) -> dict[str, object]:
     row = connection.execute("SELECT * FROM workspace_config WHERE id = 1").fetchone()
     if row is None:
         return default_configuration()
-    if row["configuration_version"] != CONFIGURATION_VERSION:
-        raise ValueError(f"unsupported configuration version: {row['configuration_version']}")
     rules = [
         {"path": item["path"], "included": bool(item["included"])}
         for item in connection.execute("SELECT path, included FROM folder_scope_rule ORDER BY path").fetchall()
     ]
+    if row["configuration_version"] < CONFIGURATION_VERSION:
+        rules = _materialize_legacy_folder_rules(connection, rules)
     return normalize_configuration({
         "configuration_version": row["configuration_version"],
+        "quality_enabled": bool(row["quality_enabled"]),
+        "video_processing_enabled": bool(row["video_processing_enabled"]),
         "include_rendered_images": bool(row["include_rendered_images"]),
         "include_raw": bool(row["include_raw"]),
+        "include_images": bool(row["include_images"]),
         "include_videos": bool(row["include_videos"]),
         "image_extensions": json.loads(row["image_extensions_json"]),
         "video_extensions": json.loads(row["video_extensions_json"]),
@@ -141,6 +171,7 @@ def configuration_from_connection(connection) -> dict[str, object]:
         "video_sampling_min_frames": row["video_sampling_min_frames"],
         "video_sampling_max_frames": row["video_sampling_max_frames"],
         "semantic_search_enabled": bool(row["semantic_search_enabled"]),
+        "include_videos_in_semantic_search": bool(row["include_videos_in_semantic_search"]),
         "embedding_provider": row["embedding_provider"],
         "recommendation_threshold": row["recommendation_threshold"],
     })
@@ -157,8 +188,9 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             video_sampling_fps, video_sampling_min_frames, video_sampling_max_frames,
             include_rendered_images, include_raw, rendered_quality_provider,
             raw_quality_provider, video_quality_enabled,
-            semantic_search_enabled, embedding_provider
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            semantic_search_enabled, include_videos_in_semantic_search, embedding_provider,
+            quality_enabled, video_processing_enabled
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             quality_provider = excluded.quality_provider,
             include_images = excluded.include_images,
@@ -175,7 +207,10 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             raw_quality_provider = excluded.raw_quality_provider,
             video_quality_enabled = excluded.video_quality_enabled,
             semantic_search_enabled = excluded.semantic_search_enabled,
+            include_videos_in_semantic_search = excluded.include_videos_in_semantic_search,
             embedding_provider = excluded.embedding_provider,
+            quality_enabled = excluded.quality_enabled,
+            video_processing_enabled = excluded.video_processing_enabled,
             updated_at = excluded.updated_at
         """,
         (
@@ -195,7 +230,10 @@ def save_configuration(connection, value: Mapping[str, object], root: Path | Non
             config["raw_quality_provider"],
             int(config["video_quality_enabled"]),
             int(config["semantic_search_enabled"]),
+            int(config["include_videos_in_semantic_search"]),
             config["embedding_provider"],
+            int(config["quality_enabled"]),
+            int(config["video_processing_enabled"]),
         ),
     )
     connection.execute("UPDATE workspace_config SET recommendation_threshold = ? WHERE id = 1", (config["recommendation_threshold"],))
@@ -214,13 +252,8 @@ def path_in_scope(relative_path: str, config: Mapping[str, object]) -> bool:
         str(rule["path"]).casefold(): bool(rule["included"])
         for rule in config.get("folder_rules", [])
     }
-    nearest = True
-    for index in range(len(folder_parts), -1, -1):
-        candidate = "/".join(folder_parts[:index]).casefold()
-        if candidate in rules:
-            nearest = rules[candidate]
-            break
-    if not nearest:
+    folder = "/".join(folder_parts).casefold()
+    if folder in rules and not rules[folder]:
         return False
     extension = Path(relative_path).suffix.casefold()
     if extension in RAW_EXTENSIONS:
@@ -263,15 +296,6 @@ def _positive_int(value: object, name: str, maximum: int) -> int:
     return value
 
 
-def _extensions(value: object, allowed: frozenset[str], name: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{name} must be a list")
-    extensions = sorted({item.casefold() for item in value})
-    if any(item not in allowed for item in extensions):
-        raise ValueError(f"{name} contains an unsupported extension")
-    return extensions
-
-
 def _folder_rules(value: object, root: Path | None) -> list[dict[str, object]]:
     if not isinstance(value, list):
         raise ValueError("folder_rules must be a list")
@@ -302,6 +326,25 @@ def _folder_rules(value: object, root: Path | None) -> list[dict[str, object]]:
         {"path": path, "included": included}
         for path, included in sorted(rules.values(), key=lambda value: value[0].casefold())
     ]
+
+
+def _materialize_legacy_folder_rules(connection, rules: list[dict[str, object]]) -> list[dict[str, object]]:
+    legacy = {rule["path"].casefold(): bool(rule["included"]) for rule in rules}
+    folders = {""}
+    for row in connection.execute("SELECT relative_path FROM physical_file").fetchall():
+        parts = str(row[0]).replace("\\", "/").split("/")[:-1]
+        folders.update("/".join(parts[:index]) for index in range(1, len(parts) + 1))
+    materialized = []
+    for folder in sorted(folders, key=str.casefold):
+        included = True
+        parts = folder.split("/") if folder else []
+        for index in range(len(parts), -1, -1):
+            candidate = "/".join(parts[:index]).casefold()
+            if candidate in legacy:
+                included = legacy[candidate]
+                break
+        materialized.append({"path": folder, "included": included})
+    return materialized
 
 
 def _timestamp() -> str:

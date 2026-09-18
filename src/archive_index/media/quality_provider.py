@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Protocol, Sequence
+from urllib.request import Request, urlopen
 
 from PIL import Image, ImageOps
 
@@ -334,6 +335,27 @@ def default_model_path() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     root = Path(local_app_data) if local_app_data else Path.home() / ".local" / "share"
     return root / "Archive Indexation" / "models" / LAR_IQA_MODEL_ID / LAR_IQA_MODEL_FILENAME
+
+
+def install_lar_iqa_model() -> Path:
+    destination = default_model_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    url = (
+        "https://drive.usercontent.google.com/download?export=download&confirm=t&id="
+        + LAR_IQA_OFFICIAL_FILE_ID
+    )
+    try:
+        request = Request(url, headers={"User-Agent": "Archive-Indexation/0.1"})
+        with urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+        if temporary.stat().st_size < 1024 or _sha256(temporary) != LAR_IQA_CHECKPOINT_SHA256:
+            raise RuntimeError("downloaded LAR-IQA checkpoint failed verification")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def create_quality_provider(

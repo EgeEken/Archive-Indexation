@@ -16,6 +16,7 @@ from threading import Event
 from PIL import Image, ImageOps
 
 from ..embeddings.providers import EmbeddingProvider, create_embedding_provider
+from ..embeddings.runtime import embedding_runtime
 from ..embeddings.vector import vector_to_blob
 from ..indexing.representations import preferred_physical
 from ..jobs.engine import report_substage, JobProgress, JobRunResult, JobStore
@@ -85,8 +86,28 @@ def index_embeddings(
         _mark_disabled_states(workspace, sources, configuration["embedding_provider"])
         return JobRunResult(identifier, 0, 0, 0, False, total_units)
 
-    provider = provider or create_embedding_provider(
-        configuration["embedding_provider"], batch_size=batch_size, precision=precision
+    runtime_provider = provider is None
+    if provider is None:
+        try:
+            provider = embedding_runtime.provider(
+                configuration["embedding_provider"],
+                batch_size=batch_size,
+                precision=precision,
+                factory=create_embedding_provider,
+            )
+        except Exception as error:
+            try:
+                _mark_unavailable_states(workspace, sources, configuration["embedding_provider"], error)
+                store.complete(identifier, 0, 0, total_units)
+            except Exception:
+                return JobRunResult(identifier, 0, 0, 0, False, total_units)
+            return JobRunResult(identifier, 0, 0, 0, False, total_units)
+    infer = (
+        (lambda operation: embedding_runtime.run(
+            provider.provider_id, operation, factory=create_embedding_provider
+        ))
+        if runtime_provider
+        else (lambda operation: operation(provider))
     )
     settings_json = json.dumps(provider.settings, ensure_ascii=False, sort_keys=True)
     run = _get_or_create_run(workspace, provider, settings_json)
@@ -100,7 +121,8 @@ def index_embeddings(
         return JobRunResult(identifier, total_units, 0, 0, False, total_units)
 
     try:
-        provider.preflight()
+        if not runtime_provider:
+            provider.preflight()
     except Exception as error:
         failed = 0
         for source in pending:
@@ -150,6 +172,7 @@ def index_embeddings(
             max(1, int(preparation_workers)),
             max(1, batch_size),
             consume_image_outcomes,
+            infer,
         )
         if cancelled:
             _finish_run(workspace, run["id"], "cancelled")
@@ -161,7 +184,7 @@ def index_embeddings(
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
             try:
-                _process_video(workspace, source, provider, run["id"], settings_json, cancel_event,
+                _process_video(workspace, source, provider, run["id"], settings_json, cancel_event, infer,
                     lambda stage, current, total: report_substage(identifier, stage, current, total, source["relative_path"]))
             except EmbeddingCancelled:
                 _finish_run(workspace, run["id"], "cancelled")
@@ -200,6 +223,8 @@ def _embedding_sources(workspace: Workspace, configuration) -> list[dict[str, ob
     for asset_id, members in grouped.items():
         media_type = members[0]["media_type"]
         if media_type == "video":
+            if not configuration.get("include_videos_in_semantic_search", True):
+                continue
             selected = preferred_physical(members)
             if selected is not None:
                 sources.append(_source(selected, asset_id, "video", configuration))
@@ -284,6 +309,24 @@ def _mark_disabled_states(workspace, sources, provider_id):
             )
 
 
+def _mark_unavailable_states(workspace, sources, provider_id, error):
+    component = embedding_component(provider_id)
+    with workspace.transaction() as connection:
+        for source in sources:
+            connection.execute(
+                """
+                INSERT INTO component_state(
+                    physical_file_id, component, status, algorithm, version,
+                    input_fingerprint, error_message
+                ) VALUES (?, ?, 'not_requested', ?, ?, ?, ?)
+                ON CONFLICT(physical_file_id, component) DO UPDATE SET
+                    status = CASE WHEN component_state.status = 'complete' THEN component_state.status ELSE 'not_requested' END,
+                    error_message = CASE WHEN component_state.status = 'complete' THEN component_state.error_message ELSE excluded.error_message END
+                """,
+                (source["physical_file_id"], component, EMBEDDING_ALGORITHM, "unavailable", source.get("sha256"), str(error)),
+            )
+
+
 def _state_ready(workspace, source, provider, run_id) -> bool:
     component = embedding_component(provider)
     fingerprint = _input_fingerprint(source, provider)
@@ -328,6 +371,7 @@ def _process_image_batches(
     preparation_workers,
     batch_size,
     consume,
+    infer,
 ):
     if not sources:
         return False
@@ -370,7 +414,7 @@ def _process_image_batches(
             if _cancelled(cancel_event):
                 return True
             if prepared.outcomes or prepared.prepared_sources or prepared.individual:
-                consume(_consume_prepared_image_batch(workspace, prepared, provider, run_id, settings_json))
+                consume(_consume_prepared_image_batch(workspace, prepared, provider, run_id, settings_json, infer))
             if _cancelled(cancel_event):
                 return True
             submit_next()
@@ -428,18 +472,18 @@ def _prepare_image_batch(workspace, sources, provider, cancel_event):
                 image.close()
 
 
-def _consume_prepared_image_batch(workspace, batch, provider, run_id, settings_json):
+def _consume_prepared_image_batch(workspace, batch, provider, run_id, settings_json, infer):
     outcomes = list(batch.outcomes)
     try:
         if batch.prepared_sources:
             try:
-                vectors = provider.encode_prepared_images(batch.prepared)
+                vectors = infer(lambda active: active.encode_prepared_images(batch.prepared))
                 if len(vectors) != len(batch.prepared_sources):
                     raise ValueError("embedding provider returned an unexpected image count")
             except Exception:
                 for source in batch.prepared_sources:
                     try:
-                        _process_single_image(workspace, source, provider, run_id)
+                        _process_single_image(workspace, source, provider, run_id, infer)
                     except Exception as error:
                         outcomes.append((source, error))
                     else:
@@ -454,7 +498,7 @@ def _consume_prepared_image_batch(workspace, batch, provider, run_id, settings_j
                         outcomes.append((source, None))
         for source, prepared, cleanup_images in batch.individual:
             try:
-                vectors = provider.encode_prepared_images(prepared)
+                vectors = infer(lambda active: active.encode_prepared_images(prepared))
                 if len(vectors) != 1:
                     raise ValueError("embedding provider returned an unexpected image count")
                 _store_image_embedding(workspace, source, provider, run_id, vectors[0])
@@ -471,11 +515,11 @@ def _consume_prepared_image_batch(workspace, batch, provider, run_id, settings_j
     return outcomes
 
 
-def _process_single_image(workspace, source, provider, run_id):
+def _process_single_image(workspace, source, provider, run_id, infer):
     image = _load_source_image(workspace, source)
     try:
         prepared = provider.prepare_images([image])
-        vectors = provider.encode_prepared_images(prepared)
+        vectors = infer(lambda active: active.encode_prepared_images(prepared))
         if len(vectors) != 1:
             raise ValueError("embedding provider returned an unexpected image count")
         _store_image_embedding(workspace, source, provider, run_id, vectors[0])
@@ -515,7 +559,7 @@ def _store_image_embedding(workspace, source, provider, run_id, vector):
         )
 
 
-def _process_video(workspace, source, provider, run_id, settings_json, cancel_event, substage=None):
+def _process_video(workspace, source, provider, run_id, settings_json, cancel_event, infer, substage=None):
     duration = float(source["duration_seconds"] or 0)
     count = _video_sample_count(source)
     sample_run_id, sample_rows = _sample_context(workspace, source, duration, count)
@@ -546,7 +590,7 @@ def _process_video(workspace, source, provider, run_id, settings_json, cancel_ev
             if cancel_event is not None and cancel_event.is_set():
                 raise EmbeddingCancelled("embedding cancelled")
             frame_batch = frames[index : index + max(1, provider.batch_size)]
-            vectors = provider.encode_images([frame.image for frame in frame_batch])
+            vectors = infer(lambda active: active.encode_images([frame.image for frame in frame_batch]))
             if len(vectors) != len(frame_batch):
                 raise ValueError("embedding provider returned an unexpected frame count")
             if substage:

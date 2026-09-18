@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import closing
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from threading import Event
 from unittest.mock import patch
 
 from PIL import ExifTags, Image
 
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace, invalidate_component, list_problems
+from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
@@ -25,6 +28,98 @@ def index_workspace(workspace, *args, **kwargs):
 
 
 class MediaPipelineTests(unittest.TestCase):
+    def test_raw_preview_fallback_keeps_preview_metadata_and_source_dimensions(self) -> None:
+        from archive_index.media.metadata import extract_metadata
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "photo.arw"
+            source.write_bytes(b"raw placeholder")
+            encoded = BytesIO()
+            image = Image.new("RGB", (640, 480), "navy")
+            exif = image.getexif()
+            exif[36867] = "2025:08:24 12:34:56"
+            image.save(encoded, format="JPEG", exif=exif.tobytes())
+
+            class FakeRaw:
+                sizes = SimpleNamespace(width=6000, height=4000)
+                camera_make = "SONY"
+                camera_model = "ILCE-7M4"
+                lens = "FE 35mm F1.4 GM"
+                timestamp = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_thumb(self):
+                    return SimpleNamespace(format="JPEG", data=encoded.getvalue())
+
+            fake_rawpy = SimpleNamespace(imread=lambda _: FakeRaw())
+            with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
+                result = extract_metadata(source, "image")
+
+            self.assertEqual((result.width, result.height), (6000, 4000))
+            self.assertEqual(result.capture_time, "2025-08-24T12:34:56")
+            self.assertEqual(result.values["exif"]["Make"], "SONY")
+            self.assertEqual(result.values["exif"]["Model"], "ILCE-7M4")
+            self.assertEqual(result.values["raw_preview"]["width"], 640)
+
+    def test_reconciled_pair_skips_secondary_raw_thumbnail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "photo.jpg", size=(48, 32))
+            (root / "photo.arw").write_bytes(b"raw placeholder")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            index_workspace(workspace, components=("metadata",))
+            reconcile_workspace(workspace)
+            with patch(
+                "archive_index.indexing.media_pipeline.load_raw_preview",
+                side_effect=AssertionError("paired RAW thumbnail should not be decoded"),
+            ):
+                result = index_workspace(workspace, components=("thumbnail",))
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT pf.extension, cs.status
+                    FROM physical_file AS pf
+                    JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = 'thumbnail'
+                    ORDER BY pf.extension
+                    """
+                ).fetchall()
+            self.assertEqual([(row[0], row[1]) for row in rows], [(".arw", "not_requested"), (".jpg", "complete")])
+
+    def test_reconciled_pair_skips_secondary_raw_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            _write_image(root / "photo.jpg", size=(48, 32))
+            (root / "photo.arw").write_bytes(b"raw placeholder")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            index_workspace(workspace, components=("metadata",))
+            reconcile_workspace(workspace)
+            with patch(
+                "archive_index.indexing.media_pipeline.load_raw_preview",
+                side_effect=AssertionError("paired RAW quality should not be decoded"),
+            ):
+                result = index_workspace(workspace, components=("quality",))
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT pf.extension, cs.status
+                    FROM physical_file AS pf
+                    JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = 'quality'
+                    ORDER BY pf.extension
+                    """
+                ).fetchall()
+            self.assertEqual([(row[0], row[1]) for row in rows], [(".arw", "not_requested"), (".jpg", "complete")])
+
     def test_small_image_indexes_metadata_thumbnail_and_quality(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"

@@ -212,7 +212,7 @@ class Workspace:
             )
             quality_changed = any(
                 previous[name] != config[name]
-                for name in ("rendered_quality_provider", "raw_quality_provider")
+                for name in ("rendered_quality_provider", "raw_quality_provider", "video_quality_enabled")
             )
             if scope_changed:
                 connection.execute(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from archive_index.configuration import default_configuration
+from archive_index.configuration import default_configuration, normalize_configuration
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.planning import analyze_folder, plan_from_analysis
@@ -14,6 +14,13 @@ from archive_index.workspace import Workspace
 
 
 class PlanningTests(unittest.TestCase):
+    def test_configuration_normalizes_legacy_extension_filters_to_supported_categories(self) -> None:
+        configuration = normalize_configuration({"image_extensions": [".jpg"], "video_extensions": [".mp4"]})
+
+        self.assertIn(".png", configuration["image_extensions"])
+        self.assertIn(".arw", configuration["image_extensions"])
+        self.assertIn(".mov", configuration["video_extensions"])
+
     def test_analysis_is_non_destructive_and_excludes_app_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
@@ -44,14 +51,13 @@ class PlanningTests(unittest.TestCase):
             (root / "skip" / "b.jpg").write_bytes(b"bb")
             (root / "keep" / "c.mp4").write_bytes(b"ccc")
             config = default_configuration()
-            config["include_videos"] = False
             config["folder_rules"] = [{"path": "skip", "included": False}]
 
             plan = plan_from_analysis(analyze_folder(root), config)
 
-            self.assertEqual(plan["selected_files"], 1)
-            self.assertEqual(plan["selected_bytes"], 1)
-            self.assertEqual(plan["selected_extensions"], {".jpg": 1})
+            self.assertEqual(plan["selected_files"], 2)
+            self.assertEqual(plan["selected_bytes"], 4)
+            self.assertEqual(plan["selected_extensions"], {".jpg": 1, ".mp4": 1})
 
     def test_root_index_is_not_a_workspace_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

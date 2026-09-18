@@ -18,7 +18,7 @@ from ..media_types import is_raw_extension, is_rendered_image_extension
 from ..workspace import Workspace
 
 RECONCILIATION_ALGORITHM = "exact-sha-and-conservative-raw-jpeg"
-RECONCILIATION_VERSION = "2"
+RECONCILIATION_VERSION = "3"
 RAW_JPEG_ALGORITHM = "same-stem-with-corroboration"
 RAW_JPEG_VERSION = "1"
 EXACT_DUPLICATE_ALGORITHM = "sha256-bytes"
@@ -29,6 +29,7 @@ RECONCILIATION_SETTINGS = {
     "raw_jpeg": {
         "stem": "casefolded_filename_stem",
         "capture_time_tolerance_seconds": RAW_JPEG_TIME_TOLERANCE_SECONDS,
+        "mixed_local_absolute_time": "allowed only with matching camera evidence and matching wall-clock time",
         "unique_fallback": True,
         "preview_hash": False,
     },
@@ -291,21 +292,41 @@ def _raw_jpeg_candidates(assets, physical, canonical):
 def _pair_evidence(raw_asset, rendered_asset, files_by_asset):
     raw_time = _capture_value(raw_asset["capture_time"], raw_asset["capture_time_kind"])
     rendered_time = _capture_value(rendered_asset["capture_time"], rendered_asset["capture_time_kind"])
-    if raw_time is not None and rendered_time is not None:
-        if raw_time[1] != rendered_time[1] or abs(raw_time[0] - rendered_time[0]) > RAW_JPEG_TIME_TOLERANCE_SECONDS:
-            return None
-        reason = "same_stem+capture_time"
-    else:
-        reason = "unique_same_stem_no_conflict"
     raw_camera = _camera_identity(files_by_asset[raw_asset["id"]])
     rendered_camera = _camera_identity(files_by_asset[rendered_asset["id"]])
+    mixed_semantics = raw_time is not None and rendered_time is not None and raw_time[1] != rendered_time[1]
+    if raw_time is not None and rendered_time is not None:
+        if mixed_semantics:
+            if not raw_camera or raw_camera != rendered_camera or _wall_clock_delta(raw_asset["capture_time"], rendered_asset["capture_time"]) > RAW_JPEG_TIME_TOLERANCE_SECONDS:
+                return None
+            reason = "same_stem+capture_time_mixed_semantics+camera"
+        elif abs(raw_time[0] - rendered_time[0]) > RAW_JPEG_TIME_TOLERANCE_SECONDS:
+            return None
+        else:
+            reason = "same_stem+capture_time"
+    else:
+        reason = "unique_same_stem_no_conflict"
     if raw_camera and rendered_camera and raw_camera != rendered_camera:
         return None
     if raw_time is not None and rendered_time is not None and raw_camera and rendered_camera:
-        reason = "same_stem+capture_time+camera"
+        if not mixed_semantics:
+            reason = "same_stem+capture_time+camera"
     elif raw_camera and rendered_camera:
         reason = "same_stem+camera"
-    return {"rule": reason}
+    evidence = {"rule": reason}
+    if mixed_semantics:
+        evidence["capture_semantics"] = {"raw": raw_time[1], "rendered": rendered_time[1]}
+        evidence["capture_wall_clock_delta_seconds"] = _wall_clock_delta(raw_asset["capture_time"], rendered_asset["capture_time"])
+    return evidence
+
+
+def _wall_clock_delta(left: str | None, right: str | None) -> float:
+    try:
+        left_value = datetime.fromisoformat(left).replace(tzinfo=None)
+        right_value = datetime.fromisoformat(right).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return float("inf")
+    return abs((left_value - right_value).total_seconds())
 
 
 def _capture_value(value, kind):

@@ -36,7 +36,7 @@ METADATA_COMPONENT = "metadata"
 THUMBNAIL_COMPONENT = "thumbnail"
 QUALITY_COMPONENT = "quality"
 METADATA_ALGORITHM = "pillow-curated-exif-ffprobe"
-METADATA_VERSION = "4"
+METADATA_VERSION = "5"
 COMPONENTS = frozenset({METADATA_COMPONENT, THUMBNAIL_COMPONENT, QUALITY_COMPONENT})
 MEDIA_BATCH_SIZE = 32
 THUMBNAIL_WORKERS = 12
@@ -74,7 +74,26 @@ def index_workspace(
         finally:
             connection.close()
 
-    quality_rows = _quality_processing_rows(rows) if selected_components == (QUALITY_COMPONENT,) else rows
+    if selected_components == (QUALITY_COMPONENT,):
+        connection = workspace.connect()
+        try:
+            offline_rows = connection.execute(
+                "SELECT logical_asset_id, media_type, extension FROM physical_file WHERE in_scope = 1 AND is_online = 0"
+            ).fetchall()
+        finally:
+            connection.close()
+        fallback_assets = {
+            row["logical_asset_id"]
+            for row in offline_rows
+            if row["media_type"] == "image" and not is_raw_extension(row["extension"])
+        }
+        quality_rows = _quality_processing_rows(
+            rows,
+            fallback_asset_ids=fallback_assets,
+            include_videos=workspace.configuration()["video_quality_enabled"],
+        )
+    else:
+        quality_rows = rows
 
     if selected_components == (QUALITY_COMPONENT,) and not provider.enabled:
         with timed(timings, "quality.off_state_check"):
@@ -98,6 +117,7 @@ def index_workspace(
                 timings.add("media.total", perf_counter() - started)
             return result
 
+    thumbnail_rows = _thumbnail_processing_rows(rows) if selected_components == (THUMBNAIL_COMPONENT,) else rows
     with timed(timings, "media.component_state_prep", len(rows)):
         state_map = _prepare_component_states(
             workspace,
@@ -105,6 +125,7 @@ def index_workspace(
             selected_components,
             provider,
             quality_row_ids={row["id"] for row in quality_rows},
+            thumbnail_row_ids={row["id"] for row in thumbnail_rows},
         )
 
     effective_batch_size = getattr(provider, "batch_size", 1)
@@ -161,7 +182,13 @@ def index_workspace(
     def worker(row):
         return _process_file(workspace, row, selected_components, provider, state_map, timings)
 
-    processing_rows = quality_rows if selected_components == (QUALITY_COMPONENT,) else rows
+    processing_rows = (
+        quality_rows
+        if selected_components == (QUALITY_COMPONENT,)
+        else thumbnail_rows
+        if selected_components == (THUMBNAIL_COMPONENT,)
+        else rows
+    )
     result = run_items(
         workspace,
         "media_index",
@@ -233,22 +260,41 @@ def list_problems(workspace: Workspace, job_id: str | None = None):
     return JobStore(workspace).list_errors(job_id)
 
 
-def _quality_processing_rows(rows):
+def _quality_processing_rows(rows, *, fallback_asset_ids=(), include_videos=True):
     selected: dict[str, object] = {}
     videos = []
-    for row in rows:
-        if row["media_type"] == "video":
-            videos.append(row)
-        elif row["media_type"] == "image" and not is_raw_extension(row["extension"]):
-            asset_id = row["logical_asset_id"]
-            selected.setdefault(asset_id, row)
     grouped: dict[str, list] = {}
     for row in rows:
-        if row["media_type"] == "image" and not is_raw_extension(row["extension"]):
-            grouped.setdefault(row["logical_asset_id"], []).append(row)
+        if row["media_type"] == "video" and include_videos:
+            videos.append(row)
+        elif row["media_type"] == "image":
+            if not is_raw_extension(row["extension"]):
+                selected.setdefault(row["logical_asset_id"], row)
+                grouped.setdefault(row["logical_asset_id"], []).append(row)
     for asset_id, asset_rows in grouped.items():
         selected[asset_id] = preferred_physical(asset_rows, component=QUALITY_COMPONENT)
+    for row in rows:
+        if (
+            row["media_type"] == "image"
+            and is_raw_extension(row["extension"])
+            and row["logical_asset_id"] in fallback_asset_ids
+        ):
+            selected.setdefault(row["logical_asset_id"], row)
     return [*selected.values(), *videos]
+
+
+def _thumbnail_processing_rows(rows):
+    selected: list = []
+    by_asset: dict[str, list] = {}
+    for row in rows:
+        by_asset.setdefault(row["logical_asset_id"], []).append(row)
+    for members in by_asset.values():
+        if members[0]["media_type"] == "video":
+            selected.append(preferred_physical(members))
+            continue
+        rendered = [row for row in members if not is_raw_extension(row["extension"])]
+        selected.append(preferred_physical(rendered or members))
+    return [row for row in selected if row is not None]
 
 
 def _prepare_component_states(
@@ -257,6 +303,7 @@ def _prepare_component_states(
     components: tuple[str, ...],
     provider: QualityProvider,
     quality_row_ids: set[str] | None = None,
+    thumbnail_row_ids: set[str] | None = None,
 ) -> dict[tuple[str, str], object]:
     row_ids = [row["id"] for row in rows]
     state_map: dict[tuple[str, str], object] = {}
@@ -279,6 +326,23 @@ def _prepare_component_states(
                     and quality_row_ids is not None
                     and row["id"] not in quality_row_ids
                 )
+                thumbnail_not_processed = (
+                    component == THUMBNAIL_COMPONENT
+                    and thumbnail_row_ids is not None
+                    and row["id"] not in thumbnail_row_ids
+                )
+                if thumbnail_not_processed:
+                    if state is None:
+                        connection.execute(
+                            "INSERT INTO component_state(physical_file_id, component, status, algorithm, version) VALUES (?, ?, 'not_requested', ?, ?)",
+                            (row["id"], component, algorithm, version),
+                        )
+                    elif state["status"] != "complete":
+                        connection.execute(
+                            "UPDATE component_state SET status = 'not_requested', algorithm = ?, version = ?, started_at = NULL, completed_at = NULL, error_message = NULL WHERE physical_file_id = ? AND component = ?",
+                            (algorithm, version, row["id"], component),
+                        )
+                    continue
                 if component == QUALITY_COMPONENT and (not provider.enabled or quality_not_processed):
                     if (
                         state is not None
@@ -730,7 +794,7 @@ def _process_file(
     needs_pixels = THUMBNAIL_COMPONENT in image_components or QUALITY_COMPONENT in image_components
     if row["media_type"] == "image" and needs_pixels:
         try:
-            if QUALITY_COMPONENT in image_components and provider.algorithm == "lar-iqa":
+            if QUALITY_COMPONENT in image_components and provider.algorithm == "lar-iqa" and not is_raw_extension(row["extension"]):
                 with timed(timings, "quality.decode_rgb"):
                     prepared_image = load_full_image(source)
             else:
@@ -747,17 +811,17 @@ def _process_file(
         for component in pending_components:
             try:
                 if component == METADATA_COMPONENT:
-                    with timed(timings, "metadata.processing"):
+                    with timed(timings, "metadata.processing", 1):
                         _process_metadata(workspace, row, source, fingerprint, timings)
                 elif row["media_type"] == "video" and component == QUALITY_COMPONENT:
                     _mark_not_requested(workspace, row["id"], component, fingerprint, provider)
                 elif image_error is not None:
                     raise image_error
                 elif component == THUMBNAIL_COMPONENT:
-                    with timed(timings, "thumbnail.processing"):
+                    with timed(timings, "thumbnail.processing", 1):
                         _process_thumbnail(workspace, row, source, fingerprint, prepared_image, timings)
                 elif component == QUALITY_COMPONENT:
-                    with timed(timings, "quality.processing"):
+                    with timed(timings, "quality.processing", 1):
                         _process_quality(workspace, row, source, fingerprint, prepared_image, provider)
                 else:
                     raise ValueError(f"unsupported component: {component}")

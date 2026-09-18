@@ -16,7 +16,7 @@ from PIL import Image
 
 from ..jobs.engine import JobProgress, JobRunResult, JobStore, run_batches
 from ..media.metadata import UnsupportedDecoderError
-from ..media.thumbnail import load_reduced_image
+from ..media.thumbnail import load_raw_preview, load_reduced_image
 from ..workspace import Workspace
 from ..timing import TimingRecorder, timed
 from ..media_types import is_raw_extension
@@ -24,7 +24,7 @@ from .representations import preferred_physical
 
 FEATURE_COMPONENT = "group_feature"
 FEATURE_ALGORITHM = "pillow-strict-group-features"
-FEATURE_VERSION = "3"
+FEATURE_VERSION = "4"
 GROUPING_ALGORITHM = "strict-temporal-complete-linkage"
 GROUPING_VERSION = "4"
 MAX_CAPTURE_SECONDS = 10.0
@@ -147,7 +147,10 @@ def extract_visual_features(
         fingerprint = _input_fingerprint(row)
         decode_started = time.perf_counter()
         try:
-            image = load_reduced_image(workspace.absolute_path(row["relative_path"]), FEATURE_DECODE_SIZE)
+            source = workspace.absolute_path(row["relative_path"])
+            image = load_raw_preview(source) if is_raw_extension(row["extension"]) else load_reduced_image(source, FEATURE_DECODE_SIZE)
+            if is_raw_extension(row["extension"]):
+                image.thumbnail(FEATURE_DECODE_SIZE, Image.Resampling.LANCZOS)
             decode_seconds = time.perf_counter() - decode_started
             calculation_started = time.perf_counter()
             try:

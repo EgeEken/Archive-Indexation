@@ -25,6 +25,7 @@ class CorrectionTests(unittest.TestCase):
     def enable_embeddings(self):
         config = self.workspace.configuration()
         config["semantic_search_enabled"] = True
+        config["include_videos_in_semantic_search"] = True
         self.workspace.apply_configuration(config)
         provider = FakeProvider()
         index_embeddings(self.workspace, provider=provider)
@@ -43,10 +44,17 @@ class CorrectionTests(unittest.TestCase):
             self.assertEqual(plan["embedding_estimated_storage_bytes"], 6)
 
     def test_planner_fresh_estimate_does_not_invent_video_durations(self):
-        plan = server._embedding_plan(self.workspace.configuration(), filesystem_plan={"selected_categories":{"jpeg":4,"video":2}})
+        configuration = {**self.workspace.configuration(), "semantic_search_enabled": True, "include_videos_in_semantic_search": True}
+        plan = server._embedding_plan(configuration, filesystem_plan={"selected_categories":{"jpeg":4,"video":2}})
         self.assertEqual((plan["embedding_total_vectors"],plan["embedding_pending_count"],plan["embedding_cached_count"]),(4,4,0))
         self.assertEqual(plan["embedding_unknown_videos"],2)
         self.assertGreater(plan["embedding_estimated_seconds"],0)
+
+    def test_planner_respects_explicit_video_semantic_inclusion(self):
+        configuration = {**self.workspace.configuration(), "include_videos_in_semantic_search": False}
+        plan = server._embedding_plan(configuration, filesystem_plan={"selected_categories": {"jpeg": 4, "video": 2}})
+        self.assertEqual(plan["embedding_video_sample_count"], 0)
+        self.assertEqual(plan["embedding_unknown_videos"], 0)
 
     def test_plan_endpoint_populates_embedding_counts(self):
         provider = self.enable_embeddings()
@@ -56,6 +64,7 @@ class CorrectionTests(unittest.TestCase):
             payload=app.plan_workspace_configuration(str(self.workspace.root),self.workspace.configuration())
         self.assertEqual(payload["plan"]["embedding_total_vectors"],3)
         self.assertEqual(payload["plan"]["embedding_cached_count"],3)
+        self.assertEqual(payload["plan"]["eta_seconds_by_feature"]["semantic_search"], payload["plan"]["embedding_estimated_seconds"])
 
     def test_reconciled_pair_stays_reconciled_and_compatible_decision_survives(self):
         (self.workspace.root / "filename.ARW").write_bytes(b"raw")

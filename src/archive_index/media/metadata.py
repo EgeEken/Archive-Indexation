@@ -109,9 +109,23 @@ def _extract_image_metadata(path: Path) -> MediaMetadata:
             )
     except UnidentifiedImageError as error:
         if path.suffix.casefold() in DECODER_GAP_EXTENSIONS:
-            raise UnsupportedDecoderError(
-                f"no image decoder is configured for {path.suffix.casefold()}"
-            ) from error
+            from .raw_preview import extract_embedded_preview
+
+            try:
+                preview = extract_embedded_preview(path)
+            except UnsupportedDecoderError:
+                raise UnsupportedDecoderError(
+                    f"no image decoder is configured for {path.suffix.casefold()}"
+                ) from error
+            width = preview.source_width or preview.width
+            height = preview.source_height or preview.height
+            return MediaMetadata(
+                values=preview.metadata,
+                capture_time=preview.capture_time,
+                capture_time_kind=preview.capture_time_kind,
+                width=width,
+                height=height,
+            )
         raise MetadataExtractionError(f"could not decode image: {path}") from error
     except (OSError, ValueError, SyntaxError) as error:
         raise MetadataExtractionError(f"could not read image metadata: {path}") from error

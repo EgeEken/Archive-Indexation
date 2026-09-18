@@ -12,7 +12,7 @@ from PIL import Image
 
 from archive_index.embeddings.models import OPENCLIP_PROVIDER, SIGLIP_PROVIDER
 from archive_index.embeddings.providers import EmbeddingProvider
-from archive_index.embeddings.search import search_similar, search_text, search_vector
+from archive_index.embeddings.search import clear_search_sessions, prepare_provider, search_similar, search_text, search_vector
 from archive_index.embeddings.vector import blob_to_vector, exact_top_k, vector_to_blob
 from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.scanner import scan
@@ -57,6 +57,28 @@ class FakeProvider(EmbeddingProvider):
 
 
 class EmbeddingTests(unittest.TestCase):
+    def test_search_and_indexing_share_one_provider_instance(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (20, 30)).save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": True})
+            provider = FakeProvider()
+            clear_search_sessions()
+            self.addCleanup(clear_search_sessions)
+            with patch("archive_index.embeddings.search.create_embedding_provider", return_value=provider) as search_create, patch(
+                "archive_index.indexing.embeddings.create_embedding_provider", return_value=provider
+            ) as indexing_create:
+                prepare_provider(provider.provider_id).result(timeout=5)
+                result = index_embeddings(workspace)
+                self.assertEqual(result.errors, 0)
+                search_text(workspace, "photo", top_k=1)
+            self.assertEqual(search_create.call_count, 1)
+            indexing_create.assert_not_called()
+            self.assertEqual(provider.preflight_calls, 1)
+
     def test_float16_vectors_are_normalized_and_dimension_checked(self):
         blob, dimension = vector_to_blob([3.0, 4.0])
         value = blob_to_vector(blob, dimension)
@@ -281,6 +303,7 @@ class EmbeddingTests(unittest.TestCase):
             Image.new("RGB", (20, 30)).save(root / "photo.jpg")
             workspace = Workspace.create(root)
             scan(workspace)
+            workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": False})
             provider = FakeProvider()
             result = index_embeddings(workspace, provider=provider)
             self.assertEqual(result.skipped, 1)

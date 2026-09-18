@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from contextlib import closing
@@ -8,12 +9,24 @@ from threading import Event
 
 from PIL import Image
 
-from archive_index.indexing.reconciliation import _capture_value, reconcile_workspace
+from archive_index.indexing.reconciliation import _capture_value, _pair_evidence, reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.workspace import Workspace
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_mixed_local_and_absolute_capture_time_pairs_with_matching_camera(self):
+        raw = {"id": "raw", "capture_time": "2026-09-13T11:47:01", "capture_time_kind": "exif_local_unknown"}
+        rendered = {"id": "jpeg", "capture_time": "2026-09-13T11:47:01.453000+02:00", "capture_time_kind": "exif_offset"}
+        files = {
+            "raw": [{"metadata_json": json.dumps({"exif": {"Make": "Sony", "Model": "ILME-FX3A"}})}],
+            "jpeg": [{"metadata_json": json.dumps({"exif": {"Make": "SONY", "Model": "ILME-FX3A"}})}],
+        }
+        evidence = _pair_evidence(raw, rendered, files)
+        self.assertEqual(evidence["rule"], "same_stem+capture_time_mixed_semantics+camera")
+        self.assertEqual(evidence["capture_semantics"], {"raw": "local", "rendered": "absolute"})
+        self.assertAlmostEqual(evidence["capture_wall_clock_delta_seconds"], 0.453)
+
     def _workspace(self, root: Path) -> Workspace:
         root.mkdir(parents=True)
         return Workspace.create(root)

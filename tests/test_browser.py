@@ -30,6 +30,7 @@ class BrowserTests(unittest.TestCase):
         for name, size in [("filename.jpg", (80,40)), ("nested/other.jpg", (40,80)), ("nested/child/third.jpg", (60,40))]:
             Image.new("RGB", size, "red").save(root / name)
         self.workspace = Workspace.create(root)
+        self.workspace.apply_configuration({**self.workspace.configuration(), "semantic_search_enabled": False})
         scan(self.workspace)
         index_workspace(self.workspace, components=("metadata", "thumbnail"), quality_provider=OffQualityProvider())
         self.items = _browser_assets(self.workspace, {}, "test")["items"]

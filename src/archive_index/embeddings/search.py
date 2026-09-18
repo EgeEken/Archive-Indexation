@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from .providers import EmbeddingProvider, create_embedding_provider
+from .runtime import embedding_runtime
 from .vector import blob_to_vector, exact_top_k
 from ..workspace import Workspace
 
@@ -23,13 +24,12 @@ class SearchResult:
 
 
 _search_lock = RLock()
-_providers = {}
+_providers = embedding_runtime.providers
+_loads = embedding_runtime.loads
 _text_vectors = OrderedDict()
 _rankings = OrderedDict()
-_active_provider = None
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-search")
 _state_lock = RLock()
-_loads = {}
 _requests = OrderedDict()
 
 
@@ -47,43 +47,22 @@ LAST_SEARCH_TIMINGS = {}
 
 
 def provider_state(provider_id):
-    with _state_lock:
-        future = _loads.get(provider_id)
-        if future is None:
-            return "available"
-        if not future.done():
-            return "loading"
-        return "failed" if future.exception() else "ready"
+    return embedding_runtime.state(provider_id)
 
 
 def select_provider(provider_id):
-    global _active_provider
     with _state_lock:
-        if _active_provider != provider_id:
-            _active_provider = provider_id
-            for future in (*_loads.values(), *_requests.values()):
-                future.cancel()
-            _loads.clear()
-            _requests.clear()
-            _worker.submit(_release_providers)
-        if provider_id is not None and provider_id not in _loads:
-            _loads[provider_id] = _worker.submit(_warm_provider, provider_id)
-        return _loads.get(provider_id)
+        for future in _requests.values():
+            future.cancel()
+        _requests.clear()
+    release = embedding_runtime.select(provider_id, factory=create_embedding_provider)
+    if provider_id is None and release is not None:
+        return _worker.submit(release.result)
+    return release
 
 
 def prepare_provider(provider_id):
-    return select_provider(provider_id)
-
-
-def _warm_provider(provider_id):
-    with _search_lock:
-        candidate = create_embedding_provider(provider_id)
-        session = _providers.get((provider_id, candidate.version), candidate)
-        started = perf_counter()
-        session.preflight()
-        _providers[(provider_id, session.version)] = session
-        LAST_SEARCH_TIMINGS["provider_load"] = perf_counter() - started
-        LAST_SEARCH_TIMINGS["load_stages"] = dict(getattr(session, "last_timings", {}))
+    return embedding_runtime.prepare(provider_id, factory=create_embedding_provider)
 
 
 def request_text(workspace, text, *, allowed_asset_ids):
@@ -112,17 +91,14 @@ def request_text(workspace, text, *, allowed_asset_ids):
 
 
 def _release_providers():
-    with _search_lock:
-        runtimes = [p._torch for p in _providers.values() if getattr(p, "_torch", None) is not None]
-        _providers.clear()
-        _rankings.clear()
-        for runtime in runtimes:
-            if runtime.cuda.is_available():
-                runtime.cuda.empty_cache()
+    embedding_runtime.release_all().result()
+    _rankings.clear()
 
 
 def clear_search_sessions():
-    select_provider(None)
+    release = select_provider(None)
+    if release is not None:
+        release.result()
     _worker.submit(_release_providers).result()
 
 
@@ -166,11 +142,13 @@ def search_text(
         query = _text_vectors.get(key)
         encode_started = perf_counter()
         if query is None:
-            session = _providers.get(key[:2])
-            if session is None:
-                session = create_embedding_provider(active["active_provider"])
-                _providers[key[:2]] = session
-            query = session.encode_text(text)
+            query = embedding_runtime.run(
+                active["active_provider"],
+                lambda session: session.encode_text(text),
+                factory=create_embedding_provider,
+            )
+            session = embedding_runtime.loaded_provider(active["active_provider"], active["model_version"])
+            LAST_SEARCH_TIMINGS["load_stages"] = dict(getattr(session, "last_timings", {}))
             _text_vectors[key] = query
             while len(_text_vectors) > 128:
                 _text_vectors.popitem(last=False)

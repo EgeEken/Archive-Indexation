@@ -343,6 +343,23 @@ def index_video_quality(
         except Exception as error:
             preflight_error = error
 
+    sample_counts = {}
+    for index, row in enumerate(rows):
+        try:
+            sample_counts[row["id"]] = sample_count(
+                float(row["duration_seconds"] or 0),
+                float(configuration["video_sampling_fps"]),
+                int(configuration["video_sampling_min_frames"]),
+                int(configuration["video_sampling_max_frames"]),
+            )
+        except (TypeError, ValueError, VideoQualityError):
+            sample_counts[row["id"]] = int(configuration["video_sampling_max_frames"])
+    remaining_by_id = {}
+    future = 0
+    for row in reversed(rows):
+        remaining_by_id[row["id"]] = future
+        future += sample_counts[row["id"]]
+
     def worker(row):
         if _video_state_ready(workspace, row, algorithm, version, settings):
             return "skipped"
@@ -359,7 +376,9 @@ def index_video_quality(
                 settings,
                 cancel_event,
                 timings,
-                (lambda stage, current, total: report_substage(job_id, stage, current, total, row["filename"])) if job_id else None,
+                (lambda stage, current, total: report_substage(
+                    job_id, stage, current, total, row["filename"], remaining_by_id[row["id"]]
+                )) if job_id else None,
             )
         except Exception as error:
             _mark_failed(workspace, row, algorithm, version, settings, error)

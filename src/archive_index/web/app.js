@@ -7,7 +7,7 @@ const state = {
   items: [],
   viewerItems: [],
   viewMode: ["groups", "cloud"].includes(query.get("view")) ? query.get("view") : "gallery",
-  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, semanticEnabled: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [],
+  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, semanticEnabled: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [], folderCounts: {},
   scrollPositions: {}, windowStart: 0, windowRows: [], windowColumns: 1, windowHeight: 360, windowHasNext: false,
   collapsed: localStorage.getItem("archive-sidebar-collapsed") === "true",
   selectionFilter: query.get("selection") || "all",
@@ -199,15 +199,16 @@ function renderCard(item, index) {
     ? `<img class="thumb" loading="lazy" src="${item.thumbnail_url}" alt="${escapeHtml(item.filename)}">`
     : `<div class="placeholder">Preview unavailable</div>`;
   const date = item.capture_time?.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2})/);
-  const capture = `<div class="capture">${date ? `${date[3]}/${date[2]}/${date[1]} · ${date[4]}` : "Capture time unavailable"}</div>`;
+  const capture = date ? `<div class="capture">${date[3]}/${date[2]}/${date[1]} · ${date[4]}</div>` : "";
   const automaticClass = item.auto_recommended ? " recommended-card" : item.is_representative ? " representative-card" : "";
-  return `<article class="photo-card${automaticClass}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
+  return `<article class="photo-card${automaticClass}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${filenameMarkup(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
 }
 
 async function loadHome() {
   $("home-view").classList.remove("hidden");
   $("workspace-view").classList.add("hidden");
   $("setup-view").classList.add("hidden");
+  $("setup-header-summary").classList.add("hidden");
   $("configure-workspace").classList.add("hidden");
   $("index").classList.add("hidden");
   $("problems-button").classList.add("hidden");
@@ -248,14 +249,20 @@ async function pickWorkspace() {
   }
 }
 
+function filenameMarkup(filename) {
+  const value = String(filename || "");
+  const match = value.match(/^(.*?)(\.[^.]+)$/);
+  if (!match) return escapeHtml(value);
+  const extension = match[2].toLowerCase();
+  const kind = supportedVideoExtensions.includes(extension) ? "video-extension" :
+    [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(extension) ? "raw-extension" :
+    supportedImageExtensions.includes(extension) ? "image-extension" : "";
+  return `${escapeHtml(match[1])}<span class="${kind}">${escapeHtml(match[2])}</span>`;
+}
+
 function folderRule(path, configuration) {
   const rules = Object.fromEntries((configuration.folder_rules || []).map((rule) => [rule.path.toLowerCase(), Boolean(rule.included)]));
-  const parts = path ? path.split("/") : [];
-  for (let index = parts.length; index >= 0; index -= 1) {
-    const value = rules[parts.slice(0, index).join("/").toLowerCase()];
-    if (value !== undefined) return value;
-  }
-  return true;
+  return rules[path.toLowerCase()] ?? true;
 }
 
 function folderRuleSetting(path, configuration) {
@@ -263,83 +270,66 @@ function folderRuleSetting(path, configuration) {
   return rule ? (rule.included ? "include" : "exclude") : "inherit";
 }
 
-function setupExtensionCategory(extension) {
-  if (supportedVideoExtensions.includes(extension)) return "Video";
-  if ([".jpg", ".jpeg"].includes(extension)) return "JPEG";
-  if ([".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(extension)) return "RAW";
-  return "Other supported image";
-}
-
 function renderSetupFolder(node, configuration) {
-  const setting = folderRuleSetting(node.path, configuration);
-  const children = (node.children || []).map((child) => renderSetupFolder(child, configuration)).join("");
+  const checked = folderRule(node.path, configuration);
+  const planRow = state.setup?.plan?.folder_rows?.find((row) => row.path.toLowerCase() === node.path.toLowerCase());
   const label = node.path ? node.name : "Workspace root";
-  const counts = `${node.recognized_files || 0} supported · ${node.recursive_files || 0} files`;
-  const categories = Object.entries(node.categories || {}).map(([category, count]) => `<span class="scope-chip">${count} ${escapeHtml(category)}</span>`).join("");
-  const examples = (node.examples || []).map((example) => escapeHtml(example)).join(" · ");
-  return `<details class="folder-node"${node.path ? "" : " open"}><summary><span class="folder-choice"><span>${escapeHtml(label)}</span><select data-folder-path="${escapeHtml(node.path)}" aria-label="Scope for ${escapeHtml(label)}"><option value="inherit"${setting === "inherit" ? " selected" : ""}>Inherited</option><option value="include"${setting === "include" ? " selected" : ""}>Include</option><option value="exclude"${setting === "exclude" ? " selected" : ""}>Exclude</option></select></span><span class="muted">${counts}</span></summary>${node.error ? `<p class="error">${escapeHtml(node.error)}</p>` : ""}${categories ? `<div class="scope-chips">${categories}</div>` : ""}${examples ? `<div class="scope-examples">Examples: ${examples}</div>` : ""}${children ? `<div class="folder-children">${children}</div>` : ""}</details>`;
+  const categories = planRow?.categories || {};
+  const composition = [
+    [categories.jpeg || 0, "image"], [categories.other_image || 0, "image"], [categories.raw || 0, "image"], [categories.video || 0, "video"],
+  ].reduce((parts, [count, kind]) => { if (count) parts[kind] = (parts[kind] || 0) + count; return parts; }, {});
+  const compositionText = Object.entries(composition).map(([kind, count]) => `${Number(count).toLocaleString()} ${kind}${count === 1 ? "" : "s"}`).join(" · ");
+  const supported = Number(planRow?.supported_files ?? node.recognized_files ?? 0);
+  const pending = Number(planRow?.pending_files ?? supported);
+  const reusable = Number(planRow?.reusable_files ?? 0);
+  const counts = `${supported.toLocaleString()}/${Number(node.direct_files || 0).toLocaleString()} supported${compositionText ? ` · ${compositionText}` : ""} · ${formatBytes(planRow?.supported_bytes ?? node.direct_bytes ?? 0)} · ${pending.toLocaleString()} pending · ${reusable.toLocaleString()} cached · +${formatEta(planRow?.pending_eta_seconds ?? planRow?.eta_seconds ?? 0)}`;
+  const children = (node.children || []).map((child) => renderSetupFolder(child, configuration)).join("");
+  return `<div class="folder-node"><label class="folder-choice"><input type="checkbox" data-folder-path="${escapeHtml(node.path)}"${checked ? " checked" : ""}> <span>${escapeHtml(label)}</span></label><span class="muted folder-node-counts">${counts}</span>${node.error ? `<p class="error">${escapeHtml(node.error)}</p>` : ""}${children ? `<div class="folder-children">${children}</div>` : ""}</div>`;
 }
 
-function setupExtensionsMarkup(configuration) {
-  const imageExtensions = configuration.image_extensions || [];
-  const videoExtensions = configuration.video_extensions || [];
-  const imageGroups = ["JPEG", "RAW", "Other supported image"].map((category) => {
-    const values = supportedImageExtensions.filter((extension) => setupExtensionCategory(extension) === category);
-    return `<div class="extension-group"><strong>${category}</strong><div class="extension-list">${values.map((extension) => `<label><input type="checkbox" data-extension="${extension}" data-extension-kind="image"${imageExtensions.includes(extension) ? " checked" : ""}> ${extension}</label>`).join("")}</div></div>`;
-  }).join("");
-  const video = supportedVideoExtensions.map((extension) => `<label><input type="checkbox" data-extension="${extension}" data-extension-kind="video"${videoExtensions.includes(extension) ? " checked" : ""}> ${extension}</label>`).join("");
-  return `<div class="scope-options"><label class="setup-toggle"><input id="setup-include-rendered-images" type="checkbox"${configuration.include_rendered_images ?? configuration.include_images ? " checked" : ""}> Index rendered image files</label><label class="setup-toggle"><input id="setup-include-raw" type="checkbox"${configuration.include_raw ?? configuration.include_images ? " checked" : ""}> Index RAW files</label><div class="extension-groups">${imageGroups}</div><div class="extension-group"><strong>Video extensions</strong><div class="extension-list">${video}</div></div></div>`;
-}
-
-function setupPlan(configuration) {
-  const totals = { files: 0, bytes: 0, categories: {} };
-  const includeExtension = (extension) => {
-    if ((configuration.image_extensions || []).includes(extension)) {
-      return [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(extension)
-        ? Boolean(configuration.include_raw ?? configuration.include_images)
-        : Boolean(configuration.include_rendered_images ?? configuration.include_images);
-    }
-    if ((configuration.video_extensions || []).includes(extension)) return Boolean(configuration.include_videos);
-    return false;
-  };
-  const visit = (node) => {
-    if (folderRule(node.path, configuration)) {
-      Object.entries(node.direct_extensions || {}).forEach(([extension, count]) => {
-        if (includeExtension(extension)) {
-          totals.files += count;
-          totals.bytes += node.direct_extension_bytes?.[extension] || 0;
-          const category = setupExtensionCategory(extension);
-          totals.categories[category] = (totals.categories[category] || 0) + count;
-        }
-      });
-    }
-    (node.children || []).forEach(visit);
-  };
-  visit(state.setup.analysis.root);
-  return totals;
+function formatEta(seconds) {
+  const value = Math.max(0, Math.ceil(Number(seconds || 0)));
+  if (!value) return "ready";
+  const minutes = Math.floor(value / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 }
 
 function renderSetupPlanData(plan) {
   const files = plan.selected_files ?? plan.files ?? 0;
-  const bytes = plan.selected_bytes ?? plan.bytes ?? 0;
-  const categories = plan.selected_categories ?? plan.categories ?? {};
-  const estimate = plan.estimated_seconds ? ` · roughly ${Math.max(1, Math.round(plan.estimated_seconds / 60))} min` : "";
   const configuration = state.setup.draftConfiguration;
-  const rendered = configuration.rendered_quality_provider ?? configuration.quality_provider;
-  const quality = `rendered-image quality: ${plan.quality_rendered_image_count ?? 0} candidates${rendered === "lar-iqa" && plan.rendered_quality_readiness?.message ? ` · ${plan.rendered_quality_readiness.message}` : ""} · RAW-only quality: ${plan.quality_raw_candidate_count ?? 0} candidates`;
-  const video = plan.video_sampling ? `video: ${plan.video_count ?? 0} indexed · quality ${configuration.video_quality_enabled ? "enabled" : "off"}, ${plan.video_sampling.target_fps} samples/s, ${plan.video_sampling.min_frames}–${plan.video_sampling.max_frames} frames/video` : "";
-  const embedding = !configuration.semantic_search_enabled ? "Semantic search: off" : plan.embedding_total_vectors == null ? "Calculating semantic work…" :
-    `Semantic search${plan.embedding_counts_estimated ? " (estimated before reconciliation)" : ""}: ${plan.embedding_image_count} image assets · ${plan.embedding_video_sample_count} video samples · ${plan.embedding_total_vectors} vectors
-${plan.embedding_pending_count} pending · ${plan.embedding_cached_count} reusable
-Estimated new storage: ${formatBytes(plan.embedding_estimated_storage_bytes)}${plan.embedding_pending_count ? ` · roughly ${plan.embedding_estimated_seconds} s processing` : ""}${plan.embedding_unknown_videos ? ` · ${plan.embedding_unknown_videos} videos need duration metadata before frame totals can be estimated` : ""}
-${plan.embedding_readiness?.message || ""}`;
-  $("setup-plan").innerHTML = `<strong>${files.toLocaleString()} files selected</strong><span>${escapeHtml(formatBytes(bytes))} · ${Object.entries(categories).map(([category, count]) => `${count} ${category.toLowerCase()}`).join(" · ") || "no supported media"}${estimate}</span><span>${escapeHtml(quality)}</span>${video ? `<span>${escapeHtml(video)}</span>` : ""}<span class="semantic-plan">${escapeHtml(embedding)}</span>`;
+  state.setup.plan = plan;
+  const remaining = Math.max(0, Number(plan.estimated_seconds || 0));
+  const reusable = Number(plan.indexed_reusable_files || 0);
+  $("setup-index-summary").textContent = `Indexed: ${reusable.toLocaleString()} / ${files.toLocaleString()} · Estimated remaining time: ${formatEta(remaining)}`;
+  const eta = plan.eta_seconds_by_feature || {};
+  const qualityEta = Number(eta.rendered_quality || 0) + Number(eta.raw_quality || 0);
+  $("setup-quality-eta").textContent = configuration.quality_enabled ? `+${formatEta(qualityEta)}` : "off";
+  const videoEta = Number(configuration.video_quality_enabled ? eta.video_quality || 0 : 0) + Number(configuration.include_videos_in_semantic_search ? plan.embedding_video_estimated_seconds || 0 : 0);
+  $("setup-video-eta").textContent = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search ? `+${formatEta(videoEta)}` : "off";
+  $("setup-semantic-eta").textContent = configuration.semantic_search_enabled ? `+${formatEta(eta.semantic_search ?? plan.embedding_estimated_seconds)}` : "off";
+  $("setup-embedding-status").classList.toggle("hidden", !configuration.semantic_search_enabled);
+  const quality = plan.lar_iqa_readiness || plan.rendered_quality_readiness || {};
+  const qualityModel = quality.model || {};
+  const qualityDetails = $("setup-quality-details");
+  const qualityVisible = configuration.rendered_quality_provider === "lar-iqa";
+  qualityDetails.classList.toggle("hidden", !qualityVisible);
+  if (qualityVisible) {
+    qualityDetails.innerHTML = `<strong>LAR-IQA · ${qualityModel.installed ? "Installed" : "Not installed"}</strong><span>Provider/model: ${escapeHtml(qualityModel.model_id || "lar-iqa-2branch-kan")}</span><span>Size: ${formatBytes(qualityModel.size_bytes)}</span><span>Workspace ETA: +${formatEta(qualityEta)}</span>${qualityModel.installed ? "" : `<button id="setup-quality-install" class="secondary" type="button">Install model</button>`}${quality.message ? `<span class="muted">${escapeHtml(quality.message)}</span>` : ""}`;
+    $("setup-quality-install")?.addEventListener("click", installQualityModel);
+  }
+  $("setup-folder-tree").innerHTML = renderSetupFolder(state.setup.analysis.root, configuration);
+  bindSetupControls();
+  const videoFeaturesAvailable = configuration.quality_enabled || configuration.semantic_search_enabled;
+  const videoParticipation = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search;
+  $("setup-video-section").classList.toggle("hidden", !videoFeaturesAvailable);
+  $("setup-video-participation-label").textContent = configuration.quality_enabled && configuration.semantic_search_enabled
+    ? "Assess video quality and include videos in semantic search too"
+    : configuration.quality_enabled ? "Assess video quality too" : "Include videos in semantic search too";
+  $("setup-video-sampling").classList.toggle("hidden", !videoParticipation);
 }
 
 function renderSetupPlan() {
-  renderSetupPlanData(setupPlan(state.setup.draftConfiguration));
   const configuration = state.setup.draftConfiguration;
-  $("setup-quality-note").textContent = `Rendered images: ${configuration.rendered_quality_provider === "lar-iqa" ? "Lightweight LAR-IQA" : "off"}. RAW-only assets: ${configuration.raw_quality_provider === "lar-iqa" ? "Lightweight LAR-IQA from embedded previews" : "off"}. Existing quality scores are preserved when a provider is off.`;
   const request = ++state.setup.planRequest;
   fetch("/api/workspaces/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: state.setup.path, analysis: state.setup.analysis, configuration: state.setup.draftConfiguration }) })
     .then(async (response) => {
@@ -352,21 +342,21 @@ function renderSetupPlan() {
 
 function updateSetupConfiguration() {
   const configuration = state.setup.draftConfiguration;
-  configuration.include_rendered_images = $("setup-include-rendered-images").checked;
-  configuration.include_raw = $("setup-include-raw").checked;
-  configuration.include_images = configuration.include_rendered_images || configuration.include_raw;
-  configuration.include_videos = $("setup-include-videos").checked;
-  configuration.rendered_quality_provider = $("setup-rendered-quality-provider").value;
-  configuration.raw_quality_provider = $("setup-raw-quality-provider").value;
-  configuration.quality_provider = configuration.rendered_quality_provider;
-  configuration.video_quality_enabled = $("setup-video-quality").checked;
+  configuration.include_rendered_images = true;
+  configuration.include_raw = true;
+  configuration.include_images = true;
+  configuration.include_videos = true;
+  configuration.quality_enabled = $("setup-quality").checked;
+  configuration.rendered_quality_provider = configuration.quality_enabled ? "lar-iqa" : "off";
+  configuration.raw_quality_provider = configuration.quality_enabled ? "lar-iqa" : "off";
+  const videoParticipation = $("setup-video-participation").checked;
+  configuration.video_quality_enabled = configuration.quality_enabled && videoParticipation;
+  configuration.include_videos_in_semantic_search = $("setup-semantic-search").checked && videoParticipation;
+  configuration.video_processing_enabled = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search;
   configuration.video_sampling_fps = Number($("setup-video-fps").value);
   configuration.video_sampling_min_frames = Number($("setup-video-min-frames").value);
   configuration.video_sampling_max_frames = Number($("setup-video-max-frames").value);
   configuration.semantic_search_enabled = $("setup-semantic-search").checked;
-  configuration.embedding_provider = $("setup-embedding-provider").value;
-  configuration.image_extensions = [...document.querySelectorAll('[data-extension-kind="image"]:checked')].map((input) => input.dataset.extension);
-  configuration.video_extensions = [...document.querySelectorAll('[data-extension-kind="video"]:checked')].map((input) => input.dataset.extension);
   loadEmbeddingModelStatus();
   renderSetupPlan();
 }
@@ -374,12 +364,12 @@ function updateSetupConfiguration() {
 function bindSetupControls() {
   $("setup-folder-tree").querySelectorAll("[data-folder-path]").forEach((input) => input.addEventListener("change", () => {
     const path = input.dataset.folderPath;
+    const configuration = state.setup.draftConfiguration;
     state.setup.draftConfiguration.folder_rules = state.setup.draftConfiguration.folder_rules.filter((rule) => rule.path.toLowerCase() !== path.toLowerCase());
-    if (input.value !== "inherit") state.setup.draftConfiguration.folder_rules.push({ path, included: input.value === "include" });
+    if (folderRule(path, configuration) !== input.checked) state.setup.draftConfiguration.folder_rules.push({ path, included: input.checked });
     renderSetupPlan();
   }));
-  ["setup-include-rendered-images", "setup-include-raw", "setup-include-videos", "setup-video-quality", "setup-rendered-quality-provider", "setup-raw-quality-provider", "setup-video-fps", "setup-video-min-frames", "setup-video-max-frames", "setup-semantic-search", "setup-embedding-provider"].forEach((id) => $(id).addEventListener("change", updateSetupConfiguration));
-  $("setup-type-options").querySelectorAll("[data-extension]").forEach((input) => input.addEventListener("change", updateSetupConfiguration));
+  ["setup-quality", "setup-video-participation", "setup-video-fps", "setup-video-min-frames", "setup-video-max-frames", "setup-semantic-search"].forEach((id) => $(id).onchange = updateSetupConfiguration);
 }
 
 function showSetup(payload) {
@@ -394,23 +384,35 @@ function showSetup(payload) {
   $("home-view").classList.add("hidden");
   $("workspace-view").classList.add("hidden");
   $("setup-view").classList.remove("hidden");
-  $("index").classList.add("hidden");
+  $("workspace-tabs").classList.add("hidden");
+  $("setup-header-summary").classList.remove("hidden");
+  $("index").classList.remove("hidden");
   $("configure-workspace").classList.add("hidden");
-  $("problems-button").classList.add("hidden");
   $("workspace-crumb").classList.add("hidden");
-  $("setup-title").textContent = payload.indexed ? "Review workspace setup" : "Set up workspace";
+  $("setup-title").textContent = "Workspace Setup";
+  $("index").textContent = payload.indexed ? "Re-index" : "Index";
+  $("setup-apply").textContent = payload.indexed ? "Re-index" : "Index";
   $("setup-path").textContent = payload.path;
-  $("setup-include-videos").checked = Boolean(state.setup.draftConfiguration.include_videos);
-  $("setup-video-quality").checked = state.setup.draftConfiguration.video_quality_enabled !== false;
-  $("setup-rendered-quality-provider").value = state.setup.draftConfiguration.rendered_quality_provider || state.setup.draftConfiguration.quality_provider || "lar-iqa";
-  $("setup-raw-quality-provider").value = state.setup.draftConfiguration.raw_quality_provider || "off";
+  state.setup.draftConfiguration.include_rendered_images = true;
+  state.setup.draftConfiguration.include_raw = true;
+  state.setup.draftConfiguration.include_images = true;
+  state.setup.draftConfiguration.include_videos = true;
+  state.setup.draftConfiguration.embedding_provider = "openclip-b16-datacomp-xl";
+  const qualityEnabled = state.setup.draftConfiguration.rendered_quality_provider === "lar-iqa" || state.setup.draftConfiguration.raw_quality_provider === "lar-iqa" || state.setup.draftConfiguration.quality_enabled === true;
+  $("setup-quality").checked = qualityEnabled;
+  $("setup-semantic-search").checked = state.setup.draftConfiguration.semantic_search_enabled !== false;
+  $("setup-video-participation").checked = state.setup.draftConfiguration.video_quality_enabled === true || state.setup.draftConfiguration.include_videos_in_semantic_search === true;
   $("setup-video-fps").value = state.setup.draftConfiguration.video_sampling_fps ?? 2;
   $("setup-video-min-frames").value = state.setup.draftConfiguration.video_sampling_min_frames ?? 2;
   $("setup-video-max-frames").value = state.setup.draftConfiguration.video_sampling_max_frames ?? 32;
-  $("setup-semantic-search").checked = Boolean(state.setup.draftConfiguration.semantic_search_enabled);
-  $("setup-embedding-provider").value = state.setup.draftConfiguration.embedding_provider || "openclip-b16-datacomp-xl";
+  state.setup.draftConfiguration.quality_enabled = qualityEnabled;
+  state.setup.draftConfiguration.rendered_quality_provider = qualityEnabled ? "lar-iqa" : "off";
+  state.setup.draftConfiguration.raw_quality_provider = qualityEnabled ? "lar-iqa" : "off";
+  state.setup.draftConfiguration.video_quality_enabled = qualityEnabled && $("setup-video-participation").checked;
+  state.setup.draftConfiguration.include_videos_in_semantic_search = $("setup-semantic-search").checked && $("setup-video-participation").checked;
+  state.setup.draftConfiguration.video_processing_enabled = state.setup.draftConfiguration.video_quality_enabled || state.setup.draftConfiguration.include_videos_in_semantic_search;
   $("setup-folder-tree").innerHTML = renderSetupFolder(payload.analysis.root, state.setup.draftConfiguration);
-  $("setup-type-options").innerHTML = setupExtensionsMarkup(state.setup.draftConfiguration);
+  $("setup-quality-details").classList.add("hidden");
   bindSetupControls();
   loadEmbeddingModelStatus();
   renderSetupPlan();
@@ -422,15 +424,17 @@ async function loadEmbeddingModelStatus() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Could not inspect embedding models");
     if (state.setup) {
-      $("setup-embedding-status").innerHTML = payload.models.map(model => `<div class="model-row"><strong>${model.provider.startsWith("openclip") ? "OpenCLIP B/16" : "SigLIP2 Base 224"}</strong> · ${model.installed ? "Installed" : "Not installed"} · ${formatBytes(model.installed ? model.cache_bytes : model.expected_download_bytes)}${model.provider === state.setup.draftConfiguration.embedding_provider ? " · Active provider" : ""}${model.installed ? "" : ` <button data-install-model="${model.provider}">Install</button>`}</div>`).join("");
-      $("setup-embedding-status").querySelectorAll("[data-install-model]").forEach(button => button.onclick = async () => {
+      const model = payload.models.find(candidate => candidate.provider === "openclip-b16-datacomp-xl");
+      if (!model) throw new Error("OpenCLIP model status unavailable");
+      $("setup-embedding-status").innerHTML = `<div class="model-card active"><strong>OpenCLIP ViT-B/16 DataComp XL</strong><span>Active semantic provider</span><span>${model.installed ? "Installed" : "Not installed"} · ${formatBytes(model.installed ? model.cache_bytes : model.expected_download_bytes)}</span>${model.installed ? "" : `<button type="button" class="secondary model-install" data-install-model="${model.provider}">Install model</button>`}</div>`;
+      $("setup-embedding-status").querySelectorAll("[data-install-model]").forEach(button => button.onclick = async (event) => {
+        event.stopPropagation();
         button.disabled = true; button.textContent = "Installing…";
         try {
           const installed = await api("/api/embedding-models/install", {method:"POST", headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:button.dataset.installModel})});
           await loadEmbeddingModelStatus();
-          $("setup-embedding-note").innerHTML = installed.compatible_embeddings ? 'Model installed · Semantic search ready' : 'Model installed · Re-index required <button id="model-reindex">Re-index</button>';
-          $("model-reindex")?.addEventListener("click", startIndex);
-        } catch(error) { button.disabled=false; button.textContent="Retry install"; $("setup-embedding-note").textContent=error.message; }
+          showToast(installed.compatible_embeddings ? "Model installed · Semantic search ready" : "Model installed · Re-index required");
+        } catch(error) { button.disabled=false; button.textContent="Retry install"; showToast(error.message); }
       });
     }
   } catch (error) {
@@ -468,7 +472,7 @@ async function applySetup() {
 }
 
 function cancelSetup() {
-  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); if(state.viewMode === "groups") loadGroups(); else if(state.viewMode === "gallery") loadAssets(); }
+  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("setup-header-summary").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb","workspace-tabs"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); if(state.viewMode === "groups") loadGroups(); else if(state.viewMode === "gallery") loadAssets(); }
   else { state.setup = null; loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 }
 
@@ -517,6 +521,7 @@ async function finishWorkspaceRemoval(id, deleteIndex) {
 async function loadWorkspace() {
   $("home-view").classList.add("hidden");
   $("setup-view").classList.add("hidden");
+  $("setup-header-summary").classList.add("hidden");
   $("workspace-view").classList.remove("hidden");
   ["index", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
   state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.assetRequest++; state.jobsRequest++; state.groupRequest++;
@@ -526,7 +531,9 @@ async function loadWorkspace() {
   $("gallery").innerHTML = ""; $("groups-list").innerHTML = "";
   const data = await api("/api/workspace");
   $("workspace-crumb").textContent = data.name;
-  state.folderPaths = (await api("/api/folders")).folders;
+  const folderData = await api("/api/folders");
+  state.folderPaths = folderData.folders;
+  state.folderCounts = folderData.counts || {};
   $("search").value = query.get("q") || query.get("text") || "";
   state.auto=query.get("auto") || "all"; state.manual=query.get("manual") || "all"; state.layout=query.get("layout") || "";
   $("media-type").value=query.get("media_type") || "";
@@ -548,6 +555,21 @@ async function loadWorkspace() {
   await loadJobs();
   if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
   setTimeout(prepareSearch, 250);
+}
+
+async function installQualityModel() {
+  const button = $("setup-quality-install");
+  if (!button) return;
+  button.disabled = true;
+  button.textContent = "Installing…";
+  try {
+    await api("/api/quality-model/install", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    renderSetupPlan();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "Retry install";
+    showToast(`Model installation failed: ${error.message}`);
+  }
 }
 
 function showSearchStatus(status, data = null) {
@@ -700,7 +722,7 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
 function renderViewer() {
   const item = state.viewerItems[state.viewerIndex];
   if (!item) return;
-  $("viewer-title").textContent = item.filename;
+  $("viewer-title").innerHTML = filenameMarkup(item.filename);
   $("viewer-count").textContent = `${state.viewerStart + state.viewerIndex + 1} of ${state.viewerContext === "gallery" ? state.total : state.viewerItems.length}`;
   $("viewer-previous").disabled = state.viewerIndex <= 0 && (state.viewerContext !== "gallery" || state.viewerStart === 0);
   $("viewer-next").disabled = state.viewerContext === "gallery" ? state.viewerStart + state.viewerIndex >= state.total - 1 : state.viewerIndex >= state.viewerItems.length - 1;
@@ -713,7 +735,7 @@ function renderViewer() {
   $("viewer-smooth").checked = state.viewerSmooth;
   stopViewerMedia();
   $("viewer-media").innerHTML = "";
-  if (!item.original_url) {
+  if (!item.display_url && !item.original_url) {
     $("viewer-media").innerHTML = `<div class="viewer-error">${item.issues?.includes("offline") ? "This media is offline." : "This media cannot currently be rendered."}</div>`;
   } else {
     const media = item.media_type === "video" ? document.createElement("video") : document.createElement("img");
@@ -721,7 +743,7 @@ function renderViewer() {
     media.alt = item.filename;
     media.controls = item.media_type === "video";
     media.draggable = false;
-    media.src = item.original_url;
+    media.src = item.display_url || item.original_url;
     media.addEventListener("error", () => {
       if (!media.isConnected || !media.getAttribute("src")) return;
       const explanation = item.media_type === "video" && item.codec ? `This source video codec (${item.codec}) is not supported by the browser yet.` : item.media_type === "video" ? "This source video codec is not supported by the browser yet." : "This media could not be rendered.";
@@ -833,6 +855,8 @@ async function showDetails(assetId, context = { mode: "gallery", items: state.it
 }
 
 function renderSimilarResults() {
+  const displayFilename = typeof globalThis.filenameMarkup === "function" ? globalThis.filenameMarkup : escapeHtml;
+  const filenameMarkup = displayFilename;
   const similar = state.similar;
   const section = $("similar-gallery");
   if (!similar) return;
@@ -845,7 +869,7 @@ function renderSimilarResults() {
       : similar.hasNext
         ? '<button id="similar-more" class="secondary" type="button">Load more</button>'
         : '';
-  section.innerHTML = `<div class="dialog-header"><h3>${heading}</h3><button id="similar-close" type="button">Close similar images</button></div><div class="similar-grid">${similar.items.map((item, index) => `<button data-similar-index="${index}" class="similar-result"><img src="${item.thumbnail_url || ''}" alt=""><span>${escapeHtml(item.filename)}</span>${similarityMarkup(item)}</button>`).join("")}</div>${loadMore}`;
+  section.innerHTML = `<div class="dialog-header"><h3>${heading}</h3><button id="similar-close" type="button">Close similar images</button></div><div class="similar-grid">${similar.items.map((item, index) => `<button data-similar-index="${index}" class="similar-result"><img src="${item.thumbnail_url || ''}" alt=""><span>${filenameMarkup(item.filename)}</span>${similarityMarkup(item)}</button>`).join("")}</div>${loadMore}`;
   $("similar-close").onclick = closeSimilar;
   $("similar-more")?.addEventListener("click", () => { similar.autoLoad = true; loadSimilarPage(); });
   section.querySelectorAll("[data-similar-index]").forEach(button => button.onclick = () => {
@@ -911,6 +935,7 @@ function assetToViewerItem(asset) {
     filename: first.filename || "Asset",
     thumbnail_url: first.thumbnail_url,
     original_url: first.original_url,
+    display_url: asset.display_url || first.display_url || first.original_url,
     current_group_id: asset.current_group_id,
     user_decision: asset.user_decision,
     auto_recommended: asset.auto_recommended,
@@ -918,46 +943,52 @@ function assetToViewerItem(asset) {
 }
 
 function renderDetails(asset, options = {}) {
+  const displayFilename = typeof globalThis.filenameMarkup === "function" ? globalThis.filenameMarkup : escapeHtml;
+  const filenameMarkup = displayFilename;
   const first = asset.physical_files?.[0] || {};
   const dimensions = first.width && first.height ? `${first.width} × ${first.height} (${(first.width * first.height / 1000000).toFixed(2)} MP)` : "Unavailable";
   const thumbnail = options.showThumbnail && first.thumbnail_url ? `<button class="detail-thumbnail" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer"><img src="${first.thumbnail_url}" alt=""></button>` : "";
   const quality = renderQuality(first, false);
   const absolutePath = first.absolute_path || first.relative_path || "Path unavailable";
   const pathRow = options.viewerPanel ? `<dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")}</dd>` : "";
+  const captureTime = formatCapture(asset.capture_time);
+  const captureRow = captureTime ? `<dt>Capture time</dt><dd>${escapeHtml(captureTime)}</dd>` : "";
   const header = options.viewerPanel
     ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>`
-    : `<div class="dialog-header"><div><h2 id="details-title">${escapeHtml(first.filename || "Asset details")}</h2><div class="muted detail-path" title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</div></div><button id="details-close" class="icon" type="button" aria-label="Close details">×</button></div>`;
-  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>File created</dt><dd>${escapeHtml(formatCapture(first.file_created_time) || "Unavailable")}</dd><dt>Capture time</dt><dd>${escapeHtml(formatCapture(asset.capture_time) || "Unavailable")}</dd>${pathRow}</dl></section>`;
+    : `<div class="dialog-header"><div><h2 id="details-title">${filenameMarkup(first.filename || "Asset details")}</h2><div class="muted detail-path" title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</div></div><button id="details-close" class="icon" type="button" aria-label="Close details">×</button></div>`;
+  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>File created</dt><dd>${escapeHtml(formatCapture(first.file_created_time) || "Unavailable")}</dd>${captureRow}${pathRow}</dl></section>`;
   const technical = renderTechnicalDetails(first);
-  const technicalAndQuality = options.viewerPanel ? `<div class="viewer-technical-quality">${technical}<div class="viewer-quality">${quality}</div></div>` : technical;
+  const qualityPanel = quality ? `<div class="viewer-quality">${quality}</div>` : "";
+  const technicalAndQuality = options.viewerPanel ? `<div class="viewer-technical-quality">${technical}${qualityPanel}</div>` : technical;
   const content = `${header}${overview}${technicalAndQuality}${renderRepresentations(asset)}`;
   return `<div class="details-content">${options.showThumbnail ? `<div class="detail-layout"><div class="detail-main">${content}</div><aside class="detail-aside">${thumbnail}${quality}</aside></div>` : content}</div>`;
 }
 
 function renderRepresentations(asset) {
+  const displayFilename = typeof globalThis.filenameMarkup === "function" ? globalThis.filenameMarkup : escapeHtml;
+  const filenameMarkup = displayFilename;
   const rows = asset.physical_files.map(file => {
     const problems = renderComponentProblems(file);
-    return `<div class="representation-row"><div><div class="representation-title"><strong>${escapeHtml(file.extension === ".jpg" || file.extension === ".jpeg" ? "JPEG" : [".arw",".cr2",".cr3",".dng",".nef",".raf",".rw2"].includes(file.extension) ? "RAW" : file.representation_label)} · ${escapeHtml(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Reveal representation in Explorer">📁</button></div>`;
+    return `<div class="representation-row"><div><div class="representation-title"><strong>${filenameMarkup(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Reveal representation in Explorer">📁</button></div>`;
   }).join("");
   return `<section class="section"><h3>Representations</h3><div class="representations">${rows}</div></section>`;
 }
 
 function renderQuality(file, showFilename) {
+  const status = file.components?.quality?.status;
+  if (status === "not_requested" || !status && file.quality_score == null) return "";
   if (file.media_type === "video" && file.quality_score == null) {
-    const status = file.components?.quality?.status;
-    const message = status === "failed" ? "Technical quality scoring failed for this video." : status === "unsupported" ? "Video quality frame decoding is unsupported on this system." : status === "pending" || status === "running" ? "Technical quality scoring is processing video samples." : "Technical quality review has not been requested for this video.";
+    const message = status === "failed" ? "Technical quality scoring failed for this video." : status === "unsupported" ? "Video quality frame decoding is unsupported on this system." : status === "pending" || status === "running" ? "Technical quality scoring is processing video samples." : "Technical quality is unavailable.";
     return `<div class="quality-unsupported">${message}</div>`;
   }
   if (file.quality_score == null) {
-    const status = file.components?.quality?.status;
     const error = file.components?.quality?.error;
-    const message = status === "not_requested" ? "Technical quality scoring is off." : status === "unsupported" && file.extension && [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(file.extension) ? "RAW preview is unavailable for technical quality scoring." : status === "failed" ? "Technical quality scoring failed for this image." : "Technical quality is unavailable.";
+    const message = status === "unsupported" && file.extension && [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(file.extension) ? "RAW preview is unavailable for technical quality scoring." : status === "failed" ? "Technical quality scoring failed for this image." : status === "pending" || status === "running" ? "Technical quality scoring is processing." : "Technical quality is unavailable.";
     return `<div class="quality-unsupported">${message}${error ? `<div class="muted quality-error">${escapeHtml(error)}</div>` : ""}</div>`;
   }
   const score = Number(file.quality_score).toFixed(2);
   const color = file.quality_score == null ? "#26333f" : qualityColor(file.quality_score);
-  const videoSamples = file.media_type === "video" && file.video_quality ? `<div class="muted quality-note">Video samples: ${file.video_quality.successful_count}/${file.video_quality.requested_count}${file.video_quality.status === "partial" ? " · partial" : ""}</div>` : "";
-  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div>${videoSamples}</section>`;
+  return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box" style="--quality-color: ${color}"><span class="quality-score">${score}</span></span></div></section>`;
 }
 
 function meterMarkup(label, value, position) {
@@ -1084,7 +1115,11 @@ async function loadJobs() {
     $("job-copy").textContent = `${active.stage || active.kind} · ${active.completed_items}/${active.total_items} (${percent}%) · ${rate}/s · ${active.failed_items || 0} failed · ${active.skipped_items || 0} skipped`;
     if (active.substage) {
       const sub = active.substage;
-      $("job-copy").textContent = `${active.kind.replaceAll("_", " ")} · ${active.completed_items}/${active.total_items} · ${sub.item || ""} — ${sub.stage} · ${sub.current}/${sub.total}${sub.rate == null ? "" : ` · ${sub.rate.toFixed(1)} frames/s · ETA ${Math.ceil(sub.eta)} s`}`;
+      const outerCurrent = sub.outer_total ? sub.outer_completed : active.completed_items;
+      const outerTotal = sub.outer_total || active.total_items;
+      const frameRate = sub.rate == null ? "" : ` · ${sub.rate.toFixed(1)} frames/s`;
+      const stageEta = sub.eta == null ? "" : ` · ETA ${formatEta(sub.eta)}`;
+      $("job-copy").textContent = `${active.kind.replaceAll("_", " ")} · ${outerCurrent}/${outerTotal} videos · ${sub.item || ""} — ${sub.stage} · ${sub.current}/${sub.total}${frameRate}${stageEta}`;
     }
     $("job-progress").max = Math.max(active.total_items || 1, 1);
     $("job-progress").value = active.completed_items;
@@ -1212,7 +1247,15 @@ function toggleFolder(path, checked) {
 function renderFolderTree() {
   normalizeFolders();
   const nodes = state.folderPaths;
-  $("folder-tree").innerHTML = nodes.map((path,index) => `<label class="folder-check" style="padding-left:${(path ? path.split("/").length : 0) * 18}px"><input type="checkbox" data-folder-index="${index}">${escapeHtml(path ? path.split("/").pop() : "Workspace root")}</label>`).join("");
+  const countLabel = (path) => {
+    const count = state.folderCounts[path] || {};
+    if (typeof count === "number") return `${count.toLocaleString()} files`;
+    const files = Number(count.files || 0);
+    const images = Number(count.images || 0);
+    const videos = Number(count.videos || 0);
+    return `${files.toLocaleString()} file${files === 1 ? "" : "s"} · ${images.toLocaleString()} image${images === 1 ? "" : "s"} · ${videos.toLocaleString()} video${videos === 1 ? "" : "s"}`;
+  };
+  $("folder-tree").innerHTML = nodes.map((path,index) => `<label class="folder-check" style="padding-left:${(path ? path.split("/").length : 0) * 18}px"><input type="checkbox" data-folder-index="${index}"><span>${escapeHtml(path ? path.split("/").pop() : "Workspace root")}</span><span class="muted folder-count">${countLabel(path)}</span></label>`).join("");
   $("folder-tree").querySelectorAll("[data-folder-index]").forEach(input => {
     const path=nodes[Number(input.dataset.folderIndex)];
     input.checked = state.folders === null || state.folders.has(path);
@@ -1224,7 +1267,7 @@ function renderFolderTree() {
 
 function setViewMode(mode, load = true) {
   const started = performance.now();
-  if(state.workspace) {$("setup-view").classList.add("hidden");$("workspace-view").classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
+  if(state.workspace) {$("setup-view").classList.add("hidden");$("setup-header-summary").classList.add("hidden");$("workspace-view").classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "cloud"].includes(mode) ? mode : "gallery";
   $("gallery").classList.toggle("hidden", mode !== "gallery");
@@ -1237,10 +1280,12 @@ function setViewMode(mode, load = true) {
 }
 
 function renderGroup(group) {
+  const displayFilename = typeof globalThis.filenameMarkup === "function" ? globalThis.filenameMarkup : escapeHtml;
+  const filenameMarkup = displayFilename;
   const members = group.members.map((item, index) => {
     const preview = item.thumbnail_url ? `<img class="group-thumb" loading="lazy" src="${item.thumbnail_url}" alt="${escapeHtml(item.filename)}" onerror="this.replaceWith(Object.assign(document.createElement('div'), {className:'group-thumb placeholder', textContent:'Preview unavailable'}))">` : `<div class="group-thumb placeholder">Preview unavailable</div>`;
     const automaticClass = item.auto_recommended ? " recommended" : item.is_representative ? " representative" : "";
-    return `<div class="group-member${automaticClass}"><button class="group-photo" type="button" data-group-index="${index}" aria-label="View ${escapeHtml(item.filename)}">${preview}</button><button class="group-info info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="group-caption"><span title="${escapeHtml(item.filename)}">${escapeHtml(item.filename)}</span>${scoreMarkup(item.quality_score)}${similarityMarkup(item)}<div class="group-state">${selectionStateMarkup(item)}</div><div class="group-actions">${selectionActionsMarkup(item)}</div></div></div>`;
+    return `<div class="group-member${automaticClass}"><button class="group-photo" type="button" data-group-index="${index}" aria-label="View ${escapeHtml(item.filename)}">${preview}</button><button class="group-info info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="group-caption"><span title="${escapeHtml(item.filename)}">${filenameMarkup(item.filename)}</span>${scoreMarkup(item.quality_score)}${similarityMarkup(item)}<div class="group-state">${selectionStateMarkup(item)}</div><div class="group-actions">${selectionActionsMarkup(item)}</div></div></div>`;
   }).join("");
   const memberLabel = `${group.member_count} ${group.member_count === 1 ? "member" : "members"}`;
   return `<section class="group-row" data-group-id="${escapeHtml(group.group_id)}"><div class="group-heading"><strong>${escapeHtml(group.label)}</strong><span class="muted">${memberLabel}</span><span class="muted">${escapeHtml(formatCapture(group.first_capture_time, ""))}</span></div>${members || `<div class="empty">No members</div>`}</section>`;
@@ -1312,7 +1357,7 @@ $("browse-workspace").addEventListener("click", pickWorkspace);
 $("configure-workspace").addEventListener("click", configureWorkspace);
 $("setup-cancel").addEventListener("click", cancelSetup);
 $("setup-apply").addEventListener("click", applySetup);
-$("index").addEventListener("click", startIndex);
+$("index").addEventListener("click", () => state.setup ? applySetup() : startIndex());
 $("problems-button").addEventListener("click", showProblems);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
 $("cloud-view-toggle").onclick = () => setViewMode("cloud");

@@ -60,6 +60,16 @@ class _FakeRawProvider:
 
 
 class RawQualityTests(unittest.TestCase):
+    def test_structured_raw_lens_is_normalized_to_its_model_name(self):
+        from archive_index.media.raw_preview import _raw_camera_metadata
+
+        lens = types.SimpleNamespace(model="FE 70-200mm F4 G OSS", make="", min_focal=70.0, max_focal=200.0)
+        values = _raw_camera_metadata(
+            types.SimpleNamespace(camera_make="Sony", camera_model="ILME-FX3A", lens=lens)
+        )
+        self.assertEqual(values["LensModel"], "FE 70-200mm F4 G OSS")
+        self.assertNotIn("Lens(model=", values["LensModel"])
+
     def test_embedded_preview_is_oriented_and_versioned(self):
         module = types.SimpleNamespace(imread=lambda path: _FakeRaw(_jpeg_payload()))
         with patch.dict(sys.modules, {"rawpy": module}):

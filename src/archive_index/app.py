@@ -169,7 +169,7 @@ def _index_command(
             return 130
         media_result = index_workspace(
             workspace,
-            components=("metadata", "thumbnail"),
+            components=("metadata",),
             cancel_event=cancel_event,
             progress=_progress_reporter("media"),
             thumbnail_workers=thumbnail_workers,
@@ -183,6 +183,16 @@ def _index_command(
             progress=_progress_reporter("reconciliation"),
         )
         if reconciliation_result.cancelled:
+            return 130
+        thumbnail_result = index_workspace(
+            workspace,
+            components=("thumbnail",),
+            cancel_event=cancel_event,
+            progress=_progress_reporter("thumbnails"),
+            thumbnail_workers=thumbnail_workers,
+            timings=timings,
+        )
+        if thumbnail_result.cancelled:
             return 130
         quality_result = index_workspace(
             workspace,

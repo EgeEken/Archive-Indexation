@@ -27,29 +27,26 @@ class WorkspaceTests(unittest.TestCase):
             config = workspace.configuration()
             config.update(
                 {
-                    "include_rendered_images": False,
-                    "include_raw": True,
-                    "video_quality_enabled": False,
-                    "rendered_quality_provider": "off",
-                    "raw_quality_provider": "lar-iqa",
+                    "quality_enabled": False,
+                    "video_processing_enabled": False,
                 }
             )
             workspace.apply_configuration(config)
             saved = workspace.configuration()
             self.assertEqual(
                 (saved["include_rendered_images"], saved["include_raw"], saved["video_quality_enabled"]),
-                (False, True, False),
+                (True, True, False),
             )
             self.assertEqual(
                 (saved["rendered_quality_provider"], saved["raw_quality_provider"]),
-                ("off", "lar-iqa"),
+                ("off", "off"),
             )
             with closing(workspace.connect()) as connection:
                 scope = {
                     row["relative_path"]: row["in_scope"]
                     for row in connection.execute("SELECT relative_path, in_scope FROM physical_file").fetchall()
                 }
-            self.assertEqual(scope, {"photo.jpg": 0, "photo.arw": 1, "clip.mp4": 1})
+            self.assertEqual(scope, {"photo.jpg": 1, "photo.arw": 1, "clip.mp4": 1})
 
     def test_configuration_persists_scope_without_deleting_indexed_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -61,7 +58,7 @@ class WorkspaceTests(unittest.TestCase):
             scan(workspace)
 
             configuration = workspace.configuration()
-            self.assertEqual(configuration["configuration_version"], 3)
+            self.assertEqual(configuration["configuration_version"], 5)
             configuration["include_videos"] = False
             workspace.apply_configuration(configuration)
 
@@ -69,11 +66,43 @@ class WorkspaceTests(unittest.TestCase):
                 rows = connection.execute(
                     "SELECT relative_path, in_scope FROM physical_file ORDER BY relative_path"
                 ).fetchall()
-            self.assertEqual([(row[0], row[1]) for row in rows], [("clip.mp4", 0), ("photo.jpg", 1)])
-            self.assertEqual(workspace.configuration()["include_videos"], False)
+            self.assertEqual([(row[0], row[1]) for row in rows], [("clip.mp4", 1), ("photo.jpg", 1)])
+            self.assertEqual(workspace.configuration()["include_videos"], True)
             workspace.apply_configuration(workspace.configuration())
             with closing(workspace.connect()) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM physical_file").fetchone()[0], 2)
+
+    def test_category_switches_persist_without_extension_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            for name in ("photo.jpg", "photo.arw", "clip.mp4"):
+                (root / name).write_bytes(name.encode())
+            workspace = Workspace.create(root)
+            scan(workspace)
+            configuration = workspace.configuration()
+            configuration.update({
+                "include_rendered_images": False,
+                "include_raw": True,
+                "include_videos": False,
+                "rendered_quality_provider": "off",
+                "raw_quality_provider": "lar-iqa",
+                "video_quality_enabled": False,
+                "semantic_search_enabled": True,
+                "include_videos_in_semantic_search": True,
+            })
+            workspace.apply_configuration(configuration)
+            saved = workspace.configuration()
+            self.assertEqual(
+                (saved["include_rendered_images"], saved["include_raw"], saved["include_videos"], saved["raw_quality_provider"]),
+                (True, True, True, "lar-iqa"),
+            )
+            with closing(workspace.connect()) as connection:
+                scope = {
+                    row["relative_path"]: row["in_scope"]
+                    for row in connection.execute("SELECT relative_path, in_scope FROM physical_file").fetchall()
+                }
+            self.assertEqual(scope, {"photo.jpg": 1, "photo.arw": 1, "clip.mp4": 1})
 
     def test_create_and_reopen_preserves_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -87,7 +116,7 @@ class WorkspaceTests(unittest.TestCase):
 
             self.assertIsNotNone(info["workspace_id"])
             self.assertEqual(info["quality_provider"], "lar-iqa")
-            self.assertEqual(version, 18)
+            self.assertEqual(version, 21)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -289,7 +318,7 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
                 }
-            self.assertEqual(version, 18)
+            self.assertEqual(version, 21)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)

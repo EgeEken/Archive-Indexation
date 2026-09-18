@@ -71,9 +71,11 @@ def build_recommendations(
 ) -> RecommendationResult:
     started = time.perf_counter()
     grouping_run_id, groups = _load_groups(workspace)
+    video_decisions = _video_decisions(workspace)
     store = JobStore(workspace)
-    identifier = job_id or store.create("recommendations", len(groups))
-    store.set_total(identifier, len(groups))
+    total_work = len(groups) + len(video_decisions)
+    identifier = job_id or store.create("recommendations", total_work)
+    store.set_total(identifier, total_work)
     store.set_stage(identifier, "recommendations")
     store.start(identifier)
     configuration = workspace.configuration()
@@ -88,11 +90,11 @@ def build_recommendations(
             )
         store.complete(identifier, 0, 0)
         return _result(identifier, None, groups, [], started)
-    if grouping_run_id is None:
+    if grouping_run_id is None and not video_decisions:
         store.complete(identifier, 0, 0)
         return _result(identifier, None, groups, [], started)
-    decisions: list[tuple[str, int, int | None, int, str]] = []
-    processed = 0
+    decisions: list[tuple[str, int, int | None, int, str]] = list(video_decisions)
+    processed = len(video_decisions)
     errors = 0
 
     try:
@@ -116,7 +118,7 @@ def build_recommendations(
             if processed % 16 == 0:
                 store.checkpoint(identifier, processed, errors)
             if progress is not None:
-                progress(JobProgress(identifier, processed, len(groups), group_id, "recommendations", errors, 0))
+                progress(JobProgress(identifier, processed, total_work, group_id, "recommendations", errors, 0))
 
         if cancel_event is not None and cancel_event.is_set():
             store.checkpoint(identifier, processed, errors)
@@ -219,6 +221,39 @@ def _load_groups(workspace: Workspace) -> tuple[str | None, list[tuple[str, list
         result.append((group_id, sorted(candidates, key=lambda candidate: candidate.member_order)))
     result.sort(key=lambda group: (group[1][0].member_order if group[1] else 0, group[0]))
     return active["active_run_id"], result
+
+
+def _video_decisions(workspace: Workspace) -> list[tuple[str, str, int, int | None, int, str]]:
+    configuration = workspace.configuration()
+    if not configuration.get("quality_enabled", True) or not configuration.get("video_quality_enabled", False):
+        return []
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            """
+            SELECT la.id, pf.quality_score
+            FROM logical_asset AS la
+            JOIN physical_file AS pf ON pf.logical_asset_id = la.id
+            WHERE la.media_type = 'video' AND pf.media_type = 'video'
+              AND pf.in_scope = 1 AND pf.is_online = 1
+            ORDER BY la.id, pf.relative_path
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    seen = set()
+    decisions = []
+    for row in rows:
+        if row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        recommended = _quality_pass_score(row["quality_score"], configuration["recommendation_threshold"])
+        decisions.append((f"video:{row['id']}", row["id"], int(recommended), 1 if recommended else None, int(recommended), "video_quality_threshold" if recommended else "below_recommendation_quality"))
+    return decisions
+
+
+def _quality_pass_score(score, threshold) -> bool:
+    return score is not None and float(score) >= float(threshold)
 
 
 def _quality_score(rows) -> float | None:

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
+from archive_index.api import server
 from archive_index.indexing import grouping
 from archive_index.indexing.grouping import (
     AssetRecord,
@@ -19,10 +20,116 @@ from archive_index.indexing.grouping import (
 )
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
+from archive_index.jobs.engine import JobStore
 from archive_index.workspace import Workspace
 
 
 class GroupingTests(unittest.TestCase):
+    def test_raw_only_feature_uses_embedded_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "camera.arw").write_bytes(b"raw placeholder")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            preview = Image.new("RGB", (240, 160), "navy")
+            with patch.object(grouping, "load_raw_preview", return_value=preview):
+                result = extract_visual_features(workspace)
+            preview.close()
+            self.assertEqual((result.errors, result.succeeded), (0, 1))
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status, version, error_message FROM component_state WHERE component = 'group_feature'"
+                ).fetchone()
+            self.assertEqual(tuple(state), ("complete", grouping.FEATURE_VERSION, None))
+
+    def test_paired_raw_jpeg_feature_uses_only_rendered_representation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "camera.arw").write_bytes(b"raw placeholder")
+            Image.new("RGB", (80, 60), (40, 80, 120)).save(root / "camera.jpg", format="JPEG")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            reconcile_workspace(workspace)
+            with patch.object(grouping, "load_raw_preview", side_effect=AssertionError("secondary RAW feature decoded")):
+                result = extract_visual_features(workspace)
+            self.assertEqual((result.errors, result.succeeded), (0, 1))
+            with closing(workspace.connect()) as connection:
+                raw_state = connection.execute(
+                    "SELECT status FROM component_state JOIN physical_file ON physical_file.id = component_state.physical_file_id WHERE component = 'group_feature' AND extension = '.arw'"
+                ).fetchone()
+                jpeg_state = connection.execute(
+                    "SELECT status FROM component_state JOIN physical_file ON physical_file.id = component_state.physical_file_id WHERE component = 'group_feature' AND extension = '.jpg'"
+                ).fetchone()
+            self.assertIsNone(raw_state)
+            self.assertEqual(jpeg_state[0], "complete")
+
+    def test_old_failed_raw_feature_retries_after_preview_provenance_bump(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            (root / "camera.arw").write_bytes(b"raw placeholder")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            with workspace.transaction() as connection:
+                raw_id = connection.execute(
+                    "SELECT id FROM physical_file WHERE extension = '.arw'"
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE component_state SET status = 'failed', version = '3', error_message = 'no image decoder is configured for .arw' WHERE physical_file_id = ? AND component = 'group_feature'",
+                    (raw_id,),
+                )
+            preview = Image.new("RGB", (240, 160), "navy")
+            with patch.object(grouping, "load_raw_preview", return_value=preview):
+                result = extract_visual_features(workspace)
+            preview.close()
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status, version, error_message FROM component_state WHERE physical_file_id = ? AND component = 'group_feature'",
+                    (raw_id,),
+                ).fetchone()
+            self.assertEqual(tuple(state), ("complete", grouping.FEATURE_VERSION, None))
+
+    def test_resolved_raw_feature_diagnostic_disappears_after_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            raw_path = root / "camera.arw"
+            raw_path.write_bytes(b"raw placeholder")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            with closing(workspace.connect()) as connection:
+                raw_id = connection.execute(
+                    "SELECT id FROM physical_file WHERE extension = '.arw'"
+                ).fetchone()[0]
+            job_id = JobStore(workspace).create("visual_features", 1)
+            JobStore(workspace).record_error(
+                job_id,
+                RuntimeError("no image decoder is configured for .arw"),
+                physical_file_id=raw_id,
+                relative_path="camera.arw",
+            )
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "UPDATE component_state SET status = 'failed', version = '3', error_message = ? WHERE physical_file_id = ? AND component = 'group_feature'",
+                    ("no image decoder is configured for .arw", raw_id),
+                )
+            self.assertEqual(len(server._problems(workspace, {})), 1)
+            preview = Image.new("RGB", (240, 160), "navy")
+            with patch.object(grouping, "load_raw_preview", return_value=preview):
+                result = extract_visual_features(workspace, job_id=job_id)
+            preview.close()
+            self.assertEqual(result.errors, 0)
+            with closing(workspace.connect()) as connection:
+                state = connection.execute(
+                    "SELECT status FROM component_state WHERE physical_file_id = ? AND component = 'group_feature'",
+                    (raw_id,),
+                ).fetchone()[0]
+            self.assertEqual(state, "complete")
+            self.assertFalse(server._problems(workspace, {}))
+
     def test_near_identical_images_within_window_group(self) -> None:
         workspace = self._workspace({"a.jpg": "scene", "b.jpg": "scene"})
         self._set_times(workspace, {"a.jpg": "2026-09-03T12:00:00+03:00", "b.jpg": "2026-09-03T12:00:05+03:00"})

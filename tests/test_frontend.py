@@ -15,13 +15,39 @@ class FrontendTests(unittest.TestCase):
         css = (root / "app.css").read_text(encoding="utf-8")
         self.assertNotIn('id="search-mode"', html)
         self.assertIn('id="setup-semantic-search"', html)
-        self.assertIn("openclip-b16-datacomp-xl", html)
-        self.assertIn("siglip2-base-patch16-224", html)
+        self.assertIn('id="setup-quality"', html)
+        self.assertIn('id="setup-video-participation"', html)
+        self.assertIn('id="setup-video-section"', html)
+        self.assertIn("OpenCLIP ViT-B/16 DataComp XL", javascript)
+        self.assertNotIn("siglip", html.lower())
+        self.assertNotIn("siglip", javascript.lower())
+        for removed in ("Index rendered images", "Index RAW files", "Index videos", "Assess RAW-only image quality", "Include videos in semantic search"):
+            self.assertNotIn(removed, html)
+        self.assertEqual(html.count('setup-section panel'), 4)
+        self.assertIn("setup-diagnostics", html)
+        self.assertNotIn("image_extensions", html)
         self.assertIn("/api/browser?", javascript)
         self.assertIn("Show similar images", html)
         self.assertIn("Show image group", html)
         self.assertIn("similarity-chip", javascript)
         self.assertIn("similarity-chip", css)
+        self.assertIn("Index these folders:", html)
+        self.assertNotIn("1 —", html)
+        self.assertNotIn("2 —", html)
+        self.assertNotIn("3 —", html)
+        self.assertNotIn("4 —", html)
+        self.assertNotIn("Every supported media format", html)
+        self.assertNotIn("Enable semantic search", html)
+        self.assertNotIn("Models are installed explicitly", html)
+        self.assertNotIn("Estimated from local completed-job timings", javascript)
+        self.assertEqual(html.count("Automatically assess media quality"), 1)
+        self.assertEqual(html.count("Let me search by semantic content"), 1)
+        self.assertEqual(html.count('id="setup-quality"'), 1)
+        self.assertEqual(html.count('id="setup-semantic-search"'), 1)
+        self.assertEqual(html.count('id="setup-video-participation"'), 1)
+        self.assertIn("class=\"model-card", html)
+        self.assertNotIn("<h2>Diagnostics</h2>", html)
+        self.assertNotIn("Intentionally skipped work is not a problem", html)
 
     def test_filename_sort_control_is_available_before_quality(self) -> None:
         html = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "index.html").read_text(encoding="utf-8")
@@ -48,7 +74,10 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('reject active', rejected)
         card = source[source.index("function renderCard"):source.index("async function loadHome")]
         self.assertNotIn('$("sort-by")', card)
-        self.assertIn("Capture time unavailable", card)
+        self.assertNotIn("Capture time unavailable", card)
+        self.assertIn('id="setup-header-summary"', (root / "index.html").read_text(encoding="utf-8"))
+        self.assertEqual((root / "index.html").read_text(encoding="utf-8").count('id="setup-index-summary"'), 1)
+        self.assertIn("display_url || item.original_url", source)
         self.assertIn('aspect-ratio: 1 / 1', (root / "app.css").read_text())
         self.assertIn('}, 500)', source)
 
@@ -108,6 +137,25 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("<dt>Path</dt>", output["drawer"])
         self.assertEqual(output["drawer"].count("Overall technical quality"), 1)
         self.assertIn("viewer-technical-quality", output["drawer"])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_details_omits_missing_capture_time(self) -> None:
+        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        start = source.index("function renderDetails")
+        end = source.index("function renderRepresentations", start)
+        function = source[start:end]
+        script = f'''
+        const escapeHtml=String,formatBytes=String,formatCapture=(value)=>value ? "formatted" : "";
+        const renderTechnicalDetails=()=>"";
+        const renderQuality=()=>"";
+        const renderRepresentations=()=>"";
+        {function}
+        const asset={{capture_time:null,physical_files:[{{filename:"photo.jpg",size_bytes:100}}]}};
+        console.log(renderDetails(asset));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertNotIn("<dt>Capture time</dt>", result.stdout)
+        self.assertNotIn("Capture time unavailable", result.stdout)
 
 
 class CorrectionFrontendTests(unittest.TestCase):
@@ -193,10 +241,38 @@ class CorrectionFrontendTests(unittest.TestCase):
         """
         result=json.loads(subprocess.run([shutil.which('node'),'--eval',script],check=True,capture_output=True,text=True,encoding="utf-8").stdout)
         self.assertNotIn('<details',result['healthy'])
+        self.assertIn('a.jpg', result['healthy'])
+        self.assertNotIn('JPEG ·', result['healthy'])
         self.assertIn('Representation status',result['warning'])
         self.assertIn('RAW decoder unavailable',result['warning'])
         self.assertNotIn('<details',result['rawExpected'])
         self.assertIn('RAW preview extraction failed',result['rawRequested'])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_details_omit_video_samples_and_representation_prefixes(self):
+        source=(Path(__file__).parents[1]/"src"/"archive_index"/"web/app.js").read_text(encoding="utf-8")
+        render_details=source[source.index("function renderDetails"):source.index("function renderRepresentations")]
+        render_representations=source[source.index("function renderRepresentations"):source.index("function renderQuality")]
+        render_quality=source[source.index("function renderQuality"):source.index("function meterMarkup")]
+        script="const escapeHtml=String,formatBytes=String,formatCapture=()=>'',renderTechnicalDetails=()=>'',renderComponentProblems=()=>'',qualityColor=()=>'#fff',renderQuality=" + "(" + render_quality + ")," + "renderRepresentations=" + "(" + render_representations + ");" + render_details + "const asset={capture_time:null,physical_files:[{filename:'clip.mp4',extension:'.mp4',size_bytes:100,is_preferred:true,is_online:true,media_type:'video',video_quality:{successful_count:30,requested_count:30},quality_score:.8}]}; console.log(renderDetails(asset));"
+        result=subprocess.run([shutil.which('node'),'--eval',script],check=True,capture_output=True,text=True,encoding="utf-8").stdout
+        self.assertNotIn("Video samples:", result)
+        self.assertNotIn("Physical file", result)
+        self.assertIn("clip.mp4", result)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_disabled_quality_is_omitted_but_requested_failure_remains(self):
+        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        render_quality = source[source.index("function renderQuality"):source.index("function meterMarkup")]
+        script = "const escapeHtml=String,qualityColor=()=>'#fff';" + render_quality + """
+        const image = renderQuality({media_type:'image', quality_score:null, components:{quality:{status:'not_requested'}}}, false);
+        const video = renderQuality({media_type:'video', quality_score:null, components:{quality:{status:'not_requested'}}}, false);
+        const failed = renderQuality({media_type:'video', quality_score:null, components:{quality:{status:'failed', error:'decode failed'}}}, false);
+        console.log(JSON.stringify({image,video,failed}));
+        """
+        result = json.loads(subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout)
+        self.assertEqual((result["image"], result["video"]), ("", ""))
+        self.assertIn("Technical quality scoring failed", result["failed"])
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_measurement_labels_sparse_and_overflow_numeric_value_retained(self):

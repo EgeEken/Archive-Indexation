@@ -358,7 +358,7 @@ class QualityProviderTests(unittest.TestCase):
                         "SELECT component, status, version FROM component_state ORDER BY component"
                     ).fetchall()
                 }
-            self.assertEqual(states["metadata"], ("complete", "4"))
+            self.assertEqual(states["metadata"], ("complete", "5"))
             self.assertEqual(states["thumbnail"], ("complete", "pillow-jpeg-v2"))
             self.assertEqual(states["quality"], ("complete", "2"))
 

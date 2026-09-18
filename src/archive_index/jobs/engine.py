@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import uuid
 from time import monotonic
 from collections.abc import Callable, Iterable
@@ -17,17 +18,23 @@ JOB_STATES = frozenset({"pending", "running", "complete", "failed", "cancelled",
 
 
 SUBSTAGES = {}
+SUBSTAGE_CONTEXT = {}
 
 
-def report_substage(job_id, stage, current, total, item=None):
+def report_substage(job_id, stage, current, total, item=None, remaining_units=None):
     now = monotonic()
     previous = SUBSTAGES.get(job_id)
     started = previous["started"] if previous and previous["stage"] == stage and previous["item"] == item and current >= previous["current"] else now
     elapsed = now - started
     rate = current / elapsed if current >= 2 and elapsed >= 0.5 else None
+    context = SUBSTAGE_CONTEXT.get(job_id, {})
+    eta = (total - current) / rate if rate else None
+    if rate and remaining_units is not None:
+        eta += max(0, remaining_units) / rate
     SUBSTAGES[job_id] = {"stage": stage, "current": current, "total": total, "item": item,
                          "started": started, "elapsed": elapsed, "rate": rate,
-                         "eta": (total-current)/rate if rate else None}
+                         "eta": eta, "outer_completed": context.get("completed", 0),
+                         "outer_total": context.get("total", 0)}
     while len(SUBSTAGES) > 64:
         del SUBSTAGES[next(iter(SUBSTAGES))]
 
@@ -97,6 +104,13 @@ class JobStore:
             connection.execute(
                 "UPDATE job SET stage = ?, updated_at = ? WHERE id = ?",
                 (stage, _timestamp(), job_id),
+            )
+
+    def set_timing_summary(self, job_id: str, summary: dict[str, object]) -> None:
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE job SET timing_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(summary, ensure_ascii=False, sort_keys=True), _timestamp(), job_id),
             )
 
     def checkpoint(
@@ -255,7 +269,7 @@ def run_items(
     succeeded = 0
     errors = 0
     skipped = 0
-    checkpoint_interval = 16
+    checkpoint_interval = 1 if kind == "video_quality" else 16
 
     try:
         for item in item_list:
@@ -264,6 +278,7 @@ def run_items(
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
             try:
+                SUBSTAGE_CONTEXT[identifier] = {"completed": processed, "total": len(item_list)}
                 outcome = worker(item)
             except Exception as error:
                 errors += 1
@@ -288,8 +303,10 @@ def run_items(
             if progress is not None:
                 progress(JobProgress(identifier, processed, len(item_list), item, stage or kind, errors, skipped))
         store.complete(identifier, processed, errors, skipped)
+        SUBSTAGE_CONTEXT.pop(identifier, None)
         return JobRunResult(identifier, processed, succeeded, errors, False, skipped)
     except Exception:
+        SUBSTAGE_CONTEXT.pop(identifier, None)
         store.fail(identifier)
         raise
 

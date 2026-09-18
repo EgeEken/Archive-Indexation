@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from archive_index.api.server import WorkspaceHTTPServer, _path_revision, _pick_workspace_path, _quality_readiness
+from archive_index.api.server import WorkspaceHTTPServer, _configuration_quality_readiness, _path_revision, _pick_workspace_path, _quality_readiness
+from archive_index.configuration import default_configuration
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.recommendation import build_recommendations
@@ -226,11 +227,11 @@ class ApiTests(unittest.TestCase):
         status, configuration = _get_json(self.base_url, "/api/workspace/configuration")
         self.assertEqual(status, 200)
         draft = configuration["configuration"]
-        self.assertEqual(draft["configuration_version"], 3)
-        draft["include_videos"] = False
+        self.assertEqual(draft["configuration_version"], 5)
+        draft["folder_rules"] = [{"path": "", "included": False}, {"path": "nested", "included": True}]
         status, plan = _post_json(self.base_url, "/api/workspace/configuration/plan", {"configuration": draft})
         self.assertEqual(status, 200)
-        self.assertEqual(plan["plan"]["selected_files"], 2)
+        self.assertEqual(plan["plan"]["selected_files"], 1)
         invalid = dict(draft)
         invalid["quality_provider"] = "future-provider"
         status, error = _post_json(self.base_url, "/api/workspace/configuration/plan", {"configuration": invalid})
@@ -238,7 +239,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("quality_provider", error["error"])
         self.workspace.apply_configuration(draft)
         status, summary = _get_json(self.base_url, "/api/workspace")
-        self.assertEqual((status, summary["assets"], summary["out_of_scope_files"]), (200, 2, 1))
+        self.assertEqual((status, summary["assets"], summary["out_of_scope_files"]), (200, 1, 2))
         status, videos = _get_json(self.base_url, "/api/assets?media_type=video")
         self.assertEqual((status, videos["total"]), (200, 0))
 
@@ -435,14 +436,14 @@ class ApiTests(unittest.TestCase):
         status, filtered = _get_json(self.base_url, "/api/groups?q=root.jpg")
         self.assertEqual((status, filtered["total"], len(filtered["groups"][0]["members"])), (200, 1, 1))
         status, video_groups = _get_json(self.base_url, "/api/groups?media_type=video")
-        self.assertEqual((status, video_groups["total"], video_groups["empty_reason"]), (200, 0, "Video grouping is not supported yet."))
+        self.assertEqual((status, video_groups["total"]), (200, 1))
         group_id = groups["groups"][0]["group_id"]
         status, location = _get_json(self.base_url, f"/api/groups/locate?group_id={group_id}")
         self.assertEqual((status, location["found"], location["page"]), (200, True, 1))
 
         status, representatives = _get_json(self.base_url, "/api/assets?representatives=1")
         self.assertEqual(status, 200)
-        self.assertEqual(representatives["total"], 2)
+        self.assertEqual(representatives["total"], 3)
         self.assertTrue(all(item["is_representative"] for item in representatives["items"]))
 
     def test_group_rebuild_refreshes_recommendations_for_new_grouping_run(self) -> None:
@@ -581,6 +582,34 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.assertEqual(readiness["status"], "ready")
         self.assertTrue(readiness["ready"])
 
+    def test_quality_model_installation_truth_is_independent_of_quality_checkbox(self) -> None:
+        installed = {
+            "status": "ready",
+            "ready": True,
+            "runtime_ready": True,
+            "checkpoint_ready": True,
+            "model": {"provider": "lar-iqa", "model_id": "lar-iqa", "installed": True, "size_bytes": 123},
+            "message": "ready",
+        }
+        off = {"status": "off", "ready": True}
+
+        def readiness(provider):
+            return off if provider == "off" else installed
+
+        configuration = default_configuration()
+        configuration["rendered_quality_provider"] = "off"
+        configuration["raw_quality_provider"] = "off"
+        configuration["video_quality_enabled"] = False
+        with patch("archive_index.api.server._quality_readiness", side_effect=readiness), patch(
+            "archive_index.api.server._embedding_readiness", return_value={}
+        ):
+            disabled = _configuration_quality_readiness(configuration)
+            configuration["rendered_quality_provider"] = "lar-iqa"
+            enabled = _configuration_quality_readiness(configuration)
+
+        self.assertTrue(disabled["lar_iqa_readiness"]["model"]["installed"])
+        self.assertTrue(enabled["lar_iqa_readiness"]["model"]["installed"])
+
     def tearDown(self) -> None:
         self.server.shutdown()
         self.server.server_close()
@@ -695,6 +724,25 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         self.assertEqual((status, removed["removed"]), (200, True))
         self.assertFalse(missing.exists())
         self.assertEqual(_get_json(self.base_url, "/api/workspaces")[1]["workspaces"], [])
+
+    def test_cached_workspace_with_missing_database_can_be_removed_without_reopening_it(self) -> None:
+        stale_root = self.root / "stale"
+        stale_root.mkdir()
+        stale_workspace = Workspace.create(stale_root)
+        handle = self.server._register_workspace(stale_workspace)
+        self.server.registry.add(stale_workspace)
+        stale_workspace.database_path.unlink()
+
+        status, info = _post_json(self.base_url, "/api/workspaces/remove-info", {"workspace": handle})
+        self.assertEqual((status, info["available"]), (200, False))
+        status, removed = _post_json(
+            self.base_url,
+            "/api/workspaces/remove",
+            {"workspace": handle, "delete_index": True},
+        )
+        self.assertEqual((status, removed["removed"]), (200, True))
+        self.assertFalse(stale_workspace.database_path.exists())
+        self.assertNotIn(handle, [entry["id"] for entry in self.server.registry.entries()])
 
     def test_workspace_removal_preflight_and_delete_preserve_media(self) -> None:
         source = self.root / "photo.jpg"

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import webbrowser
+from io import BytesIO
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,7 +39,9 @@ from ..indexing.video_quality import index_video_quality, video_quality_details
 from ..indexing.recommendation import build_recommendations
 from ..indexing.reconciliation import reconcile_workspace
 from ..indexing.scanner import scan
-from ..media.quality_provider import default_model_path
+from ..media.quality_provider import LAR_IQA_MODEL_ID, LAR_IQA_MODEL_FILENAME, default_model_path
+from ..media.raw_preview import extract_embedded_preview
+from ..media.metadata import UnsupportedDecoderError
 from ..media_types import is_raw_extension
 from ..timing import TimingRecorder
 from ..jobs.engine import JobStore, SUBSTAGES
@@ -182,7 +185,18 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             )
             plan = plan_from_analysis(source_analysis, normalized, existing_workspace)
             plan.update(_configuration_quality_readiness(normalized))
-            plan.update(_embedding_plan(normalized, existing_workspace, plan))
+            embedding_plan = _embedding_plan(normalized, existing_workspace, plan)
+            plan.update(embedding_plan)
+            eta = dict(plan.get("eta_seconds_by_feature", {}))
+            eta["semantic_search"] = (
+                embedding_plan["embedding_estimated_seconds"]
+                if normalized["semantic_search_enabled"]
+                else 0
+            )
+            for key in ("embedding_initialization", "image_embeddings", "video_embeddings"):
+                eta.pop(key, None)
+            plan["eta_seconds_by_feature"] = eta
+            plan["estimated_seconds"] = round(sum(eta.values()), 1)
         except (ValueError, OSError) as error:
             raise InvalidRequest(str(error)) from error
         return {"path": str(root), "configuration": normalized, "plan": plan}
@@ -218,26 +232,45 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         return self.registry.remove(handle)
 
     def workspace_removal_info(self, handle: str) -> dict[str, object]:
+        entry = next((entry for entry in self.registry.entries() if entry.get("id") == handle), None)
+        if entry is None:
+            raise ResourceNotFound("workspace is unavailable")
         try:
             _, workspace = self.resolve_workspace(handle)
-            if not workspace.root.is_dir():
-                raise ResourceNotFound("workspace is unavailable")
-        except ResourceNotFound:
-            entry = next((entry for entry in self.registry.entries() if entry.get("id") == handle), None)
-            if entry is None:
-                raise
+            if not workspace.root.is_dir() or not workspace.database_path.is_file():
+                raise WorkspaceError("workspace database is unavailable")
+            index_size_bytes = _index_size_bytes(workspace.index_directory)
+            active_job = _active_job(workspace)
+        except (ResourceNotFound, WorkspaceError, OSError, sqlite3.Error, InvalidRequest):
+            self._workspaces.pop(handle, None)
             return {"workspace": handle, "index_size_bytes": 0, "active_job": None, "available": False}
         return {
             "workspace": handle,
-            "index_size_bytes": _index_size_bytes(workspace.index_directory),
-            "active_job": _active_job(workspace),
+            "index_size_bytes": index_size_bytes,
+            "active_job": active_job,
             "available": True,
         }
 
     def remove_workspace_with_index(self, handle: str, delete_index: bool) -> bool:
         if not delete_index:
+            self._workspaces.pop(handle, None)
             return self.registry.remove(handle)
-        _, workspace = self.resolve_workspace(handle)
+        entry = next((entry for entry in self.registry.entries() if entry.get("id") == handle), None)
+        if entry is None:
+            return False
+        path = entry.get("path")
+        if not isinstance(path, str):
+            self._workspaces.pop(handle, None)
+            return self.registry.remove(handle)
+        root = Path(path)
+        if not root.is_dir() or not (root / ".archive-index" / "index.sqlite").is_file():
+            self._workspaces.pop(handle, None)
+            return self.registry.remove(handle)
+        try:
+            _, workspace = self.resolve_workspace(handle)
+        except (ResourceNotFound, WorkspaceError, OSError, sqlite3.Error):
+            self._workspaces.pop(handle, None)
+            return self.registry.remove(handle)
         with self._active_lock:
             thread = self._active_threads.get(handle)
         if thread is not None and thread.is_alive():
@@ -245,7 +278,11 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         with self._active_lock:
             if thread is not None and thread.is_alive():
                 raise InvalidRequest("the workspace index is still shutting down")
-        active = _active_job(workspace)
+        try:
+            active = _active_job(workspace)
+        except (OSError, sqlite3.Error):
+            self._workspaces.pop(handle, None)
+            return self.registry.remove(handle)
         if active is not None:
             raise InvalidRequest("the workspace index cannot be deleted while a job is running")
         _delete_owned_index(workspace)
@@ -377,7 +414,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             current_job_id = media_job_id
             media_result = index_workspace(
                 workspace,
-                components=("metadata", "thumbnail"),
+                components=("metadata",),
                 job_id=media_job_id,
                 cancel_event=cancel_event,
                 timings=timings,
@@ -393,6 +430,20 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 workspace, job_id=reconciliation_job_id, cancel_event=cancel_event
             )
             if reconciliation_result.cancelled:
+                return
+            thumbnail_job_id = JobStore(workspace).create("media_thumbnails")
+            with self._active_lock:
+                self._cancel_events[(handle, thumbnail_job_id)] = cancel_event
+            job_ids.append(thumbnail_job_id)
+            current_job_id = thumbnail_job_id
+            thumbnail_result = index_workspace(
+                workspace,
+                components=("thumbnail",),
+                job_id=thumbnail_job_id,
+                cancel_event=cancel_event,
+                timings=timings,
+            )
+            if thumbnail_result.cancelled:
                 return
             quality_job_id = JobStore(workspace).create("media_quality")
             with self._active_lock:
@@ -483,6 +534,10 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 LOGGER.exception("could not mark workspace job failed")
         finally:
             LOGGER.info("workspace indexing timings: %s", timings.summary())
+            try:
+                JobStore(workspace).set_timing_summary(job_id, timings.summary())
+            except Exception:
+                LOGGER.exception("could not persist workspace indexing timings")
             with self._active_lock:
                 for active_job_id in job_ids:
                     self._cancel_events.pop((handle, active_job_id), None)
@@ -644,7 +699,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             elif request.path == "/api/workspace/configuration":
                 self._send_json(200, {"configuration": workspace.configuration()})
             elif request.path == "/api/folders":
-                self._send_json(200, {"folders": _folders(workspace)})
+                self._send_json(200, {"folders": _folders(workspace), "counts": _folder_counts(workspace)})
             elif request.path == "/api/assets":
                 self._send_json(200, _assets(workspace, query, handle))
             elif request.path == "/api/browser/locate":
@@ -709,6 +764,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                         body.get("path"), body.get("configuration"), body.get("analysis")
                     ),
                 )
+                return
+            if request.path == "/api/quality-model/install":
+                from ..media.quality_provider import install_lar_iqa_model
+
+                try:
+                    path = install_lar_iqa_model()
+                except Exception as error:
+                    raise InvalidRequest(f"Model installation failed: {error}") from error
+                self._send_json(200, {"installed": True, "path": str(path)})
                 return
             if request.path == "/api/workspaces/apply":
                 body = self._json_body()
@@ -909,6 +973,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "original":
             self._serve_original(workspace, parts[2])
             return
+        if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "preview":
+            self._serve_raw_preview(workspace, parts[2])
+            return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "thumbnail":
             self._serve_thumbnail(workspace, parts[2])
             return
@@ -983,6 +1050,29 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             mimetypes.guess_type(source.name)[0] or "application/octet-stream",
             allow_range=True,
         )
+
+    def _serve_raw_preview(self, workspace: Workspace, physical_id: str) -> None:
+        connection = workspace.connect()
+        try:
+            row = connection.execute(
+                "SELECT relative_path, extension, is_online, in_scope FROM physical_file WHERE id = ?",
+                (physical_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None or not row["is_online"] or not row["in_scope"] or not is_raw_extension(row["extension"]):
+            raise ResourceNotFound("RAW preview is unavailable")
+        try:
+            source = workspace.absolute_path(row["relative_path"])
+            preview = extract_embedded_preview(source)
+        except (WorkspaceError, UnsupportedDecoderError) as error:
+            raise ResourceNotFound("RAW embedded preview is unavailable") from error
+        try:
+            output = BytesIO()
+            preview.image.save(output, format="JPEG", quality=90, optimize=True)
+            self._send_bytes(200, output.getvalue(), "image/jpeg")
+        finally:
+            preview.image.close()
 
     def _send_file(self, path: Path, content_type: str, allow_range: bool = False) -> None:
         if not path.is_file():
@@ -1285,6 +1375,7 @@ def _workspace_summary(workspace: Workspace, handle: str) -> dict[str, object]:
         "rendered_quality_provider": workspace.rendered_quality_provider(),
         "raw_quality_provider": workspace.raw_quality_provider(),
         "video_quality_enabled": workspace.video_quality_enabled(),
+        "include_videos_in_semantic_search": workspace.configuration()["include_videos_in_semantic_search"],
         "semantic_search_enabled": workspace.semantic_search_enabled(),
         "embedding_provider": workspace.embedding_provider(),
         "embedding_model": _embedding_model_status(workspace.embedding_provider()),
@@ -1301,6 +1392,7 @@ def _workspace_plan(workspace: Workspace, configuration: Mapping[str, object]) -
 
 
 def _configuration_quality_readiness(configuration: Mapping[str, object]) -> dict[str, object]:
+    lar_iqa = _quality_readiness("lar-iqa")
     rendered = _quality_readiness(configuration["rendered_quality_provider"])
     raw = _quality_readiness(configuration["raw_quality_provider"])
     if configuration["raw_quality_provider"] == "lar-iqa" and raw["ready"]:
@@ -1321,6 +1413,7 @@ def _configuration_quality_readiness(configuration: Mapping[str, object]) -> dic
         else "off"
     )
     return {
+        "lar_iqa_readiness": lar_iqa,
         "quality_readiness": rendered,
         "rendered_quality_readiness": rendered,
         "raw_quality_readiness": raw,
@@ -1400,6 +1493,8 @@ def _embedding_plan(configuration, workspace=None, filesystem_plan=None):
             rendered = [r for r in members if not is_raw_extension(r["extension"])]
             selected = preferred_physical(rendered or members)
             kind = "video" if selected["media_type"] == "video" else "rendered" if rendered else "raw_preview"
+            if kind == "video" and not configuration.get("include_videos_in_semantic_search", True):
+                continue
             source = _source(selected, asset_id, kind, configuration)
             if kind == "video" and not (selected["duration_seconds"] and selected["duration_seconds"] > 0):
                 unknown_videos += 1
@@ -1415,7 +1510,9 @@ def _embedding_plan(configuration, workspace=None, filesystem_plan=None):
     elif filesystem_plan:
         categories = filesystem_plan.get("selected_categories", {})
         images = sum(categories.get(k, 0) for k in ("jpeg", "other_image", "raw"))
-        unknown_videos = categories.get("video", 0)
+        unknown_videos = categories.get("video", 0) if configuration.get("include_videos_in_semantic_search", True) else 0
+        if not configuration.get("include_videos_in_semantic_search", True):
+            videos = 0
     total = images + videos
     pending = total - reusable
     return {"embedding_image_count": images, "embedding_video_sample_count": videos,
@@ -1423,7 +1520,9 @@ def _embedding_plan(configuration, workspace=None, filesystem_plan=None):
             "embedding_cached_count": reusable, "embedding_unknown_videos": unknown_videos,
             "embedding_counts_estimated": workspace is None,
             "embedding_estimated_storage_bytes": pending * provider.dimension * 2,
-            "embedding_estimated_seconds": round(pending * EMBEDDING_ESTIMATE_SECONDS_PER_VECTOR, 1),
+            "embedding_image_estimated_seconds": round(images * 0.25, 1),
+            "embedding_video_estimated_seconds": round(videos * 0.30, 1),
+            "embedding_estimated_seconds": round((8.0 if pending else 0.0) + images * 0.25 + videos * 0.30, 1),
             "embedding_active_run_id": run_id}
 
 
@@ -1436,6 +1535,7 @@ def _quality_readiness(provider: object) -> dict[str, object]:
     except (ImportError, ModuleNotFoundError):
         runtime_ready = False
     checkpoint_ready = default_model_path().is_file()
+    checkpoint_size = default_model_path().stat().st_size if checkpoint_ready else None
     if runtime_ready and checkpoint_ready:
         status = "ready"
         message = "Runtime and checkpoint appear ready."
@@ -1453,6 +1553,13 @@ def _quality_readiness(provider: object) -> dict[str, object]:
         "ready": runtime_ready and checkpoint_ready,
         "runtime_ready": runtime_ready,
         "checkpoint_ready": checkpoint_ready,
+        "model": {
+            "provider": "lar-iqa",
+            "model_id": LAR_IQA_MODEL_ID,
+            "filename": LAR_IQA_MODEL_FILENAME,
+            "installed": checkpoint_ready,
+            "size_bytes": checkpoint_size,
+        },
         "message": message,
     }
 
@@ -1956,12 +2063,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 "total": 0, "has_next": False,
             }
         if filters["media_type"] == "video":
-            return {
-                "run_id": active["id"], "algorithm": active["algorithm"], "version": active["version"],
-                "settings": _json_or_none(active["settings_json"]), "groups": [], "page": page,
-                "page_size": page_size, "total": 0, "has_next": False,
-                "empty_reason": "Video grouping is not supported yet.",
-            }
+            return _video_groups(workspace, query, handle, filters, active, page, page_size)
         condition, condition_params, order = _group_query_parts(active["id"], filters)
         total = connection.execute(
             f"SELECT COUNT(*) FROM strict_group AS sg WHERE sg.run_id = ? {condition}",
@@ -2048,6 +2150,85 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
         "version": active["version"],
         "settings": _json_or_none(active["settings_json"]),
         "groups": response_groups,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_next": page * page_size < total,
+        "filters": filters,
+    }
+
+
+def _video_groups(workspace: Workspace, query, handle, filters, active, page, page_size):
+    clauses = [
+        "la.media_type = 'video'",
+        "pf.media_type = 'video'",
+        "pf.in_scope = 1",
+        "pf.is_online = 1",
+    ]
+    params: list[object] = []
+    if filters["search"]:
+        clauses.append("LOWER(pf.filename) LIKE ? ESCAPE '\\'")
+        params.append(f"%{_like_value(str(filters['search']).casefold())}%")
+    if filters["folder"]:
+        escaped = _like_value(str(filters["folder"]))
+        clauses.append("(pf.relative_path = ? OR pf.relative_path LIKE ? ESCAPE '\\')")
+        params.extend([filters["folder"], f"{escaped}/%"])
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            f"SELECT DISTINCT la.* FROM logical_asset AS la JOIN physical_file AS pf ON pf.logical_asset_id = la.id WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchall()
+    finally:
+        connection.close()
+    representatives, _ = _current_representatives(workspace)
+    recommendations, _ = _current_recommendations(workspace)
+    if filters["selection"] == "representatives":
+        rows = [row for row in rows if row["id"] in representatives]
+    elif filters["selection"] == "recommended":
+        rows = [row for row in rows if row["id"] in recommendations]
+    elif filters["selection"] in {"selected", "rejected", "undecided"}:
+        rows = [row for row in rows if row["selection_state"] == filters["selection"]]
+    physical_by_asset = _physical_rows_for_assets(workspace, [row["id"] for row in rows])
+
+    def sort_key(row):
+        physical = physical_by_asset.get(row["id"], [])
+        filename = min((str(item["filename"]).casefold() for item in physical), default="")
+        quality = next((item["quality_score"] for item in physical if item["quality_score"] is not None), None)
+        value = filename if filters["sort_by"] == "filename" else quality if filters["sort_by"] == "quality" else row["capture_time"]
+        return (value is None, value if value is not None else "")
+
+    rows.sort(key=sort_key, reverse=filters["direction"] == "DESC")
+    total = len(rows)
+    page_rows = rows[(page - 1) * page_size : page * page_size]
+    recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+    groups = []
+    for row in page_rows:
+        summary = _asset_summary(
+            workspace,
+            row,
+            handle,
+            physical_by_asset.get(row["id"], []),
+            True,
+            row["id"] in recommendation_ids,
+            recommendation_run_id,
+            None,
+        )
+        groups.append({
+            "group_id": f"video:{row['id']}",
+            "label": "Video",
+            "member_count": 1,
+            "first_capture_time": row["capture_time"],
+            "representative_asset_id": row["id"],
+            "representative_quality_score": summary["quality_score"],
+            "members": [{**summary, "is_representative": True}],
+        })
+    return {
+        "run_id": active["id"],
+        "algorithm": active["algorithm"],
+        "version": active["version"],
+        "settings": _json_or_none(active["settings_json"]),
+        "groups": groups,
         "page": page,
         "page_size": page_size,
         "total": total,
@@ -2190,7 +2371,10 @@ def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
             "SELECT active_run_id FROM workspace_grouping WHERE id = 1"
         ).fetchone()
         if active is None:
-            return set(), False
+            videos = connection.execute(
+                "SELECT DISTINCT la.id FROM logical_asset la JOIN physical_file pf ON pf.logical_asset_id = la.id WHERE la.media_type = 'video' AND pf.in_scope = 1 AND pf.is_online = 1"
+            ).fetchall()
+            return {row["id"] for row in videos}, True
         rows = connection.execute(
             """
             SELECT representative_logical_asset_id
@@ -2201,7 +2385,20 @@ def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
         ).fetchall()
     finally:
         connection.close()
-    return {row["representative_logical_asset_id"] for row in rows}, True
+    video_connection = workspace.connect()
+    try:
+        videos = video_connection.execute(
+            """
+            SELECT DISTINCT la.id
+            FROM logical_asset AS la
+            JOIN physical_file AS pf ON pf.logical_asset_id = la.id
+            WHERE la.media_type = 'video' AND pf.media_type = 'video'
+              AND pf.in_scope = 1 AND pf.is_online = 1
+            """
+        ).fetchall()
+    finally:
+        video_connection.close()
+    return {row["representative_logical_asset_id"] for row in rows} | {row["id"] for row in videos}, True
 
 
 def _current_group_ids(workspace: Workspace, asset_ids: list[str]) -> dict[str, str]:
@@ -2258,7 +2455,23 @@ def _current_recommendations(workspace: Workspace) -> tuple[set[str], str | None
         ).fetchall()
     finally:
         connection.close()
-    return {row["logical_asset_id"] for row in rows}, active["active_run_id"]
+    video_connection = workspace.connect()
+    try:
+        video_rows = video_connection.execute(
+            """
+            SELECT DISTINCT la.id
+            FROM logical_asset AS la
+            JOIN physical_file AS pf ON pf.logical_asset_id = la.id
+            JOIN workspace_config AS wc ON wc.id = 1
+            WHERE la.media_type = 'video' AND pf.media_type = 'video'
+              AND pf.in_scope = 1 AND pf.is_online = 1
+              AND wc.quality_enabled = 1 AND wc.video_quality_enabled = 1
+              AND pf.quality_score >= wc.recommendation_threshold
+            """
+        ).fetchall()
+    finally:
+        video_connection.close()
+    return {row["logical_asset_id"] for row in rows} | {row["id"] for row in video_rows}, active["active_run_id"]
 
 
 def _recommendations(workspace: Workspace) -> dict[str, object]:
@@ -2376,6 +2589,15 @@ def _asset_summary(
         (row["quality_score"] for row in quality_rows if row["quality_score"] is not None),
         None,
     )
+    display = preferred_physical(
+        [row for row in active_physical if row["is_online"] and (row["media_type"] != "image" or not is_raw_extension(row["extension"]))]
+    ) or online
+    display_url = None
+    if display is not None:
+        display_url = _url(
+            f"/api/files/{display['id']}/{('preview' if display['media_type'] == 'image' and is_raw_extension(display['extension']) else 'original')}",
+            handle,
+        )
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
@@ -2389,6 +2611,7 @@ def _asset_summary(
         "online_count": sum(bool(row["is_online"]) for row in physical),
         "thumbnail_url": _url(f"/api/assets/{asset['id']}/thumbnail", handle) if thumbnail else None,
         "original_url": _url(f"/api/files/{online['id']}/original", handle) if online else None,
+        "display_url": display_url,
         "quality_score": quality_score,
         "quality_source": _quality_source(next((row for row in quality_rows if row["quality_score"] is not None), None)),
         "issues": _asset_issues(physical),
@@ -2639,6 +2862,40 @@ def _jobs(workspace: Workspace, query: Mapping[str, list[str]]):
     return [{**_row_dict(row), "substage": SUBSTAGES.get(row["id"])} for row in rows]
 
 
+_PROBLEM_COMPONENTS = {
+    "visual_features": ("group_feature",),
+    "media_index": ("metadata", "thumbnail"),
+    "media_thumbnails": ("thumbnail",),
+    "media_quality": ("quality",),
+    "raw_quality": ("quality",),
+    "video_quality": ("quality",),
+}
+_RESOLVED_COMPONENT_STATES = frozenset({"complete", "not_requested"})
+
+
+def _job_error_is_resolved(connection, row) -> bool:
+    physical_file_id = row["physical_file_id"]
+    if not physical_file_id:
+        return False
+    components = _PROBLEM_COMPONENTS.get(row["job_kind"])
+    if row["job_kind"] == "embeddings":
+        states = connection.execute(
+            "SELECT status FROM component_state WHERE physical_file_id = ? AND component LIKE 'embedding:%'",
+            (physical_file_id,),
+        ).fetchall()
+    elif components:
+        placeholders = ",".join("?" for _ in components)
+        states = connection.execute(
+            f"SELECT status FROM component_state WHERE physical_file_id = ? AND component IN ({placeholders})",
+            (physical_file_id, *components),
+        ).fetchall()
+    else:
+        return False
+    return bool(states) and len(states) == (len(components) if components else len(states)) and all(
+        state["status"] in _RESOLVED_COMPONENT_STATES for state in states
+    )
+
+
 def _problems(workspace: Workspace, query: Mapping[str, list[str]]):
     limit = min(_positive_int(_first(query, "limit", "100"), "limit"), 500)
     connection = workspace.connect()
@@ -2650,8 +2907,9 @@ def _problems(workspace: Workspace, query: Mapping[str, list[str]]):
             LEFT JOIN job ON job.id = job_error.job_id
             ORDER BY job_error.id DESC LIMIT ?
             """,
-            (limit,),
+            (500,),
         ).fetchall()
+        rows = [row for row in rows if not _job_error_is_resolved(connection, row)]
         conflicts = connection.execute(
             """
             SELECT rc.id, rc.left_logical_asset_id, rc.right_logical_asset_id,
@@ -2705,6 +2963,25 @@ def _folders(workspace: Workspace) -> list[str]:
         for index in range(1, len(parts) + 1):
             folders.add("/".join(parts[:index]))
     return sorted(folders, key=str.casefold)
+
+
+def _folder_counts(workspace: Workspace) -> dict[str, dict[str, int]]:
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            "SELECT relative_path, media_type, size_bytes FROM physical_file WHERE in_scope = 1 AND is_online = 1"
+        ).fetchall()
+    finally:
+        connection.close()
+    counts: dict[str, dict[str, int]] = {"": {"files": 0, "images": 0, "videos": 0, "bytes": 0}}
+    for row in rows:
+        path = row["relative_path"]
+        folder = "/".join(Path(path).parts[:-1])
+        value = counts.setdefault(folder, {"files": 0, "images": 0, "videos": 0, "bytes": 0})
+        value["files"] += 1
+        value["images" if row["media_type"] == "image" else "videos"] += 1
+        value["bytes"] += int(row["size_bytes"] or 0)
+    return counts
 
 
 def _folder_filter(workspace: Workspace, value: str) -> str:
