@@ -35,7 +35,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Show image group", html)
         self.assertIn("similarity-chip", javascript)
         self.assertIn("similarity-chip", css)
-        self.assertIn("Index these folders:", html)
+        self.assertIn('<span class="setup-accent">Index</span> these folders:', html)
         self.assertNotIn("1 —", html)
         self.assertNotIn("2 —", html)
         self.assertNotIn("3 —", html)
@@ -44,8 +44,11 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("Enable semantic search", html)
         self.assertNotIn("Models are installed explicitly", html)
         self.assertNotIn("Estimated from local completed-job timings", javascript)
-        self.assertEqual(html.count("Automatically assess media quality"), 1)
-        self.assertEqual(html.count("Let me search by semantic content"), 1)
+        self.assertEqual(html.count("Automatically</span> assess media quality"), 1)
+        self.assertEqual(html.count("Let me</span> search in plain English"), 1)
+        self.assertNotIn("Let me search by semantic content", html)
+        self.assertIn("setup-accent", javascript)
+        self.assertIn("Estimated indexing time", javascript)
         self.assertEqual(html.count('id="setup-quality"'), 1)
         self.assertEqual(html.count('id="setup-semantic-search"'), 1)
         self.assertEqual(html.count('id="setup-video-participation"'), 1)
@@ -181,6 +184,8 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("query=40.987654%2C-73.123456", result["withLocation"])
         self.assertIn('target="_blank"', result["withLocation"])
         self.assertIn('rel="noopener noreferrer"', result["withLocation"])
+        self.assertIn("<svg", result["withLocation"])
+        self.assertNotIn(">↗</a>", result["withLocation"])
         self.assertNotIn("<dt>Location</dt>", result["withoutLocation"])
 
 
@@ -287,6 +292,22 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn("clip.mp4", result)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_missing_detail_thumbnail_keeps_clickable_placeholder(self):
+        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        start = source.index("function renderDetails")
+        end = source.index("function renderRepresentations", start)
+        function = source[start:end]
+        script = f'''
+        const escapeHtml=String,formatBytes=String,formatCapture=()=>'',renderTechnicalDetails=()=>'',renderQuality=()=>'',renderRepresentations=()=>'';
+        {function}
+        console.log(renderDetails({{physical_files:[{{filename:'broken.jxl',relative_path:'broken.jxl',size_bytes:100}}]}}, {{showThumbnail:true}}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout
+        self.assertIn('class="detail-thumbnail placeholder"', result)
+        self.assertIn('data-detail-thumbnail', result)
+        self.assertIn("Preview unavailable", result)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_disabled_quality_is_omitted_but_requested_failure_remains(self):
         source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
         render_quality = source[source.index("function renderQuality"):source.index("function meterMarkup")]
@@ -298,7 +319,9 @@ class CorrectionFrontendTests(unittest.TestCase):
         """
         result = json.loads(subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout)
         self.assertEqual((result["image"], result["video"]), ("", ""))
-        self.assertIn("Technical quality scoring failed", result["failed"])
+        self.assertIn("Overall technical quality", result["failed"])
+        self.assertIn(">N/A</span>", result["failed"])
+        self.assertNotIn("decode failed", result["failed"])
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_measurement_labels_sparse_and_overflow_numeric_value_retained(self):

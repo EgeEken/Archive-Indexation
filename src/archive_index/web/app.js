@@ -300,7 +300,7 @@ function renderSetupPlanData(plan) {
   state.setup.plan = plan;
   const remaining = Math.max(0, Number(plan.estimated_seconds || 0));
   const reusable = Number(plan.indexed_reusable_files || 0);
-  $("setup-index-summary").textContent = `Indexed: ${reusable.toLocaleString()} / ${files.toLocaleString()} · Estimated remaining time: ${formatEta(remaining)}`;
+  $("setup-index-summary").textContent = `Indexed: ${reusable.toLocaleString()} / ${files.toLocaleString()} · Estimated indexing time: ${formatEta(remaining)}`;
   const eta = plan.eta_seconds_by_feature || {};
   const qualityEta = Number(eta.rendered_quality || 0) + Number(eta.raw_quality || 0);
   $("setup-quality-eta").textContent = configuration.quality_enabled ? `+${formatEta(qualityEta)}` : "off";
@@ -322,9 +322,9 @@ function renderSetupPlanData(plan) {
   const videoFeaturesAvailable = configuration.quality_enabled || configuration.semantic_search_enabled;
   const videoParticipation = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search;
   $("setup-video-section").classList.toggle("hidden", !videoFeaturesAvailable);
-  $("setup-video-participation-label").textContent = configuration.quality_enabled && configuration.semantic_search_enabled
-    ? "Assess video quality and include videos in semantic search too"
-    : configuration.quality_enabled ? "Assess video quality too" : "Include videos in semantic search too";
+  $("setup-video-participation-label").innerHTML = configuration.quality_enabled && configuration.semantic_search_enabled
+    ? '<span class="setup-accent">Assess</span> video <span class="setup-accent">quality and</span> include videos <span class="setup-accent">in semantic search</span> too'
+    : configuration.quality_enabled ? '<span class="setup-accent">Assess</span> video <span class="setup-accent">quality</span> too' : 'Include videos <span class="setup-accent">in semantic search</span> too';
   $("setup-video-sampling").classList.toggle("hidden", !videoParticipation);
 }
 
@@ -947,7 +947,7 @@ function renderDetails(asset, options = {}) {
   const filenameMarkup = displayFilename;
   const first = asset.physical_files?.[0] || {};
   const dimensions = first.width && first.height ? `${first.width} × ${first.height} (${(first.width * first.height / 1000000).toFixed(2)} MP)` : "Unavailable";
-  const thumbnail = options.showThumbnail && first.thumbnail_url ? `<button class="detail-thumbnail" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer"><img src="${first.thumbnail_url}" alt=""></button>` : "";
+  const thumbnail = options.showThumbnail ? `<button class="detail-thumbnail${first.thumbnail_url ? "" : " placeholder"}" type="button" data-detail-thumbnail aria-label="Open ${escapeHtml(first.filename)} in viewer">${first.thumbnail_url ? `<img src="${first.thumbnail_url}" alt="">` : "<span>Preview unavailable</span>"}</button>` : "";
   const quality = renderQuality(first, false);
   const absolutePath = first.absolute_path || first.relative_path || "Path unavailable";
   const pathRow = options.viewerPanel ? `<dt>Path</dt><dd>${escapeHtml(first.relative_path || "Unavailable")}</dd>` : "";
@@ -957,7 +957,8 @@ function renderDetails(asset, options = {}) {
   const longitude = Number(asset.location?.longitude);
   const locationText = Number.isFinite(latitude) && Number.isFinite(longitude) ? `${latitude.toFixed(6)}, ${longitude.toFixed(6)}` : "";
   const locationUrl = locationText ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude.toFixed(6)},${longitude.toFixed(6)}`)}` : "";
-  const locationRow = locationText ? `<dt>Location</dt><dd class="location-value"><span>${escapeHtml(locationText)}</span><a class="explorer-button location-link" href="${escapeHtml(locationUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open location in Google Maps">↗</a></dd>` : "";
+  const locationIcon = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 21s7-6.1 7-12A7 7 0 0 0 5 9c0 5.9 7 12 7 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="9" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+  const locationRow = locationText ? `<dt>Location</dt><dd class="location-value"><span>${escapeHtml(locationText)}</span><a class="explorer-button location-link" href="${escapeHtml(locationUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open location in Google Maps">${locationIcon}</a></dd>` : "";
   const header = options.viewerPanel
     ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>`
     : `<div class="dialog-header"><div><h2 id="details-title">${filenameMarkup(first.filename || "Asset details")}</h2><div class="muted detail-path" title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</div></div><button id="details-close" class="icon" type="button" aria-label="Close details">×</button></div>`;
@@ -982,6 +983,9 @@ function renderRepresentations(asset) {
 function renderQuality(file, showFilename) {
   const status = file.components?.quality?.status;
   if (status === "not_requested" || !status && file.quality_score == null) return "";
+  if (["failed", "unsupported"].includes(status) && file.quality_score == null) {
+    return `<section class="file-card">${showFilename ? `<div class="muted">${escapeHtml(file.filename)}</div>` : ""}<div class="quality-summary"><strong>Overall technical quality</strong><span class="quality-score-box na"><span class="quality-score">N/A</span></span></div></section>`;
+  }
   if (file.media_type === "video" && file.quality_score == null) {
     const message = status === "failed" ? "Technical quality scoring failed for this video." : status === "unsupported" ? "Video quality frame decoding is unsupported on this system." : status === "pending" || status === "running" ? "Technical quality scoring is processing video samples." : "Technical quality is unavailable.";
     return `<div class="quality-unsupported">${message}</div>`;
