@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from math import isfinite
 import webbrowser
 from io import BytesIO
 from collections.abc import Mapping
@@ -2794,6 +2795,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
     relationships = _current_relationships(workspace, [row["id"] for row in physical])
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
     current_group_id = _current_group_ids(workspace, [asset_id]).get(asset_id)
+    location = _asset_location(physical)
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
@@ -2804,6 +2806,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
         "current_group_id": current_group_id,
+        "location": location,
         "physical_files": [
             {
                 "id": row["id"],
@@ -2842,6 +2845,25 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
             for row in ordered_physical
         ],
     }
+
+
+def _asset_location(physical) -> dict[str, float] | None:
+    active = [row for row in physical if row["in_scope"]] or list(physical)
+    preferred = preferred_physical(active)
+    candidates = ([preferred] if preferred is not None else []) + [
+        row for row in active if preferred is None or row["id"] != preferred["id"]
+    ]
+    for row in candidates:
+        metadata = _json_or_none(row["metadata_json"]) or {}
+        gps = metadata.get("gps") or {}
+        try:
+            latitude = float(gps["latitude"])
+            longitude = float(gps["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if isfinite(latitude) and isfinite(longitude) and -90 <= latitude <= 90 and -180 <= longitude <= 180:
+            return {"latitude": latitude, "longitude": longitude}
+    return None
 
 
 def _physical_rows(workspace: Workspace, asset_id: str):

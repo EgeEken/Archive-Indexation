@@ -161,6 +161,28 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("<dt>Capture time</dt>", result.stdout)
         self.assertNotIn("Capture time unavailable", result.stdout)
 
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_details_location_uses_coordinates_and_safe_google_maps_link(self) -> None:
+        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        start = source.index("function renderDetails")
+        end = source.index("function renderRepresentations", start)
+        function = source[start:end]
+        script = f'''
+        const escapeHtml=value=>String(value).replaceAll("&","&amp;").replaceAll('"',"&quot;");
+        const formatBytes=String,formatCapture=()=>'',renderTechnicalDetails=()=>'',renderQuality=()=>'',renderRepresentations=()=>'';
+        {function}
+        const withLocation=renderDetails({{location:{{latitude:40.987654,longitude:-73.123456}},physical_files:[{{filename:"photo.jpg",size_bytes:100}}]}});
+        const withoutLocation=renderDetails({{physical_files:[{{filename:"photo.jpg",size_bytes:100}}]}});
+        console.log(JSON.stringify({{withLocation,withoutLocation}}));
+        '''
+        result = json.loads(subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout)
+        self.assertIn("<dt>Location</dt>", result["withLocation"])
+        self.assertIn("40.987654, -73.123456", result["withLocation"])
+        self.assertIn("query=40.987654%2C-73.123456", result["withLocation"])
+        self.assertIn('target="_blank"', result["withLocation"])
+        self.assertIn('rel="noopener noreferrer"', result["withLocation"])
+        self.assertNotIn("<dt>Location</dt>", result["withoutLocation"])
+
 
 class CorrectionFrontendTests(unittest.TestCase):
     def run_js(self, functions, body):

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from archive_index.api.server import WorkspaceHTTPServer, _configuration_quality_readiness, _path_revision, _pick_workspace_path, _quality_readiness
+from archive_index.api.server import WorkspaceHTTPServer, _asset_detail, _configuration_quality_readiness, _path_revision, _pick_workspace_path, _quality_readiness
 from archive_index.app_state import workspace_id
 from archive_index.configuration import default_configuration
 from archive_index.indexing.media_pipeline import index_workspace as run_index_workspace
@@ -285,6 +285,51 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(sum(file["is_preferred"] for file in detail["physical_files"]), 1)
         self.assertTrue(
             all("Exact duplicate" in file["relationships"] for file in detail["physical_files"])
+        )
+
+    def test_detail_location_uses_valid_coordinates_and_raw_fallback(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            asset_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE physical_file SET metadata_json = ? WHERE relative_path = 'root.jpg'",
+                (json.dumps({"gps": {"latitude": 40.987654, "longitude": -73.123456}}),),
+            )
+        detail = _asset_detail(self.workspace, asset_id, "test")
+        self.assertEqual(detail["location"], {"latitude": 40.987654, "longitude": -73.123456})
+
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE physical_file SET metadata_json = ? WHERE relative_path = 'root.jpg'",
+                (json.dumps({"exif": {}}),),
+            )
+        self.assertIsNone(_asset_detail(self.workspace, asset_id, "test")["location"])
+
+        _write_image(self.workspace.root / "paired.jpg", (80, 60))
+        (self.workspace.root / "paired.arw").write_bytes(b"raw")
+        scan(self.workspace)
+        with self.workspace.transaction() as connection:
+            jpeg_id, raw_id, pair_asset_id = connection.execute(
+                """
+                SELECT jpeg.id, raw.id, jpeg.logical_asset_id
+                FROM physical_file AS jpeg
+                JOIN physical_file AS raw ON raw.relative_path = 'paired.arw'
+                WHERE jpeg.relative_path = 'paired.jpg'
+                """
+            ).fetchone()
+            connection.execute(
+                "UPDATE physical_file SET logical_asset_id = ?, role = 'camera_jpeg', metadata_json = ? WHERE id = ?",
+                (pair_asset_id, json.dumps({"exif": {}}), jpeg_id),
+            )
+            connection.execute(
+                "UPDATE physical_file SET logical_asset_id = ?, role = 'camera_raw', metadata_json = ? WHERE id = ?",
+                (pair_asset_id, json.dumps({"gps": {"latitude": -33.8688, "longitude": 151.2093}}), raw_id),
+            )
+        self.assertEqual(
+            _asset_detail(self.workspace, pair_asset_id, "test")["location"],
+            {"latitude": -33.8688, "longitude": 151.2093},
         )
 
     def test_original_and_thumbnail_routes_do_not_accept_arbitrary_paths(self) -> None:

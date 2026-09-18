@@ -327,6 +327,8 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 .meter-wrap {padding-bottom:15px;}
 
 .explorer-button { display:inline-flex; align-items:center; justify-content:center; min-width:32px; min-height:30px; padding:.3rem .45rem; border:1px solid #607789; border-radius:.35rem; background:#25313b; color:#dbeaf5; cursor:pointer; vertical-align:middle; }
+.location-link { text-decoration:none; }
+.location-value { display:inline-flex; align-items:center; gap:.35rem; }
 .explorer-button:hover { background:#354d60; border-color:#8dcaf1; }
 .explorer-button:focus-visible { outline:2px solid #8dcaf1; outline-offset:2px; }
 .view-tabs button { background:#202a33; color:#aebdca; border:1px solid #455665; }
