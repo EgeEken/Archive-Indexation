@@ -1540,6 +1540,12 @@ Metadata and RAW/JPEG reconciliation now complete before final representation-sp
 
 The current workspace navigation remains `Gallery | Groupings | Cloud Map` while the later target is `Gallery | Groupings | Geo Map | Timeline | Vector Cloud Map`; the additional views are roadmap items only. Future Groupings should offer `Strict | Broad`, retaining current conservative near-identical grouping as Strict and reserving looser clustering-oriented organization for Broad. Future Geo Map should use only available GPS metadata with zoomable marker/cluster detail and no reverse-geocoding requirement; Details now has a tiny Google Maps link icon next to valid coordinates and omits it without GPS. Future Timeline should provide a smoothly zoomable capture-time view from days/hours to minute/second differences and open normal viewer/details on selection. Future Vector Cloud Map should provide a zoomable/pannable two-dimensional semantic embedding view using an explicitly chosen deterministic projection such as PCA; it is not implemented here. The later Similar-viewer navigation redesign and comprehensive responsive-layout, viewport, browser-zoom, and eventual mobile pass remain follow-up UX work; they are not part of Phase 9.3A and must not be treated as implemented here.
 
+### Deferred follow-up notes
+
+- Phase 10 image compression must first validate an actual `libjxl` runtime for decoding and eventual encoding. JXL files need explicit app-owned provenance and source/derivative relationships; filename or extension inference is not sufficient. External JXL files and their reconciliation behavior require a separate investigation before implementation.
+- ETA estimates should later be calibrated from machine-local completed-job throughput and compute characteristics rather than treated as universal constants.
+- Preserve the later navigation target `Gallery | Groupings | Geo Map | Timeline | Vector Cloud Map`, future `Strict | Broad` grouping, the Similar-viewer navigation redesign, comprehensive responsive/viewport/browser-zoom/mobile work, and Phase 9.3C end-to-end testing, CI, and modularization as deferred roadmap items.
+
 ## Phase 10 — compression pipeline
 
 ### Goal
