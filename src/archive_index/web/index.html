@@ -61,7 +61,7 @@
       <section class="setup-section panel"><h2 class="setup-control-heading"><label><input id="setup-quality" type="checkbox"> <span class="setup-accent">Automatically</span> assess media quality</label><span id="setup-quality-eta" class="setup-eta"></span></h2><p class="muted setup-helper">Gives each asset a technical quality score, used to recommend the best media in your archive.</p><div id="setup-quality-details" class="model-card active hidden"></div></section>
       <section class="setup-section panel"><h2 class="setup-control-heading"><label><input id="setup-semantic-search" type="checkbox"> <span class="setup-accent">Let me</span> search in plain English</label><span id="setup-semantic-eta" class="setup-eta"></span></h2><p class="muted setup-helper">For example, search for "cat playing with toy" in your archive.</p><div id="setup-embedding-status" class="embedding-cards"></div></section>
       <section id="setup-video-section" class="setup-section panel hidden"><h2 class="setup-control-heading"><label><input id="setup-video-participation" type="checkbox"> <span id="setup-video-participation-label"></span></label><span id="setup-video-eta" class="setup-eta"></span></h2><div id="setup-video-sampling" class="setup-detail hidden"><h3>Video frame sampling</h3><div class="video-sampling-controls"><label>Samples per second<input id="setup-video-fps" type="number" min="0.1" max="60" step="0.1"></label><label>Minimum frames per video<input id="setup-video-min-frames" type="number" min="1" max="256" step="1"></label><label>Maximum frames per video<input id="setup-video-max-frames" type="number" min="1" max="256" step="1"></label></div></div></section>
-      <section class="setup-diagnostics"><button id="problems-button" class="secondary">Diagnostics <span id="problem-count"></span></button></section>
+      <section class="setup-diagnostics"><div class="setup-maintenance-actions"><button id="problems-button" class="secondary">Diagnostics <span id="problem-count"></span></button><button id="forget-offline-button" class="danger-button" type="button">Forget offline media…</button></div></section>
       <section class="setup-actions setup-actions-bottom"><button id="setup-apply" class="primary-action" type="button">Index</button></section>
     </section>
   </main>
@@ -71,6 +71,7 @@
   <dialog id="folder-dialog"><div class="dialog-inner"><div class="dialog-header"><h2>Folders</h2><button id="folder-close" class="icon" aria-label="Close folders">×</button></div><div id="folder-tree"></div><div class="folder-actions"><button id="folders-none">Deselect all</button><button id="folders-all">Select all</button></div></div></dialog>
   <dialog id="details" aria-labelledby="details-title"></dialog>
   <dialog id="problems-dialog" aria-labelledby="problems-title"></dialog>
+  <dialog id="offline-dialog" aria-labelledby="offline-title"></dialog>
   <dialog id="remove-workspace-dialog" aria-labelledby="remove-workspace-title"></dialog>
 
   <script src="/app.js"></script>

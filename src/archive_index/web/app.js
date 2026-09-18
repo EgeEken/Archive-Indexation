@@ -331,7 +331,7 @@ function renderSetupPlanData(plan) {
 function renderSetupPlan() {
   const configuration = state.setup.draftConfiguration;
   const request = ++state.setup.planRequest;
-  fetch("/api/workspaces/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: state.setup.path, analysis: state.setup.analysis, configuration: state.setup.draftConfiguration }) })
+  return fetch("/api/workspaces/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: state.setup.path, analysis: state.setup.analysis, configuration: state.setup.draftConfiguration }) })
     .then(async (response) => {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not plan workspace");
@@ -817,7 +817,7 @@ function closeDialog(dialog) {
     $("viewer-toast-region").replaceChildren();
   }
   if (dialog.open) dialog.close();
-  if (!["viewer", "details", "problems-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
+  if (!["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
 }
 
 function bindBackdropClose(dialog) {
@@ -1165,6 +1165,39 @@ async function showProblems() {
   }
 }
 
+async function showOfflineCleanup() {
+  try {
+    const data = await api("/api/offline-media");
+    if (!data.count) {
+      showToast("There is no offline media to forget.");
+      return;
+    }
+    const noun = data.count === 1 ? "entry" : "entries";
+    $("offline-dialog").innerHTML = `<div class="dialog-inner removal-dialog"><div class="dialog-header"><h2 id="offline-title">Forget ${data.count} offline media ${noun}?</h2><button id="offline-close" class="icon" type="button" aria-label="Close">×</button></div><p>${data.images} image${data.images === 1 ? "" : "s"} · ${data.videos} video${data.videos === 1 ? "" : "s"}</p><p class="muted">This does not delete files from disk.</p><div class="removal-actions"><button id="offline-cancel" class="secondary" type="button">Cancel</button><button id="offline-forget" class="danger-button" type="button">Forget</button></div></div>`;
+    const dialog = $("offline-dialog");
+    dialog.showModal();
+    document.body.classList.add("modal-open");
+    $("offline-close").addEventListener("click", () => closeDialog(dialog));
+    $("offline-cancel").addEventListener("click", () => closeDialog(dialog));
+    $("offline-forget").addEventListener("click", forgetOfflineMedia);
+  } catch (error) {
+    showToast(`Offline media request failed: ${error.message}`);
+  }
+}
+
+async function forgetOfflineMedia() {
+  try {
+    const result = await api("/api/offline-media/forget", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    closeDialog($("offline-dialog"));
+    state.renderKeys = {};
+    await renderSetupPlan();
+    await loadProblemsBadge();
+    showToast(`${result.removed} offline media ${result.removed === 1 ? "entry" : "entries"} forgotten.`);
+  } catch (error) {
+    showToast(`Offline media cleanup failed: ${error.message}`);
+  }
+}
+
 async function startIndex() {
   try { await api("/api/index", { method: "POST" }); $("status").textContent = ""; await loadJobs(); }
   catch (error) { showToast(`Index request failed: ${error.message}`); }
@@ -1372,6 +1405,7 @@ $("setup-cancel").addEventListener("click", cancelSetup);
 $("setup-apply").addEventListener("click", applySetup);
 $("index").addEventListener("click", () => state.setup ? applySetup() : startIndex());
 $("problems-button").addEventListener("click", showProblems);
+$("forget-offline-button").addEventListener("click", showOfflineCleanup);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
 $("cloud-view-toggle").onclick = () => setViewMode("cloud");
 $("viewer-similar").onclick = () => state.similar ? closeSimilar() : showSimilar(state.viewerItems[state.viewerIndex].asset_id);
@@ -1425,11 +1459,11 @@ $("viewer-media-pane").addEventListener("pointerdown", (event) => {
 });
 $("viewer-media-pane").addEventListener("pointermove", (event) => { if (!state.dragging) return; state.viewerPanX = state.dragPanX + event.clientX - state.dragStartX; state.viewerPanY = state.dragPanY + event.clientY - state.dragStartY; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
 ["pointerup", "pointercancel"].forEach((eventName) => $("viewer-media-pane").addEventListener(eventName, (event) => { if (!state.dragging) return; state.dragging = false; state.viewerClickSuppressed = true; setTimeout(() => { state.viewerClickSuppressed = false; }, 0); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); }));
-["viewer", "details", "problems-dialog", "remove-workspace-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "problems-dialog", "remove-workspace-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
-["viewer", "details", "problems-dialog", "remove-workspace-dialog"].forEach((id) => bindBackdropClose($(id)));
+["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
+["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => bindBackdropClose($(id)));
 window.addEventListener("resize", () => applyViewerTransform($("viewer-media").querySelector("img.viewer-media")));
 document.addEventListener("keydown", (event) => {
-  if ($("details").open || $("problems-dialog").open || $("remove-workspace-dialog").open || ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
+  if ($("details").open || $("problems-dialog").open || $("offline-dialog").open || $("remove-workspace-dialog").open || ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
   const key = event.key.toLowerCase();
   if ($("viewer").open) {
     if ({ s: "selected", r: "rejected", u: "undecided" }[key]) { event.preventDefault(); const item = state.viewerItems[state.viewerIndex]; if (item) setDecision(item.asset_id, { s: "selected", r: "rejected", u: "undecided" }[key]); return; }

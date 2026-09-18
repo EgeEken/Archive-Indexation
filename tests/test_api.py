@@ -55,6 +55,41 @@ class ApiTests(unittest.TestCase):
         self.thread.join(timeout=5)
         self.temporary_directory.cleanup()
 
+    def _mark_offline(self, *relative_paths: str) -> None:
+        with self.workspace.transaction() as connection:
+            for relative_path in relative_paths:
+                connection.execute(
+                    "UPDATE physical_file SET is_online = 0 WHERE relative_path = ?",
+                    (relative_path,),
+                )
+
+    def _add_offline_error(self, relative_path: str) -> str:
+        with self.workspace.transaction() as connection:
+            physical_id = connection.execute(
+                "SELECT id FROM physical_file WHERE relative_path = ?", (relative_path,)
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO job_error(job_id, physical_file_id, error_type, message, created_at) VALUES (NULL, ?, 'visual_features', 'decoder failed', '2026-01-01T00:00:00+00:00')",
+                (physical_id,),
+            )
+        return physical_id
+
+    def _pair_raw_with_jpeg(self) -> None:
+        (self.workspace.root / "paired.ARW").write_bytes(b"raw")
+        scan(self.workspace)
+        with self.workspace.transaction() as connection:
+            jpeg_asset_id = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()[0]
+            raw = connection.execute(
+                "SELECT id, logical_asset_id FROM physical_file WHERE relative_path = 'paired.ARW'"
+            ).fetchone()
+            connection.execute(
+                "UPDATE physical_file SET logical_asset_id = ? WHERE id = ?",
+                (jpeg_asset_id, raw["id"]),
+            )
+            connection.execute("DELETE FROM logical_asset WHERE id = ?", (raw["logical_asset_id"],))
+
     def test_explicit_model_install_does_not_index(self):
         body = json.dumps({"provider": "openclip-b16-datacomp-xl"}).encode()
         with patch("archive_index.embeddings.models.install_model") as install, patch.object(self.server, "start_indexing") as indexing:
@@ -63,6 +98,79 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
             install.assert_called_once_with("openclip-b16-datacomp-xl")
             indexing.assert_not_called()
+
+    def test_forget_offline_media_removes_an_offline_asset_and_diagnostics(self):
+        self._mark_offline("root.jpg")
+        physical_id = self._add_offline_error("root.jpg")
+        original = (self.workspace.root / "root.jpg").read_bytes()
+        with patch.object(Path, "is_file", return_value=False), patch.object(Path, "unlink", side_effect=AssertionError("original deleted")):
+            result = self.server.forget_offline_media(self.server.default_handle)
+        self.assertEqual(result, {"removed": 1, "images": 1, "videos": 0, "count": 1})
+        with closing(self.workspace.connect()) as connection:
+            self.assertIsNone(connection.execute("SELECT 1 FROM physical_file WHERE relative_path = 'root.jpg'").fetchone())
+            self.assertIsNone(connection.execute("SELECT 1 FROM logical_asset WHERE id NOT IN (SELECT logical_asset_id FROM physical_file)").fetchone())
+            self.assertIsNone(connection.execute("SELECT 1 FROM job_error WHERE physical_file_id = ?", (physical_id,)).fetchone())
+        self.assertEqual((self.workspace.root / "root.jpg").read_bytes(), original)
+
+    def test_forget_offline_media_keeps_logical_asset_for_online_pair(self):
+        self._pair_raw_with_jpeg()
+        self._mark_offline("paired.ARW")
+        with patch.object(Path, "is_file", return_value=False):
+            result = self.server.forget_offline_media(self.server.default_handle)
+        self.assertEqual(result["removed"], 1)
+        with closing(self.workspace.connect()) as connection:
+            row = connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path = 'root.jpg'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertIsNone(connection.execute("SELECT 1 FROM physical_file WHERE relative_path = 'paired.ARW'").fetchone())
+            self.assertIsNotNone(connection.execute("SELECT 1 FROM logical_asset WHERE id = ?", (row[0],)).fetchone())
+
+    def test_forget_offline_media_removes_fully_offline_pair(self):
+        self._pair_raw_with_jpeg()
+        self._mark_offline("root.jpg", "paired.ARW")
+        with patch.object(Path, "is_file", return_value=False):
+            result = self.server.forget_offline_media(self.server.default_handle)
+        self.assertEqual(result, {"removed": 2, "images": 2, "videos": 0, "count": 2})
+        with closing(self.workspace.connect()) as connection:
+            self.assertIsNone(connection.execute("SELECT 1 FROM physical_file WHERE relative_path IN ('root.jpg', 'paired.ARW')").fetchone())
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM logical_asset WHERE id NOT IN (SELECT logical_asset_id FROM physical_file)").fetchone()[0], 0)
+
+    def test_forget_offline_media_never_removes_online_files(self):
+        self._mark_offline("root.jpg")
+        original = (self.workspace.root / "nested" / "nested.jpg").read_bytes()
+        with patch.object(Path, "is_file", return_value=False), patch.object(Path, "unlink", side_effect=AssertionError("original deleted")):
+            self.server.forget_offline_media(self.server.default_handle)
+        self.assertTrue((self.workspace.root / "nested" / "nested.jpg").is_file())
+        self.assertEqual((self.workspace.root / "nested" / "nested.jpg").read_bytes(), original)
+        with closing(self.workspace.connect()) as connection:
+            self.assertIsNotNone(connection.execute("SELECT 1 FROM physical_file WHERE relative_path = 'nested/nested.jpg' AND is_online = 1").fetchone())
+
+    def test_forget_offline_media_refuses_unavailable_root(self):
+        self._mark_offline("root.jpg")
+        with patch("archive_index.api.server.os.access", return_value=False):
+            with self.assertRaises(ValueError):
+                self.server.forget_offline_media(self.server.default_handle)
+
+    def test_offline_media_info_rechecks_a_reconnected_file(self):
+        self._mark_offline("root.jpg")
+        result = self.server.offline_media_info(self.server.default_handle)
+        self.assertEqual(result, {"images": 0, "videos": 0, "count": 0})
+        with closing(self.workspace.connect()) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT is_online FROM physical_file WHERE relative_path = 'root.jpg'"
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_forget_offline_media_invalidates_browser_catalog(self):
+        before = _get_json(self.base_url, "/api/browser")[1]
+        self._mark_offline("root.jpg")
+        with patch.object(Path, "is_file", return_value=False):
+            self.server.forget_offline_media(self.server.default_handle)
+        after = _get_json(self.base_url, "/api/browser")[1]
+        self.assertEqual((before["total"], after["total"]), (3, 2))
 
     def test_home_summary_filters_and_pagination(self) -> None:
         status, home = _get_json(self.base_url, "/api/workspace")

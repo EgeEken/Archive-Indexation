@@ -216,6 +216,7 @@
 .setup-section > h2 { margin-bottom: .45rem; }
 .setup-section > p { max-width: 70rem; font-size: .85rem; }
 .setup-diagnostics { margin: 2rem 0 .5rem; padding-top: 1rem; border-top: 1px solid #39444f; }
+.setup-maintenance-actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
 .setup-control-heading { display:flex; justify-content:space-between; align-items:center; gap:1rem; }
 .setup-control-heading label { display:inline-flex; align-items:center; gap:.55rem; min-width:0; padding:.2rem .1rem; color:inherit; font-size:inherit; line-height:1.25; cursor:pointer; }
 .setup-control-heading label:focus-within { outline:2px solid #9bb8d2; outline-offset:2px; border-radius:.25rem; }

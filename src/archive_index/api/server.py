@@ -89,6 +89,10 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
             for thread in alive:
                 thread.join(timeout=min(0.25, remaining))
 
+    def server_close(self) -> None:
+        self.stop_background_jobs()
+        super().server_close()
+
     def _register_workspace(self, workspace: Workspace) -> str:
         handle = workspace_id(workspace)
         self._workspaces[handle] = workspace
@@ -133,6 +137,72 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
                 entries.append({"id": handle, "name": Path(path).name, "path": path, "available": False})
             seen.add(handle)
         return entries
+
+    def offline_media_info(self, handle: str) -> dict[str, int]:
+        _, workspace = self.resolve_workspace(handle)
+        _require_workspace_root(workspace)
+        connection = workspace.connect()
+        try:
+            with connection:
+                rows = _offline_media_candidates(workspace, connection)
+        finally:
+            connection.close()
+        return _offline_media_counts(rows)
+
+    def forget_offline_media(self, handle: str) -> dict[str, int]:
+        _, workspace = self.resolve_workspace(handle)
+        _require_workspace_root(workspace)
+        with self._active_lock:
+            thread = self._active_threads.get(handle)
+        if thread is not None and thread.is_alive():
+            raise InvalidRequest("offline media cannot be forgotten while a job is running")
+        if _active_job(workspace) is not None:
+            raise InvalidRequest("offline media cannot be forgotten while a job is running")
+        connection = workspace.connect()
+        try:
+            with connection:
+                rows = _offline_media_candidates(workspace, connection)
+                counts = _offline_media_counts(rows)
+                if not rows:
+                    return {"removed": 0, **counts}
+                connection.execute(
+                    "CREATE TEMP TABLE offline_cleanup_assets (id TEXT PRIMARY KEY)"
+                )
+                connection.execute(
+                    "INSERT INTO offline_cleanup_assets SELECT DISTINCT logical_asset_id FROM physical_file WHERE is_online = 0"
+                )
+                connection.execute(
+                    "DELETE FROM job_error WHERE physical_file_id IN (SELECT id FROM physical_file WHERE is_online = 0)"
+                )
+                connection.execute(
+                    "DELETE FROM reconciliation_conflict WHERE left_logical_asset_id IN (SELECT id FROM offline_cleanup_assets) OR right_logical_asset_id IN (SELECT id FROM offline_cleanup_assets)"
+                )
+                connection.execute(
+                    "DELETE FROM physical_file WHERE is_online = 0"
+                )
+                connection.execute(
+                    "DELETE FROM logical_asset WHERE id IN (SELECT id FROM offline_cleanup_assets) AND NOT EXISTS (SELECT 1 FROM physical_file WHERE physical_file.logical_asset_id = logical_asset.id)"
+                )
+                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                connection.execute(
+                    "UPDATE workspace_grouping SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                    (now,),
+                )
+                connection.execute(
+                    "UPDATE workspace_recommendation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                    (now,),
+                )
+                connection.execute(
+                    "UPDATE workspace_reconciliation SET active_run_id = NULL, updated_at = ? WHERE id = 1",
+                    (now,),
+                )
+                connection.execute(
+                    "UPDATE workspace_embedding SET active_provider = NULL, active_run_id = NULL, updated_at = ? WHERE id = 1",
+                    (now,),
+                )
+        finally:
+            connection.close()
+        return {"removed": len(rows), **counts}
 
     def open_workspace(self, path: str, create: bool = False) -> dict[str, object]:
         if not isinstance(path, str) or not path.strip():
@@ -763,6 +833,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"jobs": _jobs(workspace, query), "revision": _browser_revision(workspace)})
             elif request.path == "/api/problems":
                 self._send_json(200, {"problems": _problems(workspace, query)})
+            elif request.path == "/api/offline-media":
+                self._send_json(200, self.server.offline_media_info(handle))
             elif request.path == "/api/groups":
                 self._send_json(200, _groups(workspace, query, handle))
             elif request.path == "/api/groups/locate":
@@ -901,6 +973,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(409, {"error": "indexing is already running"})
                 else:
                     self._send_json(202, {"job_id": job_id})
+                return
+            if request.path == "/api/offline-media/forget":
+                self._send_json(200, self.server.forget_offline_media(handle))
                 return
             if request.path == "/api/groups/rebuild":
                 job_id = self.server.start_group_rebuild(handle)
@@ -1339,6 +1414,40 @@ def _active_job(workspace: Workspace) -> dict[str, object] | None:
     finally:
         connection.close()
     return dict(row) if row is not None else None
+
+
+def _require_workspace_root(workspace: Workspace) -> None:
+    if not workspace.root.is_dir() or not os.access(workspace.root, os.R_OK):
+        raise InvalidRequest("the workspace root is unavailable or unreadable")
+
+
+def _offline_media_candidates(workspace: Workspace, connection) -> list[sqlite3.Row]:
+    rows = connection.execute(
+        "SELECT id, logical_asset_id, media_type, relative_path FROM physical_file WHERE is_online = 0"
+    ).fetchall()
+    reconnected = []
+    for row in rows:
+        try:
+            if workspace.absolute_path(row["relative_path"]).is_file():
+                reconnected.append(row["id"])
+        except (OSError, WorkspaceError, ValueError):
+            continue
+    if reconnected:
+        placeholders = ",".join("?" for _ in reconnected)
+        connection.execute(
+            f"UPDATE physical_file SET is_online = 1, updated_at = ? WHERE id IN ({placeholders})",
+            [datetime.now(timezone.utc).isoformat(timespec="seconds"), *reconnected],
+        )
+    reconnected_ids = set(reconnected)
+    return [row for row in rows if row["id"] not in reconnected_ids]
+
+
+def _offline_media_counts(rows) -> dict[str, int]:
+    return {
+        "images": sum(row["media_type"] == "image" for row in rows),
+        "videos": sum(row["media_type"] == "video" for row in rows),
+        "count": len(rows),
+    }
 
 
 def _index_size_bytes(path: Path) -> int:
