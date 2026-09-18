@@ -21,3 +21,15 @@ Measured on 2026-09-18 with the repository environment, temporary local SQLite w
 | 100,000 | 505.68 s | 1.48 s | 2.14 s | 1.50 s | 1.47 s | 4.76 s | 4.66 s | 530.8 MB | 589.3 MB |
 
 The cold browser request includes full catalog construction and hydration. The warm and filtered/sorted requests reuse the current catalog but still perform the current query/filter work. The repeated semantic query has no embedding matrix cache in this baseline, so it remains close to cold hydration time. The 100k run used about 100 MB of raw fp16 vector storage before Python/SQLite overhead.
+
+## After browser/catalog scaling unit
+
+The logical browser generation and one-pass catalog hydration changed only browser construction and invalidation. Semantic ranking is unchanged until the embedding-matrix unit.
+
+| Logical assets | Browser cold | Browser warm | Folder filter | Filename sort | Quality sort | Browser peak traced |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 1.57 s | 0.17 s | 0.22 s | 0.21 s | 0.26 s | 53.3 MB |
+| 50,000 | 10.44 s | 1.02 s | 1.43 s | 1.16 s | 1.23 s | 265.5 MB |
+| 100,000 | 20.19 s | 1.64 s | 2.29 s | 1.62 s | 1.91 s | 530.8 MB |
+
+The 100k cold browser request fell from 505.68 s to 20.19 s under the same allocation-tracing conditions. The remaining cold cost is the bounded in-memory catalog itself; later requests reuse it until the browser-visible generation changes.

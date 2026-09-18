@@ -1762,44 +1762,12 @@ def _browser_revision(workspace):
 def _browser_catalog_revision(workspace):
     connection = workspace.connect()
     try:
-        physical = connection.execute(
-            "SELECT COUNT(*), MAX(updated_at) FROM physical_file"
-        ).fetchone()
-        logical = connection.execute(
-            "SELECT COUNT(*), MAX(updated_at) FROM logical_asset"
-        ).fetchone()
-        components = connection.execute(
-            """SELECT COUNT(*),
-                      COALESCE(SUM(status = 'complete'), 0),
-                      COALESCE(SUM(status = 'pending'), 0),
-                      COALESCE(SUM(status = 'running'), 0),
-                      COALESCE(SUM(status = 'failed'), 0),
-                      COALESCE(SUM(status = 'unsupported'), 0),
-                      MAX(started_at), MAX(completed_at)
-                   FROM component_state"""
-        ).fetchone()
-        config = connection.execute(
-            """SELECT include_rendered_images, include_raw, include_videos,
-                      image_extensions_json, video_extensions_json,
-                      rendered_quality_provider, raw_quality_provider,
-                      video_quality_enabled, semantic_search_enabled, embedding_provider
-                   FROM workspace_config WHERE id = 1"""
-        ).fetchone()
-        folder_rules = connection.execute(
-            "SELECT GROUP_CONCAT(path || ':' || included, '|') FROM folder_scope_rule"
+        generation = connection.execute(
+            "SELECT generation FROM browser_revision WHERE id = 1"
         ).fetchone()[0]
-        runs = connection.execute(
-            """SELECT
-                      (SELECT active_run_id FROM workspace_grouping WHERE id = 1),
-                      (SELECT updated_at FROM workspace_grouping WHERE id = 1),
-                      (SELECT active_run_id FROM workspace_recommendation WHERE id = 1),
-                      (SELECT updated_at FROM workspace_recommendation WHERE id = 1),
-                      (SELECT active_run_id FROM workspace_reconciliation WHERE id = 1),
-                      (SELECT updated_at FROM workspace_reconciliation WHERE id = 1)"""
-        ).fetchone()
     finally:
         connection.close()
-    return (tuple(_browser_revision(workspace)), tuple(physical) + tuple(logical) + tuple(components) + (folder_rules,) + tuple(config or ()) + tuple(runs or ()))
+    return generation
 
 
 _browser_cache = {}
@@ -1837,6 +1805,75 @@ def _search_status(workspace):
     return {"state": state, "message": message, "provider": label}
 
 
+def _browser_catalog(workspace, handle):
+    representative_ids, grouping_available = _current_representatives(workspace)
+    recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+    connection = workspace.connect()
+    try:
+        rows = connection.execute(
+            """
+            SELECT la.*,
+                   (SELECT MAX(pf_quality.quality_score) FROM physical_file AS pf_quality
+                    WHERE pf_quality.logical_asset_id = la.id AND pf_quality.in_scope = 1
+                      AND (pf_quality.media_type != 'image' OR pf_quality.extension NOT IN ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.raf', '.rw2')
+                           OR NOT EXISTS (SELECT 1 FROM physical_file AS pf_rendered
+                                          WHERE pf_rendered.logical_asset_id = la.id AND pf_rendered.in_scope = 1
+                                            AND pf_rendered.media_type = 'image'
+                                            AND pf_rendered.extension NOT IN ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.raf', '.rw2')))) AS quality_score,
+                   (SELECT MIN(LOWER(pf_sort.filename)) FROM physical_file AS pf_sort
+                    WHERE pf_sort.logical_asset_id = la.id AND pf_sort.in_scope = 1) AS filename_sort
+            FROM logical_asset AS la
+            WHERE EXISTS (
+                SELECT 1 FROM physical_file AS pf_scope
+                WHERE pf_scope.logical_asset_id = la.id AND pf_scope.in_scope = 1
+            )
+            ORDER BY CASE WHEN la.capture_time IS NULL THEN 1 ELSE 0 END,
+                     la.capture_time DESC, la.id
+            """
+        ).fetchall()
+        physical_rows = connection.execute(
+            """
+            SELECT pf.*,
+                   metadata.status AS metadata_status, metadata.algorithm AS metadata_algorithm,
+                   metadata.version AS metadata_version, metadata.error_message AS metadata_error,
+                   thumbnail.status AS thumbnail_status, thumbnail.algorithm AS thumbnail_algorithm,
+                   thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
+                   thumbnail.output_path AS thumbnail_output_path,
+                   quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
+                   quality.version AS quality_component_version, quality.error_message AS quality_component_error
+            FROM physical_file AS pf
+            JOIN logical_asset AS la ON la.id = pf.logical_asset_id
+            LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
+            LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
+            LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
+            WHERE EXISTS (
+                SELECT 1 FROM physical_file AS pf_scope
+                WHERE pf_scope.logical_asset_id = la.id AND pf_scope.in_scope = 1
+            )
+            ORDER BY pf.logical_asset_id, pf.is_online DESC, pf.relative_path
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    physical_by_asset = {}
+    for row in physical_rows:
+        physical_by_asset.setdefault(row["logical_asset_id"], []).append(row)
+    group_by_asset = _current_group_ids(workspace, [row["id"] for row in rows])
+    return [
+        _asset_summary(
+            workspace,
+            row,
+            handle,
+            physical_by_asset.get(row["id"], []),
+            row["id"] in representative_ids,
+            row["id"] in recommendation_ids,
+            recommendation_run_id,
+            group_by_asset.get(row["id"]),
+        )
+        for row in rows
+    ], grouping_available
+
+
 def _browser_assets(workspace, query, handle):
     started = time.perf_counter()
     offset = int(_first(query, "offset", "0"))
@@ -1857,20 +1894,17 @@ def _browser_assets(workspace, query, handle):
     if cached is not None and _first(query, "auto", "all") == "recommended":
         cached = None
     if cached is None:
-        base_query = {"page_size": ["180"], "sort_by": ["capture_time"], "direction": ["desc"]}
         catalog_key = (str(workspace.root), handle, catalog_revision)
         with _browser_lock:
             catalog = _browser_catalogs.get(catalog_key)
         items = [] if catalog is None else list(catalog)
-        page = 1
         while catalog is None:
-            base_query["page"] = [str(page)]
-            batch = _assets(workspace, base_query, handle)
-            items.extend(batch["items"])
-            if not batch["has_next"]:
-                break
-            page += 1
+            items, _ = _browser_catalog(workspace, handle)
+            catalog = items
         with _browser_lock:
+            for old_key in list(_browser_catalogs):
+                if old_key[:2] == catalog_key[:2] and old_key != catalog_key:
+                    del _browser_catalogs[old_key]
             _browser_catalogs[catalog_key] = items
             while len(_browser_catalogs) > 4:
                 del _browser_catalogs[next(iter(_browser_catalogs))]
@@ -2454,18 +2488,21 @@ def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
 def _current_group_ids(workspace: Workspace, asset_ids: list[str]) -> dict[str, str]:
     if not asset_ids:
         return {}
-    placeholders = ",".join("?" for _ in asset_ids)
     connection = workspace.connect()
     try:
-        rows = connection.execute(
-            f"""
-            SELECT sgm.logical_asset_id, sgm.group_id
-            FROM workspace_grouping AS wg
-            JOIN strict_group_member AS sgm ON sgm.run_id = wg.active_run_id
-            WHERE wg.id = 1 AND sgm.logical_asset_id IN ({placeholders})
-            """,
-            asset_ids,
-        ).fetchall()
+        rows = []
+        for start in range(0, len(asset_ids), 800):
+            chunk = asset_ids[start : start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows.extend(connection.execute(
+                f"""
+                SELECT sgm.logical_asset_id, sgm.group_id
+                FROM workspace_grouping AS wg
+                JOIN strict_group_member AS sgm ON sgm.run_id = wg.active_run_id
+                WHERE wg.id = 1 AND sgm.logical_asset_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall())
     finally:
         connection.close()
     return {row["logical_asset_id"]: row["group_id"] for row in rows}

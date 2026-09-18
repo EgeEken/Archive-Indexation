@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -444,6 +444,107 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     21: (
         "ALTER TABLE job ADD COLUMN timing_json TEXT",
+    ),
+    22: (
+        """
+        CREATE TABLE IF NOT EXISTS browser_revision (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generation INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "INSERT OR IGNORE INTO browser_revision(id, generation) VALUES (1, 0)",
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_logical_insert AFTER INSERT ON logical_asset
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_logical_update AFTER UPDATE ON logical_asset
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_logical_delete AFTER DELETE ON logical_asset
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_physical_insert AFTER INSERT ON physical_file
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_physical_update AFTER UPDATE ON physical_file
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_physical_delete AFTER DELETE ON physical_file
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_component_insert AFTER INSERT ON component_state
+        WHEN NEW.component IN ('metadata', 'thumbnail', 'quality', 'raw_quality', 'video_quality')
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_component_update AFTER UPDATE ON component_state
+        WHEN NEW.component IN ('metadata', 'thumbnail', 'quality', 'raw_quality', 'video_quality')
+          OR OLD.component IN ('metadata', 'thumbnail', 'quality', 'raw_quality', 'video_quality')
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_component_delete AFTER DELETE ON component_state
+        WHEN OLD.component IN ('metadata', 'thumbnail', 'quality', 'raw_quality', 'video_quality')
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_config_update AFTER UPDATE ON workspace_config
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_folder_insert AFTER INSERT ON folder_scope_rule
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_folder_update AFTER UPDATE ON folder_scope_rule
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_folder_delete AFTER DELETE ON folder_scope_rule
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_group_member_insert AFTER INSERT ON strict_group_member
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_group_member_update AFTER UPDATE ON strict_group_member
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_group_member_delete AFTER DELETE ON strict_group_member
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_grouping_update AFTER UPDATE ON workspace_grouping
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_recommendation_insert AFTER INSERT ON asset_recommendation
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_recommendation_update AFTER UPDATE ON asset_recommendation
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_recommendation_delete AFTER DELETE ON asset_recommendation
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_workspace_recommendation_update AFTER UPDATE ON workspace_recommendation
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS browser_revision_embedding_workspace_update AFTER UPDATE ON workspace_embedding
+        BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
     ),
 }
 

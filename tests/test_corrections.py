@@ -157,11 +157,36 @@ class CorrectionTests(unittest.TestCase):
         self.assertEqual(data["total"],1)
 
     def test_cached_group_locate_reuses_catalog(self):
-        with patch("archive_index.api.server._assets", wraps=server._assets) as summaries:
+        with patch("archive_index.api.server._browser_catalog", wraps=server._browser_catalog) as catalogs:
             self.browser(q="file",semantic=0)
-            count=summaries.call_count
+            count=catalogs.call_count
             self.browser(q="file",semantic=0,view="groups",group_id="target")
-            self.assertEqual(summaries.call_count,count)
+            self.assertEqual(catalogs.call_count,count)
+
+    def test_job_progress_does_not_invalidate_browser_catalog(self):
+        with patch("archive_index.api.server._browser_catalog", wraps=server._browser_catalog) as summaries:
+            self.browser(semantic=0)
+            count = summaries.call_count
+            with self.workspace.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO job(id, kind, status, total_items, created_at, updated_at) VALUES ('progress-job', 'index', 'running', 3, 'now', 'now')"
+                )
+                connection.execute(
+                    "UPDATE job SET completed_items = 1, updated_at = 'later' WHERE id = 'progress-job'"
+                )
+            self.browser(semantic=0)
+            self.assertEqual(summaries.call_count, count)
+
+    def test_browser_visible_mutation_invalidates_catalog(self):
+        with patch("archive_index.api.server._browser_catalog", wraps=server._browser_catalog) as summaries:
+            self.browser(semantic=0)
+            count = summaries.call_count
+            with self.workspace.transaction() as connection:
+                connection.execute(
+                    "UPDATE physical_file SET filename = 'renamed.jpg' WHERE filename = 'filename.jpg'"
+                )
+            self.browser(semantic=0)
+            self.assertGreater(summaries.call_count, count)
 
     def test_install_compatible_and_stale_embeddings_never_indexes(self):
         provider=self.enable_embeddings()
