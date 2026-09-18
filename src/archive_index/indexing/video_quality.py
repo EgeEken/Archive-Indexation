@@ -28,6 +28,7 @@ from ..media.quality_provider import (
     create_quality_provider,
 )
 from ..workspace import Workspace
+from ..timing import TimingRecorder
 
 VIDEO_SAMPLER_ALGORITHM = "ffmpeg-uniform-bin-center"
 VIDEO_SAMPLER_VERSION = "3"
@@ -109,7 +110,7 @@ def extract_video_frames(
     source: Path,
     timestamps: list[float],
     cancel_event: Event | None = None,
-    timings: dict[str, float] | None = None,
+    timings: TimingRecorder | None = None,
     seek_per_frame: bool = False,
     progress=None,
 ) -> list[ExtractedVideoFrame]:
@@ -171,7 +172,7 @@ def extract_video_frames(
                         _stop_process(process)
                         raise MetadataExtractionError(f"video frame extraction timed out: {source}")
             if timings is not None:
-                timings["ffmpeg"] = timings.get("ffmpeg", 0.0) + monotonic() - extraction_start
+                timings.add("video.ffmpeg", monotonic() - extraction_start)
         finally:
             if process.poll() is None:
                 _stop_process(process)
@@ -196,7 +197,7 @@ def extract_video_frames(
                     frame.image.close()
                 raise MetadataExtractionError(f"ffmpeg returned an invalid video frame: {source}") from error
         if timings is not None:
-            timings["png_decode"] = timings.get("png_decode", 0.0) + monotonic() - decode_start
+            timings.add("video.png_decode", monotonic() - decode_start)
         if progress:
             progress(len(frames), len(timestamps))
         return frames
@@ -216,7 +217,7 @@ def _extract_video_frame_seek(
     source: Path,
     timestamp: float,
     cancel_event: Event | None,
-    timings: dict[str, float] | None,
+    timings: TimingRecorder | None,
 ) -> ExtractedVideoFrame:
     command = [
         "ffmpeg", "-y", "-v", "info", "-nostats", "-ss", f"{timestamp:.9f}", "-i", str(source),
@@ -245,7 +246,7 @@ def _extract_video_frame_seek(
                     _stop_process(process)
                     raise MetadataExtractionError(f"video frame extraction timed out: {source}")
         if timings is not None:
-            timings["ffmpeg"] = timings.get("ffmpeg", 0.0) + monotonic() - started
+            timings.add("video.ffmpeg", monotonic() - started)
     finally:
         if process.poll() is None:
             _stop_process(process)
@@ -259,7 +260,7 @@ def _extract_video_frame_seek(
     except (UnidentifiedImageError, OSError, ValueError) as error:
         raise MetadataExtractionError(f"ffmpeg returned an invalid video frame: {source}") from error
     if timings is not None:
-        timings["png_decode"] = timings.get("png_decode", 0.0) + monotonic() - decode_started
+        timings.add("video.png_decode", monotonic() - decode_started)
     return ExtractedVideoFrame(None, frame)
 
 
@@ -296,7 +297,7 @@ def index_video_quality(
     progress: Callable[[JobProgress], None] | None = None,
     quality_provider: str | QualityProvider | None = None,
     quality_batch_size: int | None = None,
-    timings: dict[str, float] | None = None,
+    timings: TimingRecorder | None = None,
 ) -> JobRunResult:
     configuration = workspace.configuration()
     provider = create_quality_provider(
@@ -438,7 +439,7 @@ def prepare_shared_video_quality(
     *,
     job_id: str,
     cancel_event: Event | None = None,
-    timings: dict[str, float] | None = None,
+    timings: TimingRecorder | None = None,
     quality_provider=None,
 ):
     configuration = workspace.configuration()
@@ -669,7 +670,7 @@ def _process_video(
                     extract_kwargs["timings"] = timings
                 extracted = extract_video_frames(*extract_args, **extract_kwargs)
                 if timings is not None:
-                    timings["extraction_total"] = timings.get("extraction_total", 0.0) + perf_counter() - extraction_start
+                    timings.add("video.extraction_total", perf_counter() - extraction_start)
             except VideoExtractionCancelled:
                 _mark_cancelled(workspace, row["id"], run["id"])
                 return "cancelled"
@@ -763,9 +764,9 @@ def _score_batch(workspace, run_id, samples, frames, provider, timings=None) -> 
             except Exception as error:
                 results.append(error)
     if timings is not None:
-        timings["quality_score"] = timings.get("quality_score", 0.0) + perf_counter() - score_start
+        timings.add("video.quality_score", perf_counter() - score_start)
         for name, total in getattr(provider, "last_timings", {}).items():
-            timings[name] = timings.get(name, 0.0) + total - provider_timings_before.get(name, 0.0)
+            timings.add(name, total - provider_timings_before.get(name, 0.0))
     persist_start = perf_counter()
     for sample, result in zip(samples, results):
         if isinstance(result, BaseException):
@@ -778,7 +779,7 @@ def _score_batch(workspace, run_id, samples, frames, provider, timings=None) -> 
     for frame in frames:
         frame.close()
     if timings is not None:
-        timings["sample_persistence"] = timings.get("sample_persistence", 0.0) + perf_counter() - persist_start
+        timings.add("video.sample_persistence", perf_counter() - persist_start)
 
 
 def _get_or_create_run(workspace, row, algorithm, version, settings_json, input_fingerprint, duration, count):
@@ -789,7 +790,7 @@ def _get_or_create_run(workspace, row, algorithm, version, settings_json, input_
             SELECT * FROM video_sample_run
             WHERE physical_file_id = ? AND sampler_algorithm = ? AND sampler_version = ?
               AND input_fingerprint = ? AND requested_count = ?
-              AND status IN ('running', 'cancelled', 'complete', 'partial', 'sampling_only')
+              AND status IN ('running', 'cancelled', 'failed', 'complete', 'partial', 'sampling_only')
             ORDER BY CASE WHEN settings_json = ? THEN 0 ELSE 1 END, created_at DESC LIMIT 1
             """,
             (row["id"], VIDEO_SAMPLER_ALGORITHM, VIDEO_SAMPLER_VERSION, input_fingerprint, count, settings_json),

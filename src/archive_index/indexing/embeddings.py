@@ -19,7 +19,7 @@ from ..embeddings.providers import EmbeddingProvider, create_embedding_provider
 from ..embeddings.runtime import embedding_runtime
 from ..embeddings.vector import vector_to_blob
 from ..indexing.representations import preferred_physical
-from ..jobs.engine import report_substage, JobProgress, JobRunResult, JobStore
+from ..jobs.engine import SUBSTAGE_CONTEXT, report_substage, JobProgress, JobRunResult, JobStore
 from ..media.metadata import UnsupportedDecoderError
 from ..media.raw_preview import extract_embedded_preview
 from ..media_types import is_raw_extension, is_rendered_image_extension
@@ -179,11 +179,17 @@ def index_embeddings(
             _finish_run(workspace, run["id"], "cancelled")
             store.cancel(identifier, processed, errors, skipped)
             return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
-        for source in [item for item in pending if item["source_kind"] == "video"]:
+        video_sources = [item for item in pending if item["source_kind"] == "video"]
+        for video_index, source in enumerate(video_sources):
             if _cancelled(cancel_event):
+                SUBSTAGE_CONTEXT.pop(identifier, None)
                 _finish_run(workspace, run["id"], "cancelled")
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
+            SUBSTAGE_CONTEXT[identifier] = {
+                "completed": video_index + 1,
+                "total": len(video_sources),
+            }
             try:
                 _process_video(
                     workspace,
@@ -199,6 +205,7 @@ def index_embeddings(
                     video_frame_consumer,
                 )
             except EmbeddingCancelled:
+                SUBSTAGE_CONTEXT.pop(identifier, None)
                 _finish_run(workspace, run["id"], "cancelled")
                 store.cancel(identifier, processed, errors, skipped)
                 return JobRunResult(identifier, processed, succeeded, errors, True, skipped)
@@ -210,11 +217,13 @@ def index_embeddings(
             processed += _source_units(source)
             _report(progress, identifier, processed, total_units, source, errors, skipped)
             store.checkpoint(identifier, processed, errors, skipped)
+        SUBSTAGE_CONTEXT.pop(identifier, None)
         _finish_run(workspace, run["id"], "complete", None if not errors else f"{errors} source(s) failed")
         store.complete(identifier, processed, errors, skipped)
         _activate_run(workspace, provider, run["id"])
         return JobRunResult(identifier, processed, succeeded, errors, False, skipped)
     except Exception as error:
+        SUBSTAGE_CONTEXT.pop(identifier, None)
         _finish_run(workspace, run["id"], "failed", str(error))
         store.fail(identifier)
         raise
@@ -641,10 +650,6 @@ def _process_video(
                         """,
                         (run_id, source["asset_id"], source["physical_file_id"], sample_run_id, sample["sample_index"], sample["requested_timestamp"], frame_fingerprint, blob, dimension, now, now),
                     )
-        if video_frame_consumer is not None:
-            video_frame_consumer(source, rows, frames)
-            if cancel_event is not None and cancel_event.is_set():
-                raise EmbeddingCancelled("embedding cancelled")
         fingerprint = _input_fingerprint(source, provider)
         with workspace.transaction() as connection:
             connection.execute(
@@ -655,6 +660,13 @@ def _process_video(
                 "UPDATE video_sample_run SET status = 'complete', successful_count = ?, completed_at = ?, error_message = NULL WHERE id = ?",
                 (len(frames), _timestamp(), sample_run_id),
             )
+        if video_frame_consumer is not None:
+            try:
+                video_frame_consumer(source, rows, frames)
+            except Exception:
+                pass
+            if cancel_event is not None and cancel_event.is_set():
+                raise EmbeddingCancelled("embedding cancelled")
     finally:
         for frame in frames:
             frame.image.close()
