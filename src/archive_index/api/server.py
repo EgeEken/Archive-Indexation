@@ -46,7 +46,7 @@ from ..media.metadata import UnsupportedDecoderError
 from ..media_types import is_raw_extension
 from ..timing import TimingRecorder
 from ..jobs.engine import JobStore, SUBSTAGES
-from ..planning import analyze_folder, plan_from_analysis
+from ..planning import _historical_rate, analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
 from ..indexing.representations import preferred_physical
 
@@ -3147,7 +3147,53 @@ def _jobs(workspace: Workspace, query: Mapping[str, list[str]]):
         rows = connection.execute("SELECT * FROM job ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)).fetchall()
     finally:
         connection.close()
-    return [{**_row_dict(row), "substage": SUBSTAGES.get(row["id"])} for row in rows]
+    return [
+        {
+            **_row_dict(row),
+            "substage": (substage := SUBSTAGES.get(row["id"])),
+            "eta_seconds": _job_eta_seconds(workspace, row, substage),
+        }
+        for row in rows
+    ]
+
+
+_JOB_ETA_RATES = {
+    "scan": ("scan.discovery", "scan.hashing"),
+    "media_index": ("metadata.processing",),
+    "media_thumbnails": ("thumbnail.image",),
+    "media_quality": ("quality.image",),
+    "raw_quality": ("quality.raw",),
+    "video_quality": ("quality.video_sample",),
+    "embeddings": ("embedding.image",),
+    "visual_features": ("grouping.image",),
+    "grouping": ("grouping.image",),
+    "recommendations": ("recommendations.asset",),
+    "reconciliation": ("reconciliation",),
+}
+
+
+def _job_eta_seconds(workspace: Workspace, row, substage: dict[str, object] | None) -> float | None:
+    if row["status"] not in {"pending", "running"}:
+        return None
+    if substage is not None and substage.get("eta") is not None and isfinite(float(substage["eta"])):
+        return max(0.0, float(substage["eta"]))
+    total = max(0, int(row["total_items"] or 0))
+    completed = max(0, int(row["completed_items"] or 0))
+    started_at = row["started_at"]
+    if total > completed > 0 and started_at:
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            elapsed = max(0.001, (datetime.now(timezone.utc) - started).total_seconds())
+            return max(0.0, (total - completed) * elapsed / completed)
+        except (TypeError, ValueError):
+            pass
+    rate_names = _JOB_ETA_RATES.get(row["kind"], ())
+    if not rate_names:
+        return 1.0
+    rate = sum(_historical_rate(workspace, name) for name in rate_names)
+    return max(1.0, max(1, total - completed) * rate)
 
 
 _PROBLEM_COMPONENTS = {

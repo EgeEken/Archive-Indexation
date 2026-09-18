@@ -69,17 +69,45 @@ class FrontendTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_home_cards_format_counts_timestamps_and_thumbnails(self) -> None:
         source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        css=(Path(__file__).parents[1]/"src/archive_index/web/app.css").read_text(encoding="utf-8")
         timestamp=source[source.index("function formatHomeTimestamp"):source.index("function workspaceAssetCount")]
         count=source[source.index("function workspaceAssetCount"):source.index("function scoreMarkup")]
         script=timestamp+count+"console.log(JSON.stringify({time:formatHomeTimestamp('2026-09-18T20:27:12+00:00'),one:workspaceAssetCount(1),many:workspaceAssetCount(2)}));"
         result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",check=True).stdout)
-        self.assertEqual(result["time"], "18/09/2026 · 23:27")
+        self.assertEqual(result["time"], "18/09/2026 at 23:27")
         self.assertIn('<strong class="workspace-asset-count">1</strong> indexed asset', result["one"])
         self.assertIn('<strong class="workspace-asset-count">2</strong> indexed assets', result["many"])
         self.assertIn("home-active", source)
         self.assertIn('class="recent-thumb" loading="lazy"', source)
         self.assertIn("workspace.thumbnail_url", source)
         self.assertNotIn("${workspace.assets ?? 0} indexed assets", source)
+        self.assertIn('workspace-indexed-time">Indexed on', source)
+        self.assertIn("grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr))", css)
+        self.assertIn("width: 8.5rem; height: 8.5rem", css)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_eta_format_and_viewer_close_contract(self) -> None:
+        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        start = source.index("function formatEta")
+        end = source.index("function renderSetupPlanData", start)
+        result = subprocess.run(
+            [shutil.which("node"), "--eval", source[start:end] + "console.log(JSON.stringify([formatEta(0), formatEta(0.2), formatEta(98.1), formatEta(NaN)]));"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), ["ready", "00:01", "01:39", "ready"])
+        self.assertIn('active.eta_seconds', source)
+        self.assertIn('const stageEtaSeconds = sub.eta ?? active.eta_seconds;', source)
+        self.assertIn('$("viewer-close").addEventListener("click", () => closeDialog($("viewer")));', source)
+        self.assertNotIn('state.viewerContext === "similar" && state.similarSource', source)
+        self.assertIn('event.preventDefault(); closeDialog($("viewer"));', source)
+        css = (Path(__file__).parents[1] / "src/archive_index/web/app.css").read_text(encoding="utf-8")
+        self.assertIn("progress { width: 100%; height: 1rem;", css)
+        self.assertIn(".setup-eta-value { color:#a9c9e6; }", css)
+        self.assertIn('class="setup-eta-value"', source)
+        self.assertNotIn('$("setup-index-summary").textContent', source)
 
     def test_filename_sort_control_is_available_before_quality(self) -> None:
         html = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "index.html").read_text(encoding="utf-8")

@@ -539,6 +539,18 @@ class ApiTests(unittest.TestCase):
         self.assertTrue({"stage", "failed_items", "skipped_items"} <= observed.keys())
         self.assertTrue(any(job["kind"] == "media_index" for job in jobs["jobs"]))
 
+    def test_active_jobs_include_eta_when_live_rate_is_unavailable(self) -> None:
+        job_id = JobStore(self.workspace).create("recommendations", total_items=5)
+        JobStore(self.workspace).start(job_id)
+        try:
+            status, payload = _get_json(self.base_url, "/api/jobs?limit=10")
+            self.assertEqual(status, 200)
+            job = next(job for job in payload["jobs"] if job["id"] == job_id)
+            self.assertIsInstance(job["eta_seconds"], (int, float))
+            self.assertGreaterEqual(job["eta_seconds"], 1)
+        finally:
+            JobStore(self.workspace).complete(job_id)
+
     def test_media_failure_does_not_rewrite_completed_scan(self) -> None:
         scan_job_id = JobStore(self.workspace).create("scan")
         JobStore(self.workspace).complete(scan_job_id)

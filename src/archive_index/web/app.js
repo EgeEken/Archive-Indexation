@@ -129,7 +129,7 @@ function formatHomeTimestamp(value) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "";
   const pad = number => String(number).padStart(2, "0");
-  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} · ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} at ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function workspaceAssetCount(count) {
@@ -235,7 +235,7 @@ async function loadHome() {
   $("recent-list").innerHTML = data.workspaces.map((workspace) => {
     const available = workspace.available !== false;
     const thumbnail = available && workspace.thumbnail_url ? `<img class="recent-thumb" loading="lazy" src="${escapeHtml(workspace.thumbnail_url)}" alt="${escapeHtml(workspace.name || "Workspace")} thumbnail" onerror="this.remove()">` : "";
-    const indexed = available ? `<div class="muted">${workspaceAssetCount(workspace.assets)}${workspace.last_indexed ? ` · indexed ${escapeHtml(formatHomeTimestamp(workspace.last_indexed))}` : ""}</div>` : "<div class=\"muted\">Unavailable</div>";
+    const indexed = available ? `<div class="workspace-indexed"><div>${workspaceAssetCount(workspace.assets)}</div><div class="muted workspace-indexed-time">Indexed on ${escapeHtml(formatHomeTimestamp(workspace.last_indexed) || "—")}</div></div>` : "<div class=\"muted\">Unavailable</div>";
     return `<article class="panel recent-card${thumbnail ? " has-thumbnail" : ""}"><div class="recent-card-content">${thumbnail}<div class="recent-card-copy"><h3>${escapeHtml(workspace.name || "Workspace")}</h3><div class="path">${escapeHtml(workspace.path || "")}</div>${indexed}</div></div><div class="recent-actions">${available ? `<button type="button" data-open="${escapeHtml(workspace.id)}">Open</button>` : ""}<button class="danger-button" type="button" data-remove="${escapeHtml(workspace.id)}">Remove</button></div></article>`;
   }).join("") || `<div class="empty">No recent workspaces yet.</div>`;
   $("recent-list").querySelectorAll("[data-open]").forEach((button) => button.addEventListener("click", () => { location.href = `/?workspace=${encodeURIComponent(button.dataset.open)}`; }));
@@ -311,7 +311,8 @@ function renderSetupFolder(node, configuration) {
 }
 
 function formatEta(seconds) {
-  const value = Math.max(0, Math.ceil(Number(seconds || 0)));
+  const numeric = Number(seconds);
+  const value = Number.isFinite(numeric) ? Math.max(0, Math.ceil(numeric)) : 0;
   if (!value) return "ready";
   const minutes = Math.floor(value / 60);
   return `${String(minutes).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
@@ -323,7 +324,7 @@ function renderSetupPlanData(plan) {
   state.setup.plan = plan;
   const remaining = Math.max(0, Number(plan.estimated_seconds || 0));
   const reusable = Number(plan.indexed_reusable_files || 0);
-  $("setup-index-summary").textContent = `Indexed: ${reusable.toLocaleString()} / ${files.toLocaleString()} · Estimated indexing time: ${formatEta(remaining)}`;
+  $("setup-index-summary").innerHTML = `Indexed: ${reusable.toLocaleString()} / ${files.toLocaleString()} · Estimated indexing time: <span class="setup-eta-value">${escapeHtml(formatEta(remaining))}</span>`;
   const eta = plan.eta_seconds_by_feature || {};
   const qualityEta = Number(eta.rendered_quality || 0) + Number(eta.raw_quality || 0);
   $("setup-quality-eta").textContent = configuration.quality_enabled ? `+${formatEta(qualityEta)}` : "off";
@@ -1166,14 +1167,16 @@ async function loadJobs() {
     const percent = active.total_items ? (100 * active.completed_items / active.total_items).toFixed(1) : "0.0";
     const elapsed = active.started_at ? Math.max((Date.now() - Date.parse(active.started_at)) / 1000, .001) : .001;
     const rate = (active.completed_items / elapsed).toFixed(1);
+    const jobEta = active.eta_seconds == null ? "" : ` · ETA ${formatEta(active.eta_seconds)}`;
     $("job-banner").classList.remove("hidden");
-    $("job-copy").textContent = `${active.stage || active.kind} · ${active.completed_items}/${active.total_items} (${percent}%) · ${rate}/s · ${active.failed_items || 0} failed · ${active.skipped_items || 0} skipped`;
+    $("job-copy").textContent = `${active.stage || active.kind} · ${active.completed_items}/${active.total_items} (${percent}%) · ${rate}/s${jobEta} · ${active.failed_items || 0} failed · ${active.skipped_items || 0} skipped`;
     if (active.substage) {
       const sub = active.substage;
       const outerCurrent = sub.outer_total ? sub.outer_completed : active.completed_items;
       const outerTotal = sub.outer_total || active.total_items;
       const frameRate = sub.rate == null ? "" : ` · ${sub.rate.toFixed(1)} frames/s`;
-      const stageEta = sub.eta == null ? "" : ` · ETA ${formatEta(sub.eta)}`;
+      const stageEtaSeconds = sub.eta ?? active.eta_seconds;
+      const stageEta = stageEtaSeconds == null ? "" : ` · ETA ${formatEta(stageEtaSeconds)}`;
       $("job-copy").textContent = `${active.kind.replaceAll("_", " ")} · ${outerCurrent}/${outerTotal} videos · ${sub.item || ""} — ${sub.stage} · ${sub.current}/${sub.total}${frameRate}${stageEta}`;
     }
     $("job-progress").max = Math.max(active.total_items || 1, 1);
@@ -1456,7 +1459,7 @@ $("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIn
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));
 
 ["top", "bottom"].forEach((place) => { $(`groups-previous-${place}`).addEventListener("click", () => { state.groupPage = Math.max(1, state.groupPage - 1); syncUrl(); loadGroups().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }); $(`groups-next-${place}`).addEventListener("click", () => { state.groupPage += 1; syncUrl(); loadGroups().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }); });
-$("viewer-close").addEventListener("click", () => { if(state.viewerContext === "similar" && state.similarSource) { const source=state.similarSource; state.similarSource=null; showViewer(source.index,source.items,source.context); } else closeDialog($("viewer")); });
+$("viewer-close").addEventListener("click", () => closeDialog($("viewer")));
 $("viewer-previous").addEventListener("click", () => moveViewer(-1));
 $("viewer-next").addEventListener("click", () => moveViewer(1));
 $("viewer-info").addEventListener("click", () => toggleViewerInfo());
@@ -1542,10 +1545,6 @@ window.addEventListener("scroll", () => {
   },70);
 }, {passive:true});
 
-$("viewer").addEventListener("cancel", event => {
-  if(state.viewerContext === "similar" && state.similarSource) {event.preventDefault();const source=state.similarSource;state.similarSource=null;showViewer(source.index,source.items,source.context);}
-});
-
+$("viewer").addEventListener("cancel", event => { event.preventDefault(); closeDialog($("viewer")); });
 $("viewer").addEventListener("close", stopViewerMedia);
-$("viewer").addEventListener("cancel", () => {if(state.viewerContext !== "similar") stopViewerMedia();});
 window.addEventListener("pagehide", stopViewerMedia);
