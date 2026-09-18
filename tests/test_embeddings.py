@@ -10,9 +10,10 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
+from archive_index.embeddings import search as search_module
 from archive_index.embeddings.models import OPENCLIP_PROVIDER, SIGLIP_PROVIDER
 from archive_index.embeddings.providers import EmbeddingProvider
-from archive_index.embeddings.search import clear_search_sessions, prepare_provider, search_similar, search_text, search_vector
+from archive_index.embeddings.search import _embedding_matrices, clear_search_sessions, prepare_provider, search_similar, search_text, search_vector
 from archive_index.embeddings.vector import blob_to_vector, exact_top_k, vector_to_blob
 from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.scanner import scan
@@ -200,6 +201,59 @@ class EmbeddingTests(unittest.TestCase):
             with closing(workspace.connect()) as connection:
                 self.assertEqual(connection.execute("SELECT quality_score FROM physical_file").fetchone()[0], 0.8)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM embedding_run").fetchone()[0], 2)
+
+    def test_embedding_matrix_reuses_hydrated_vectors_across_queries(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (20, 30)).save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": True})
+            provider = FakeProvider()
+            index_embeddings(workspace, provider=provider)
+            clear_search_sessions()
+            with patch("archive_index.embeddings.search._load_embedding_matrix", wraps=search_module._load_embedding_matrix) as load:
+                search_text(workspace, "first", provider=provider)
+                search_text(workspace, "second", provider=provider)
+            self.assertEqual(load.call_count, 1)
+            self.assertEqual(len(_embedding_matrices), 1)
+
+    def test_new_embedding_run_rehydrates_matrix(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            Image.new("RGB", (20, 30)).save(root / "photo.jpg")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": True})
+            first = FakeProvider(version="fake-v1")
+            second = FakeProvider(version="fake-v2")
+            index_embeddings(workspace, provider=first)
+            search_vector(workspace, [1.0, 0.0, 0.0])
+            index_embeddings(workspace, provider=second)
+            with patch("archive_index.embeddings.search._load_embedding_matrix", wraps=search_module._load_embedding_matrix) as load:
+                search_vector(workspace, [1.0, 0.0, 0.0])
+            self.assertEqual(load.call_count, 1)
+
+    def test_embedding_matrix_cache_is_workspace_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspaces = []
+            for index in range(2):
+                root = Path(temporary_directory) / f"archive-{index}"
+                root.mkdir()
+                Image.new("RGB", (20 + index, 30)).save(root / "photo.jpg")
+                workspace = Workspace.create(root)
+                scan(workspace)
+                workspace.apply_configuration({**workspace.configuration(), "semantic_search_enabled": True})
+                index_embeddings(workspace, provider=FakeProvider())
+                workspaces.append(workspace)
+            clear_search_sessions()
+            with patch("archive_index.embeddings.search._load_embedding_matrix", wraps=search_module._load_embedding_matrix) as load:
+                search_vector(workspaces[0], [1.0, 0.0, 0.0])
+                search_vector(workspaces[1], [1.0, 0.0, 0.0])
+                search_vector(workspaces[0], [0.0, 1.0, 0.0])
+            self.assertEqual(load.call_count, 2)
 
     def test_search_collapses_video_frames_by_max_similarity(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

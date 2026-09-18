@@ -33,3 +33,15 @@ The logical browser generation and one-pass catalog hydration changed only brows
 | 100,000 | 20.19 s | 1.64 s | 2.29 s | 1.62 s | 1.91 s | 530.8 MB |
 
 The 100k cold browser request fell from 505.68 s to 20.19 s under the same allocation-tracing conditions. The remaining cold cost is the bounded in-memory catalog itself; later requests reuse it until the browser-visible generation changes.
+
+## After semantic embedding-matrix cache
+
+The cache stores one active workspace/run matrix in normalized fp32 form, allows at most two workspace entries, and releases entries when the semantic provider session is cleared or replaced. The reported current allocation includes the cached matrix; the 100k matrix itself is approximately 205 MB before Python/container overhead.
+
+| Logical assets | Semantic cold | Semantic repeated | Cached allocation current | Cached allocation peak |
+| ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 0.58 s | 0.12 s | 21.8 MB | 56.8 MB |
+| 50,000 | 2.76 s | 0.72 s | 108.4 MB | 284.8 MB |
+| 100,000 | 5.43 s | 1.30 s | 216.6 MB | 569.3 MB |
+
+The repeated query improved from 0.43/2.28/4.66 s to 0.12/0.72/1.30 s at 10k/50k/100k. Exact cosine ranking, video MAX-frame collapse, filtering, and run/provider/workspace provenance are unchanged.

@@ -28,6 +28,7 @@ _providers = embedding_runtime.providers
 _loads = embedding_runtime.loads
 _text_vectors = OrderedDict()
 _rankings = OrderedDict()
+_embedding_matrices = OrderedDict()
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-search")
 _state_lock = RLock()
 _requests = OrderedDict()
@@ -56,6 +57,7 @@ def select_provider(provider_id):
             future.cancel()
         _requests.clear()
     release = embedding_runtime.select(provider_id, factory=create_embedding_provider)
+    _embedding_matrices.clear()
     if provider_id is None and release is not None:
         return _worker.submit(release.result)
     return release
@@ -93,6 +95,7 @@ def request_text(workspace, text, *, allowed_asset_ids):
 def _release_providers():
     embedding_runtime.release_all().result()
     _rankings.clear()
+    _embedding_matrices.clear()
 
 
 def clear_search_sessions():
@@ -109,7 +112,8 @@ def active_embedding(workspace: Workspace):
         return connection.execute(
             """
             SELECT we.active_provider, we.active_run_id, er.model_id, er.model_version,
-                   er.embedding_dimension, er.status, er.settings_json
+                   er.embedding_dimension, er.status, er.settings_json,
+                   (SELECT generation FROM browser_revision WHERE id = 1) AS browser_generation
             FROM workspace_embedding AS we
             JOIN workspace_config AS wc
               ON wc.id = 1 AND wc.semantic_search_enabled = 1
@@ -210,70 +214,90 @@ def search_vector(
 ) -> list[SearchResult]:
     active = active_embedding(workspace)
     if active is None or active["active_run_id"] is None or active["status"] != "complete":
+        _embedding_matrices.clear()
         return []
-    run_id = active["active_run_id"]
     dimension = int(active["embedding_dimension"])
+    if allowed_asset_ids is not None and not allowed_asset_ids:
+        return []
+    started = perf_counter()
+    cache_key = (
+        str(workspace.root),
+        active["active_provider"],
+        active["active_run_id"],
+        dimension,
+        active["browser_generation"],
+    )
+    with _search_lock:
+        cached = _embedding_matrices.get(cache_key)
+        if cached is None:
+            matrix, records = _load_embedding_matrix(workspace, active, dimension)
+            _embedding_matrices[cache_key] = (matrix, records)
+            for old_key in list(_embedding_matrices):
+                if old_key[0] == cache_key[0] and old_key != cache_key:
+                    del _embedding_matrices[old_key]
+            while len(_embedding_matrices) > 2:
+                _embedding_matrices.popitem(last=False)
+        else:
+            matrix, records = cached
+            _embedding_matrices.move_to_end(cache_key)
+    LAST_SEARCH_TIMINGS.update(matrix=perf_counter() - started, matrix_cached=cached is not None)
+    if not records:
+        return []
+    candidates = exact_top_k(matrix, query, len(records))
+    best: dict[str, SearchResult] = {}
+    for index, score in candidates:
+        asset_id, timestamp = records[index]
+        if allowed_asset_ids is not None and asset_id not in allowed_asset_ids:
+            continue
+        if exclude_asset_id == asset_id:
+            continue
+        old = best.get(asset_id)
+        if old is None or score > old.similarity:
+            best[asset_id] = SearchResult(asset_id, score, timestamp)
+    return sorted(best.values(), key=lambda result: (-result.similarity, result.asset_id))[:top_k]
+
+
+def _load_embedding_matrix(workspace, active, dimension):
     connection = workspace.connect()
     try:
-        if allowed_asset_ids is not None and not allowed_asset_ids:
-            return []
-        chunks = [None] if allowed_asset_ids is None else [
-            sorted(allowed_asset_ids)[start : start + 800]
-            for start in range(0, len(allowed_asset_ids), 800)
-        ]
-        image_rows = []
-        frame_rows = []
-        for chunk in chunks:
-            image_clause = "" if chunk is None else f" AND le.logical_asset_id IN ({','.join('?' for _ in chunk)})"
-            image_rows.extend(connection.execute(
-                f"""
-                SELECT le.logical_asset_id, le.embedding, le.embedding_dimension
-                FROM logical_asset_embedding AS le
-                JOIN physical_file AS pf ON pf.id = le.source_physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
-                JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
-                JOIN embedding_run AS er ON er.id = le.run_id AND cs.version = er.model_version
-                WHERE le.run_id = ? AND cs.status = 'complete' AND cs.input_fingerprint = le.input_fingerprint {image_clause}
-                """,
-                [active["active_provider"], run_id, *(chunk or ())],
-            ).fetchall())
-            frame_clause = "" if chunk is None else f" AND vfe.logical_asset_id IN ({','.join('?' for _ in chunk)})"
-            frame_rows.extend(connection.execute(
-                f"""
-                SELECT vfe.logical_asset_id, vfe.timestamp_seconds, vfe.embedding, vfe.embedding_dimension
-                FROM video_frame_embedding AS vfe
-                JOIN physical_file AS pf ON pf.id = vfe.physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
-                JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
-                JOIN embedding_run AS er ON er.id = vfe.run_id AND cs.version = er.model_version
-                WHERE vfe.run_id = ? AND cs.status = 'complete' {frame_clause}
-                """,
-                [active["active_provider"], run_id, *(chunk or ())],
-            ).fetchall())
+        image_rows = connection.execute(
+            """
+            SELECT le.logical_asset_id, le.embedding, le.embedding_dimension
+            FROM logical_asset_embedding AS le
+            JOIN physical_file AS pf ON pf.id = le.source_physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
+            JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
+            JOIN embedding_run AS er ON er.id = le.run_id AND cs.version = er.model_version
+            WHERE le.run_id = ? AND cs.status = 'complete' AND cs.input_fingerprint = le.input_fingerprint
+            ORDER BY le.logical_asset_id
+            """,
+            (active["active_provider"], active["active_run_id"]),
+        ).fetchall()
+        frame_rows = connection.execute(
+            """
+            SELECT vfe.logical_asset_id, vfe.timestamp_seconds, vfe.embedding, vfe.embedding_dimension
+            FROM video_frame_embedding AS vfe
+            JOIN physical_file AS pf ON pf.id = vfe.physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
+            JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
+            JOIN embedding_run AS er ON er.id = vfe.run_id AND cs.version = er.model_version
+            WHERE vfe.run_id = ? AND cs.status = 'complete'
+            ORDER BY vfe.logical_asset_id, vfe.sample_index
+            """,
+            (active["active_provider"], active["active_run_id"]),
+        ).fetchall()
     finally:
         connection.close()
     records = []
     vectors = []
     import numpy as np
-
     for row in image_rows:
-        if exclude_asset_id == row["logical_asset_id"]:
-            continue
         vectors.append(blob_to_vector(row["embedding"], int(row["embedding_dimension"])))
         records.append((row["logical_asset_id"], None))
     for row in frame_rows:
-        if exclude_asset_id == row["logical_asset_id"]:
-            continue
         vectors.append(blob_to_vector(row["embedding"], int(row["embedding_dimension"])))
         records.append((row["logical_asset_id"], row["timestamp_seconds"]))
     if not vectors:
-        return []
+        return np.empty((0, dimension), dtype="float32"), records
     matrix = np.vstack(vectors)
     if matrix.shape[1] != dimension:
         raise ValueError("stored embedding dimensions do not match the active model")
-    candidates = exact_top_k(matrix, query, len(records))
-    best: dict[str, SearchResult] = {}
-    for index, score in candidates:
-        asset_id, timestamp = records[index]
-        old = best.get(asset_id)
-        if old is None or score > old.similarity:
-            best[asset_id] = SearchResult(asset_id, score, timestamp)
-    return sorted(best.values(), key=lambda result: (-result.similarity, result.asset_id))[:top_k]
+    return matrix, records
