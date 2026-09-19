@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime, timezone
 from math import isfinite
@@ -48,6 +47,24 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
                 if not items
                 else "No filtered assets have a usable capture time."
             )
+        return base
+    if kind == "vector":
+        from ..indexing.projection import current_projection, projection_points
+
+        projection, reason = current_projection(workspace)
+        if projection is None:
+            base.update(available=False, empty_reason=reason)
+            return base | {"points": []}
+        points = projection_points(workspace, projection["id"], [item["asset_id"] for item in items])
+        base.update(
+            points=points,
+            represented_point_count=len(points),
+            projection_run_id=projection["id"],
+            algorithm=projection["algorithm"],
+            version=projection["version"],
+        )
+        if not points:
+            base["empty_reason"] = "No filtered assets have a projected semantic vector."
         return base
     raise ValueError(f"unknown visualization: {kind}")
 
@@ -131,14 +148,3 @@ def wall_clock_coordinate(value: str | None, kind: str | None = None) -> float |
     except (TypeError, ValueError, OverflowError):
         return None
     return coordinate if isfinite(coordinate) else None
-
-
-def projection_settings(*, max_fit_assets: int) -> str:
-    return json.dumps(
-        {
-            "fit_sample_policy": "sha256(logical_asset_id) ascending",
-            "max_fit_assets": max_fit_assets,
-            "video_aggregation": "l2-normalized frame mean, then l2-normalized",
-        },
-        sort_keys=True,
-    )

@@ -305,6 +305,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="geo"))
             elif request.path == "/api/visualizations/timeline":
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="timeline"))
+            elif request.path == "/api/visualizations/vector":
+                self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="vector"))
             elif request.path == "/api/search-status":
                 self._send_json(200, _search_status(workspace))
             elif request.path == "/api/search":

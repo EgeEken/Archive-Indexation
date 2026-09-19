@@ -139,6 +139,7 @@ def _index_command(
     from .indexing.recommendation import build_recommendations
     from .indexing.reconciliation import reconcile_workspace
     from .indexing.scanner import scan
+    from .indexing.projection import build_semantic_projection
     from .timing import TimingRecorder
     from .jobs.engine import JobStore
     from .workspace import Workspace
@@ -230,6 +231,10 @@ def _index_command(
         )
         if embedding_result.cancelled:
             return 130
+        with timings.measure("semantic_projection.total"):
+            projection_result = build_semantic_projection(workspace)
+        if projection_result.get("status") == "failed":
+            LOGGER.warning("semantic projection unavailable after indexing: %s", projection_result.get("reason"))
         with timings.measure("visual_features.total"):
             feature_result = extract_visual_features(
                 workspace,

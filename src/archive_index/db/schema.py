@@ -551,7 +551,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     23: (
         """
-        CREATE TABLE semantic_projection_run (
+        CREATE TABLE IF NOT EXISTS semantic_projection_run (
             id TEXT PRIMARY KEY,
             source_embedding_run_id TEXT NOT NULL REFERENCES embedding_run(id) ON DELETE CASCADE,
             algorithm TEXT NOT NULL,
@@ -565,9 +565,9 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             error_message TEXT
         )
         """,
-        "CREATE INDEX semantic_projection_run_source_idx ON semantic_projection_run(source_embedding_run_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS semantic_projection_run_source_idx ON semantic_projection_run(source_embedding_run_id, status, created_at)",
         """
-        CREATE TABLE semantic_projection_point (
+        CREATE TABLE IF NOT EXISTS semantic_projection_point (
             run_id TEXT NOT NULL REFERENCES semantic_projection_run(id) ON DELETE CASCADE,
             logical_asset_id TEXT NOT NULL REFERENCES logical_asset(id) ON DELETE CASCADE,
             x REAL NOT NULL,
@@ -575,32 +575,32 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             PRIMARY KEY (run_id, logical_asset_id)
         )
         """,
-        "CREATE INDEX semantic_projection_point_asset_idx ON semantic_projection_point(logical_asset_id, run_id)",
+        "CREATE INDEX IF NOT EXISTS semantic_projection_point_asset_idx ON semantic_projection_point(logical_asset_id, run_id)",
         """
-        CREATE TABLE workspace_semantic_projection (
+        CREATE TABLE IF NOT EXISTS workspace_semantic_projection (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             active_run_id TEXT REFERENCES semantic_projection_run(id),
             updated_at TEXT NOT NULL
         )
         """,
-        "INSERT INTO workspace_semantic_projection(id, active_run_id, updated_at) VALUES (1, NULL, datetime('now'))",
+        "INSERT OR IGNORE INTO workspace_semantic_projection(id, active_run_id, updated_at) VALUES (1, NULL, datetime('now'))",
         """
-        CREATE TRIGGER semantic_projection_embedding_activation AFTER UPDATE OF active_run_id ON workspace_embedding
+        CREATE TRIGGER IF NOT EXISTS semantic_projection_embedding_activation AFTER UPDATE OF active_run_id ON workspace_embedding
         WHEN NEW.active_run_id IS NOT OLD.active_run_id
         BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
         """,
         """
-        CREATE TRIGGER semantic_projection_embedding_state_change AFTER INSERT ON component_state
+        CREATE TRIGGER IF NOT EXISTS semantic_projection_embedding_state_change AFTER INSERT ON component_state
         WHEN NEW.component LIKE 'embedding:%'
         BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
         """,
         """
-        CREATE TRIGGER semantic_projection_embedding_state_update AFTER UPDATE ON component_state
+        CREATE TRIGGER IF NOT EXISTS semantic_projection_embedding_state_update AFTER UPDATE ON component_state
         WHEN NEW.component LIKE 'embedding:%' OR OLD.component LIKE 'embedding:%'
         BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
         """,
         """
-        CREATE TRIGGER semantic_projection_embedding_state_delete AFTER DELETE ON component_state
+        CREATE TRIGGER IF NOT EXISTS semantic_projection_embedding_state_delete AFTER DELETE ON component_state
         WHEN OLD.component LIKE 'embedding:%'
         BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
         """,

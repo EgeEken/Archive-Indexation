@@ -12,6 +12,7 @@ from ..indexing.raw_quality import index_raw_quality
 from ..indexing.recommendation import build_recommendations
 from ..indexing.reconciliation import reconcile_workspace
 from ..indexing.scanner import scan
+from ..indexing.projection import build_semantic_projection
 from ..indexing.video_quality import index_video_quality, prepare_shared_video_quality
 from ..jobs.engine import JobStore
 from ..timing import TimingRecorder
@@ -180,6 +181,10 @@ def run_indexing(
             return
         if shared_video_quality is not None:
             shared_video_quality.finish()
+        with timings.measure("semantic_projection.total"):
+            projection_result = build_semantic_projection(workspace)
+        if projection_result.get("status") == "failed":
+            LOGGER.warning("semantic projection unavailable after indexing: %s", projection_result.get("reason"))
         feature_job_id = JobStore(workspace).create("visual_features")
         with host._active_lock:
             host._cancel_events[(handle, feature_job_id)] = cancel_event
@@ -227,7 +232,11 @@ def run_indexing(
 
 def run_embeddings_only(host, handle: str, workspace: Workspace, job_id: str, cancel_event: threading.Event) -> None:
     try:
-        index_embeddings(workspace, job_id=job_id, cancel_event=cancel_event)
+        result = index_embeddings(workspace, job_id=job_id, cancel_event=cancel_event)
+        if not result.cancelled:
+            projection_result = build_semantic_projection(workspace)
+            if projection_result.get("status") == "failed":
+                LOGGER.warning("semantic projection unavailable after embedding rebuild: %s", projection_result.get("reason"))
     except Exception:
         LOGGER.exception("embedding rebuild failed")
         _fail_if_running(workspace, job_id, "could not mark embedding job failed")
