@@ -318,10 +318,14 @@ class WorkspaceTests(unittest.TestCase):
                     row[1]
                     for row in connection.execute("PRAGMA table_info('logical_asset')").fetchall()
                 }
+                configuration = connection.execute(
+                    "SELECT quality_provider, updated_at FROM workspace_config WHERE id = 1"
+                ).fetchone()
             self.assertEqual(version, 22)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)
+            self.assertEqual(tuple(configuration), ("lar-iqa", "now"))
             self.assertTrue(
                 {
                     "quality_raw_json",

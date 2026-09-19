@@ -256,9 +256,9 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
             id, quality_provider, include_images, include_videos,
             image_extensions_json, video_extensions_json, updated_at
         )
-        SELECT 1, quality_provider, 1, 1,
+        SELECT 1, COALESCE(quality_provider, 'lar-iqa'), 1, 1,
                '{DEFAULT_IMAGE_EXTENSIONS_JSON}',
-               '{DEFAULT_VIDEO_EXTENSIONS_JSON}', updated_at
+               '{DEFAULT_VIDEO_EXTENSIONS_JSON}', COALESCE(updated_at, datetime('now'))
         FROM workspace_info WHERE id = 1
         """,
     ),
@@ -663,7 +663,13 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                     and connection.execute("SELECT 1 FROM workspace_embedding WHERE id = 1").fetchone() is not None
                 ):
                     continue
-                connection.execute(statement)
+                try:
+                    connection.execute(statement)
+                except sqlite3.Error as error:
+                    compact_statement = " ".join(statement.split())
+                    raise type(error)(
+                        f"schema migration {version} failed for {compact_statement!r}: {error}"
+                    ) from error
             connection.execute(
                 "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (version, applied_at),

@@ -761,13 +761,23 @@ class WorkspaceHomeApiTests(unittest.TestCase):
 
     def test_quality_readiness_reports_ready_when_runtime_and_checkpoint_exist(self) -> None:
         checkpoint = self.root / "checkpoint.pt"
-        checkpoint.touch()
-        with patch("archive_index.api.server.importlib.util.find_spec", return_value=object()), patch(
-            "archive_index.api.server.default_model_path", return_value=checkpoint
+        checkpoint.write_bytes(b"test checkpoint")
+        with patch("archive_index.api.workspaces.importlib.util.find_spec", return_value=object()), patch(
+            "archive_index.api.workspaces.default_model_path", return_value=checkpoint
         ):
             readiness = _quality_readiness("lar-iqa")
         self.assertEqual(readiness["status"], "ready")
         self.assertTrue(readiness["ready"])
+
+    def test_quality_readiness_reports_missing_checkpoint(self) -> None:
+        checkpoint = self.root / "missing-checkpoint.pt"
+        with patch("archive_index.api.workspaces.importlib.util.find_spec", return_value=object()), patch(
+            "archive_index.api.workspaces.default_model_path", return_value=checkpoint
+        ):
+            readiness = _quality_readiness("lar-iqa")
+        self.assertEqual(readiness["status"], "checkpoint_missing")
+        self.assertFalse(readiness["ready"])
+        self.assertFalse(readiness["model"]["installed"])
 
     def test_quality_model_installation_truth_is_independent_of_quality_checkbox(self) -> None:
         installed = {
@@ -787,8 +797,8 @@ class WorkspaceHomeApiTests(unittest.TestCase):
         configuration["rendered_quality_provider"] = "off"
         configuration["raw_quality_provider"] = "off"
         configuration["video_quality_enabled"] = False
-        with patch("archive_index.api.server._quality_readiness", side_effect=readiness), patch(
-            "archive_index.api.server._embedding_readiness", return_value={}
+        with patch("archive_index.api.workspaces._quality_readiness", side_effect=readiness), patch(
+            "archive_index.api.workspaces._embedding_readiness", return_value={}
         ):
             disabled = _configuration_quality_readiness(configuration)
             configuration["rendered_quality_provider"] = "lar-iqa"

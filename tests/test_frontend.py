@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import unittest
@@ -89,9 +90,11 @@ class FrontendTests(unittest.TestCase):
         css=(Path(__file__).parents[1]/"src/archive_index/web/app.css").read_text(encoding="utf-8")
         timestamp=source[source.index("function formatHomeTimestamp"):source.index("function workspaceAssetCount")]
         count=source[source.index("function workspaceAssetCount"):source.index("function scoreMarkup")]
-        script=timestamp+count+"console.log(JSON.stringify({time:formatHomeTimestamp('2026-09-18T20:27:12+00:00'),one:workspaceAssetCount(1),many:workspaceAssetCount(2)}));"
-        result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",check=True).stdout)
-        self.assertEqual(result["time"], "18/09/2026 at 23:27")
+        script=timestamp+count+"console.log(JSON.stringify({time:formatHomeTimestamp('2026-09-18T23:27:12+03:00'),one:workspaceAssetCount(1),many:workspaceAssetCount(2)}));"
+        environment = os.environ.copy()
+        environment["TZ"] = "UTC"
+        result=json.loads(subprocess.run([shutil.which("node"),"--eval",script],capture_output=True,text=True,encoding="utf-8",env=environment,check=True).stdout)
+        self.assertEqual(result["time"], "18/09/2026 at 20:27")
         self.assertIn('<strong class="workspace-asset-count">1</strong> indexed asset', result["one"])
         self.assertIn('<strong class="workspace-asset-count">2</strong> indexed assets', result["many"])
         self.assertIn("home-active", source)
