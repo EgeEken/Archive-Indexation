@@ -78,6 +78,14 @@ from .workspaces import (
     offline_media_info as offline_media_info_service,
     workspace_removal_info as workspace_removal_info_service,
 )
+from .search import (
+    IMAGE_SIMILARITY_SUMMARY_THRESHOLD,
+    prepare_search as prepare_search_service,
+    search_status as search_status_service,
+    semantic_asset_filter as semantic_asset_filter_service,
+    semantic_search as semantic_search_service,
+    similar_assets as similar_assets_service,
+)
 
 LOGGER = logging.getLogger(__name__)
 MAX_PAGE_SIZE = 180
@@ -1078,6 +1086,26 @@ def _safe_server_error(error: Exception) -> str:
     return (message or error.__class__.__name__)[:300]
 
 
+def _prepare_search(workspace: Workspace) -> None:
+    prepare_search_service(
+        workspace,
+        model_status_callback=model_status,
+        find_spec_callback=importlib.util.find_spec,
+        select_provider_callback=select_provider,
+    )
+
+
+def _search_status(workspace: Workspace) -> dict[str, object]:
+    return search_status_service(
+        workspace,
+        model_status_callback=model_status,
+        find_spec_callback=importlib.util.find_spec,
+        active_embedding_callback=active_embedding,
+        provider_state_callback=provider_state,
+        prepare_provider_callback=prepare_provider,
+    )
+
+
 def serve(workspace: Workspace | None = None, host: str = "127.0.0.1", port: int = 8765) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("the localhost server must bind to 127.0.0.1 or localhost")
@@ -1357,36 +1385,6 @@ _browser_catalogs = {}
 _browser_lock = threading.RLock()
 
 
-def _prepare_search(workspace):
-    config = workspace.configuration()
-    provider = config["embedding_provider"]
-    runtime = "open_clip" if provider == OPENCLIP_PROVIDER else "transformers"
-    enabled = config["semantic_search_enabled"] and model_status(provider)["installed"] and importlib.util.find_spec(runtime) is not None
-    select_provider(provider if enabled else None)
-
-
-def _search_status(workspace):
-    configuration = workspace.configuration()
-    provider = configuration["embedding_provider"]
-    label = "OpenCLIP" if provider == OPENCLIP_PROVIDER else "SigLIP2"
-    if not configuration["semantic_search_enabled"]:
-        return {"state": "unavailable", "message": "Semantic search disabled · Configure to enable", "provider": label}
-    if not model_status(provider)["installed"]:
-        return {"state": "missing_model", "message": f"{label} model not installed", "provider": label}
-    runtime = "open_clip" if provider == OPENCLIP_PROVIDER else "transformers"
-    if importlib.util.find_spec(runtime) is None:
-        return {"state": "unavailable", "message": f"{label} runtime unavailable", "provider": label}
-    active = active_embedding(workspace)
-    if active is None or active["active_run_id"] is None or active["status"] != "complete":
-        return {"state": "missing_embeddings", "message": "Embeddings not indexed · Re-index required", "provider": label}
-    state = provider_state(provider)
-    message = {"ready": f"Semantic search ready · {label}", "available": f"Semantic search available · {label}",
-               "loading": f"Preparing semantic search · {label}…", "failed": f"Search failed: {label} could not be loaded"}[state]
-    if state == "failed":
-        message = f"Search failed: {prepare_provider(provider).exception()}"
-    return {"state": state, "message": message, "provider": label}
-
-
 def _browser_catalog(workspace, handle):
     representative_ids, grouping_available = _current_representatives(workspace)
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
@@ -1579,47 +1577,27 @@ def _browser_assets(workspace, query, handle):
     result["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 2)
     return result
 
-
 def _semantic_search(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
-    text = _first(query, "text", "").strip()
-    if not text:
-        raise InvalidRequest("text query is required")
-    if len(text) > 500:
-        raise InvalidRequest("text query is too long")
-    page = _positive_int(_first(query, "page", "1"), "page")
-    page_size = min(_positive_int(_first(query, "page_size", "60"), "page_size"), MAX_PAGE_SIZE)
-    allowed_asset_ids = _semantic_asset_filter(workspace, query)
-    try:
-        results = search_text(
-            workspace,
-            text,
-            allowed_asset_ids=allowed_asset_ids,
-            top_k=max(len(allowed_asset_ids), page * page_size),
-        )
-    except (RuntimeError, ValueError) as error:
-        raise InvalidRequest(str(error)) from error
-    return _search_response(workspace, handle, results, page, page_size, text)
-
-
-IMAGE_SIMILARITY_SUMMARY_THRESHOLD = 0.90
+    return semantic_search_service(
+        workspace,
+        query,
+        handle,
+        asset_filter=_semantic_asset_filter,
+        response_builder=_search_response,
+        search_text_callback=search_text,
+    )
 
 
 def _similar_assets(workspace: Workspace, asset_id: str, handle: str, query: Mapping[str, list[str]] | None = None) -> dict[str, object]:
-    allowed = _semantic_asset_filter(workspace, {"media_type": ["image"]})
-    offset = _positive_int(_first(query or {}, "offset", "0"), "offset") if _first(query or {}, "offset", "0") != "0" else 0
-    limit = min(_positive_int(_first(query or {}, "limit", "12"), "limit"), MAX_PAGE_SIZE)
-    try:
-        results = search_similar(workspace, asset_id, allowed_asset_ids=allowed, top_k=len(allowed))
-    except (RuntimeError, ValueError) as error:
-        raise InvalidRequest(str(error)) from error
-    strong_count = sum(r.similarity >= IMAGE_SIMILARITY_SUMMARY_THRESHOLD for r in results)
-    initial = _first(query or {}, "initial", "") == "1"
-    if initial:
-        response = _search_response(workspace, handle, results, 1, limit, None, start_offset=0, selection_limit=min(strong_count, limit))
-    else:
-        response = _search_response(workspace, handle, results, 1, limit, None, start_offset=offset)
-    response["strong_count"] = strong_count
-    return response
+    return similar_assets_service(
+        workspace,
+        asset_id,
+        handle,
+        query,
+        asset_filter=lambda current_workspace, current_query: _semantic_asset_filter(current_workspace, current_query),
+        response_builder=_search_response,
+        search_similar_callback=search_similar,
+    )
 
 
 def _search_response(workspace: Workspace, handle: str, results: list[SearchResult], page: int, page_size: int, query_text: str | None, start_offset: int | None = None, selection_limit: int | None = None) -> dict[str, object]:
@@ -1672,41 +1650,13 @@ def _search_response(workspace: Workspace, handle: str, results: list[SearchResu
 
 
 def _semantic_asset_filter(workspace: Workspace, query: Mapping[str, list[str]]) -> set[str]:
-    folder = _folder_filter(workspace, _first(query, "folder", "")) if query else ""
-    media_type = _first(query, "media_type", "") if query else ""
-    if media_type and media_type not in {"image", "video"}:
-        raise InvalidRequest("media_type must be image or video")
-    selection = _first(query, "selection", "").lower() if query else ""
-    if selection not in {"", "all", "representatives", "recommended", "selected", "rejected", "undecided"}:
-        raise InvalidRequest("selection is invalid")
-    representatives, _ = _current_representatives(workspace)
-    recommendations, _ = _current_recommendations(workspace)
-    clauses = [
-        "EXISTS (SELECT 1 FROM physical_file AS pf_scope WHERE pf_scope.logical_asset_id = la.id AND pf_scope.in_scope = 1 AND pf_scope.is_online = 1)"
-    ]
-    params: list[object] = []
-    if folder:
-        escaped = _like_value(folder)
-        clauses.append("EXISTS (SELECT 1 FROM physical_file AS pf_folder WHERE pf_folder.logical_asset_id = la.id AND pf_folder.in_scope = 1 AND (pf_folder.relative_path = ? OR pf_folder.relative_path LIKE ? ESCAPE '\\'))")
-        params.extend([folder, f"{escaped}/%"])
-    if media_type:
-        clauses.append("EXISTS (SELECT 1 FROM physical_file AS pf_type WHERE pf_type.logical_asset_id = la.id AND pf_type.in_scope = 1 AND pf_type.media_type = ?)")
-        params.append(media_type)
-    ids = representatives if selection == "representatives" else recommendations if selection == "recommended" else None
-    if ids is not None:
-        if not ids:
-            return set()
-        clauses.append(f"la.id IN ({','.join('?' for _ in ids)})")
-        params.extend(sorted(ids))
-    if selection in {"selected", "rejected", "undecided"}:
-        clauses.append("la.selection_state = ?")
-        params.append(selection)
-    connection = workspace.connect()
-    try:
-        rows = connection.execute(f"SELECT la.id FROM logical_asset AS la WHERE {' AND '.join(clauses)}", params).fetchall()
-    finally:
-        connection.close()
-    return {row[0] for row in rows}
+    return semantic_asset_filter_service(
+        workspace,
+        query,
+        folder_filter=_folder_filter,
+        current_representatives=_current_representatives,
+        current_recommendations=_current_recommendations,
+    )
 
 
 def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
