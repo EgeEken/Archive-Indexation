@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -547,6 +547,62 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """
         CREATE TRIGGER IF NOT EXISTS browser_revision_embedding_workspace_update AFTER UPDATE ON workspace_embedding
         BEGIN UPDATE browser_revision SET generation = generation + 1 WHERE id = 1; END
+        """,
+    ),
+    23: (
+        """
+        CREATE TABLE semantic_projection_run (
+            id TEXT PRIMARY KEY,
+            source_embedding_run_id TEXT NOT NULL REFERENCES embedding_run(id) ON DELETE CASCADE,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            asset_count INTEGER NOT NULL,
+            asset_set_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_message TEXT
+        )
+        """,
+        "CREATE INDEX semantic_projection_run_source_idx ON semantic_projection_run(source_embedding_run_id, status, created_at)",
+        """
+        CREATE TABLE semantic_projection_point (
+            run_id TEXT NOT NULL REFERENCES semantic_projection_run(id) ON DELETE CASCADE,
+            logical_asset_id TEXT NOT NULL REFERENCES logical_asset(id) ON DELETE CASCADE,
+            x REAL NOT NULL,
+            y REAL NOT NULL,
+            PRIMARY KEY (run_id, logical_asset_id)
+        )
+        """,
+        "CREATE INDEX semantic_projection_point_asset_idx ON semantic_projection_point(logical_asset_id, run_id)",
+        """
+        CREATE TABLE workspace_semantic_projection (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active_run_id TEXT REFERENCES semantic_projection_run(id),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "INSERT INTO workspace_semantic_projection(id, active_run_id, updated_at) VALUES (1, NULL, datetime('now'))",
+        """
+        CREATE TRIGGER semantic_projection_embedding_activation AFTER UPDATE OF active_run_id ON workspace_embedding
+        WHEN NEW.active_run_id IS NOT OLD.active_run_id
+        BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER semantic_projection_embedding_state_change AFTER INSERT ON component_state
+        WHEN NEW.component LIKE 'embedding:%'
+        BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER semantic_projection_embedding_state_update AFTER UPDATE ON component_state
+        WHEN NEW.component LIKE 'embedding:%' OR OLD.component LIKE 'embedding:%'
+        BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
+        """,
+        """
+        CREATE TRIGGER semantic_projection_embedding_state_delete AFTER DELETE ON component_state
+        WHEN OLD.component LIKE 'embedding:%'
+        BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
         """,
     ),
 }

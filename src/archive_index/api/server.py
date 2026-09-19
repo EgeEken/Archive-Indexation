@@ -83,6 +83,7 @@ from .browser import (
     physical_rows as physical_rows_service,
     physical_rows_for_assets as physical_rows_for_assets_service,
 )
+from .visualizations import visualization_data
 from .jobs import (
     cancel_job as cancel_job_service,
     run_embeddings_only as run_embeddings_only_service,
@@ -300,6 +301,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     offset += 180
             elif request.path == "/api/browser":
                 self._send_json(200, _browser_assets(workspace, query, handle))
+            elif request.path == "/api/visualizations/geo":
+                self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="geo"))
+            elif request.path == "/api/visualizations/timeline":
+                self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="timeline"))
             elif request.path == "/api/search-status":
                 self._send_json(200, _search_status(workspace))
             elif request.path == "/api/search":
@@ -1122,12 +1127,7 @@ def _browser_catalog(workspace, handle):
     ], grouping_available
 
 
-def _browser_assets(workspace, query, handle):
-    started = time.perf_counter()
-    offset = int(_first(query, "offset", "0"))
-    limit = min(_positive_int(_first(query, "limit", "60"), "limit"), 180)
-    if offset < 0:
-        raise InvalidRequest("offset must not be negative")
+def _browser_filtered_assets(workspace, query, handle):
     text = _first(query, "q", "").strip()
     if len(text) > 500:
         raise InvalidRequest("query is too long")
@@ -1228,6 +1228,18 @@ def _browser_assets(workspace, query, handle):
         status = _search_status(workspace)
     media_shown = len(items)
     workspace_total = len(_browser_catalogs.get((str(workspace.root), handle, catalog_revision), items))
+    return items, status, catalog_revision, workspace_total
+
+
+def _browser_assets(workspace, query, handle):
+    started = time.perf_counter()
+    offset = int(_first(query, "offset", "0"))
+    limit = min(_positive_int(_first(query, "limit", "60"), "limit"), 180)
+    if offset < 0:
+        raise InvalidRequest("offset must not be negative")
+    items, status, catalog_revision, workspace_total = _browser_filtered_assets(workspace, query, handle)
+    text = _first(query, "q", "").strip()
+    media_shown = len(items)
     result = {"total": media_shown, "media_shown": media_shown, "media_total": media_shown,
               "workspace_total": workspace_total, "query_active": bool(text), "search": status,
               "filename_matches": sum(bool(i.get("filename_match")) for i in items)}
