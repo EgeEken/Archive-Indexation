@@ -5,6 +5,7 @@ import re
 import struct
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from datetime import datetime, timezone
@@ -189,14 +190,19 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator(".photo-card").first.wait_for(timeout=15000)
 
     def _wait_index_idle(self) -> None:
-        try:
-            self.page.locator("#job-banner:not(.hidden)").wait_for(timeout=3000)
-        except Exception:
-            pass
-        self.page.wait_for_function(
-            "document.querySelector('#job-banner').classList.contains('hidden')",
-            timeout=30000,
-        )
+        deadline = time.monotonic() + 90
+        observed_active = False
+        while time.monotonic() < deadline:
+            response = self.page.request.get(f"{self.base_url}/api/jobs?workspace={self.offline_handle}&limit=10")
+            self.assertEqual(response.status, 200)
+            jobs = response.json()["jobs"]
+            active = any(job["status"] in {"pending", "running"} for job in jobs)
+            observed_active |= active
+            if observed_active and not active:
+                break
+            self.page.wait_for_timeout(250)
+        self.assertTrue(observed_active, "indexing job did not become active")
+        self.assertFalse(active, "indexing job did not become idle")
         self.page.locator(".photo-card").first.wait_for(timeout=15000)
 
     def test_home_cold_load_header_card_thumbnail_and_open(self) -> None:
