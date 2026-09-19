@@ -432,7 +432,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "INSERT INTO workspace_embedding(id, active_provider, active_run_id, updated_at) VALUES (1, NULL, NULL, datetime('now'))",
     ),
-    17: ("ALTER TABLE workspace_config ADD COLUMN recommendation_threshold REAL NOT NULL DEFAULT 0.70 CHECK(recommendation_threshold BETWEEN 0 AND 1)",),
+    17: ("ALTER TABLE workspace_config ADD COLUMN recommendation_threshold REAL NOT NULL DEFAULT '0.70' CHECK(recommendation_threshold BETWEEN 0 AND 1)",),
     18: ("ALTER TABLE physical_file ADD COLUMN file_created_time TEXT",),
     19: (
         "ALTER TABLE workspace_config ADD COLUMN include_videos_in_semantic_search INTEGER NOT NULL DEFAULT 1 CHECK (include_videos_in_semantic_search IN (0, 1))",
