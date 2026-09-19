@@ -35,7 +35,7 @@ async function loadWorkspace() {
   setViewMode(state.viewMode, false);
   await loadJobs();
   await loadCurrentView();
-  setTimeout(prepareSearch, 250);
+  if (state.viewMode !== "vector") setTimeout(prepareSearch, 250);
 }
 
 async function installQualityModel() {

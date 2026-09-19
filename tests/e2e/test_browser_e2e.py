@@ -430,8 +430,8 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
 
     def test_vector_cloud_uses_stored_projection_and_selects_asset(self) -> None:
-        self._open_main()
-        self.page.get_by_role("tab", name="Vector Cloud").click()
+        self.page.goto(f"{self.base_url}/?workspace={self.main_handle}&view=vector", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
         self.page.locator("#vector-view").wait_for(state="visible")
         self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').dataset.pointCount) === 5")
         self.assertIn("5 projected assets · 5 filtered assets", self.page.locator("#vector-status").inner_text())
