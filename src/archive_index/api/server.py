@@ -86,6 +86,19 @@ from .search import (
     semantic_search as semantic_search_service,
     similar_assets as similar_assets_service,
 )
+from .jobs import (
+    cancel_job as cancel_job_service,
+    run_embeddings_only as run_embeddings_only_service,
+    run_grouping_only as run_grouping_only_service,
+    run_indexing as run_indexing_service,
+    run_recommendation_only as run_recommendation_only_service,
+    run_reconciliation_only as run_reconciliation_only_service,
+    start_embedding_rebuild as start_embedding_rebuild_service,
+    start_group_rebuild as start_group_rebuild_service,
+    start_indexing as start_indexing_service,
+    start_recommendation_rebuild as start_recommendation_rebuild_service,
+    start_reconciliation as start_reconciliation_service,
+)
 
 LOGGER = logging.getLogger(__name__)
 MAX_PAGE_SIZE = 180
@@ -187,400 +200,45 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         return remove_workspace_with_index_service(self, handle, delete_index)
 
     def start_indexing(self, handle: str) -> str | None:
-        _, workspace = self.resolve_workspace(handle)
-        with self._active_lock:
-            thread = self._active_threads.get(handle)
-            if thread is not None and thread.is_alive():
-                return None
-            job_id = JobStore(workspace).create("scan")
-            cancel_event = threading.Event()
-            self._cancel_events[(handle, job_id)] = cancel_event
-            thread = threading.Thread(
-                target=self._run_indexing,
-                args=(handle, workspace, job_id, cancel_event),
-                name=f"archive-index-work-{handle[:8]}",
-                daemon=True,
-            )
-            self._active_threads[handle] = thread
-            thread.start()
-            return job_id
+        return start_indexing_service(self, handle)
 
     def start_group_rebuild(self, handle: str) -> str | None:
-        _, workspace = self.resolve_workspace(handle)
-        with self._active_lock:
-            thread = self._active_threads.get(handle)
-            if thread is not None and thread.is_alive():
-                return None
-            feature_job_id = JobStore(workspace).create("visual_features")
-            cancel_event = threading.Event()
-            self._cancel_events[(handle, feature_job_id)] = cancel_event
-            thread = threading.Thread(
-                target=self._run_grouping_only,
-                args=(handle, workspace, feature_job_id, cancel_event),
-                name=f"archive-index-groups-{handle[:8]}",
-                daemon=True,
-            )
-            self._active_threads[handle] = thread
-            thread.start()
-            return feature_job_id
+        return start_group_rebuild_service(self, handle)
 
     def start_recommendation_rebuild(self, handle: str) -> str | None:
-        _, workspace = self.resolve_workspace(handle)
-        with self._active_lock:
-            thread = self._active_threads.get(handle)
-            if thread is not None and thread.is_alive():
-                return None
-            job_id = JobStore(workspace).create("recommendations")
-            cancel_event = threading.Event()
-            self._cancel_events[(handle, job_id)] = cancel_event
-            thread = threading.Thread(
-                target=self._run_recommendation_only,
-                args=(handle, workspace, job_id, cancel_event),
-                name=f"archive-index-recommendations-{handle[:8]}",
-                daemon=True,
-            )
-            self._active_threads[handle] = thread
-            thread.start()
-            return job_id
+        return start_recommendation_rebuild_service(self, handle)
 
     def start_embedding_rebuild(self, handle: str) -> str | None:
-        _, workspace = self.resolve_workspace(handle)
-        with self._active_lock:
-            thread = self._active_threads.get(handle)
-            if thread is not None and thread.is_alive():
-                return None
-            job_id = JobStore(workspace).create("embeddings")
-            cancel_event = threading.Event()
-            self._cancel_events[(handle, job_id)] = cancel_event
-            thread = threading.Thread(
-                target=self._run_embeddings_only,
-                args=(handle, workspace, job_id, cancel_event),
-                name=f"archive-index-embeddings-{handle[:8]}",
-                daemon=True,
-            )
-            self._active_threads[handle] = thread
-            thread.start()
-            return job_id
+        return start_embedding_rebuild_service(self, handle)
 
     def start_reconciliation(self, handle: str) -> str | None:
-        _, workspace = self.resolve_workspace(handle)
-        with self._active_lock:
-            thread = self._active_threads.get(handle)
-            if thread is not None and thread.is_alive():
-                return None
-            job_id = JobStore(workspace).create("reconciliation")
-            cancel_event = threading.Event()
-            self._cancel_events[(handle, job_id)] = cancel_event
-            thread = threading.Thread(
-                target=self._run_reconciliation_only,
-                args=(handle, workspace, job_id, cancel_event),
-                name=f"archive-index-reconciliation-{handle[:8]}",
-                daemon=True,
-            )
-            self._active_threads[handle] = thread
-            thread.start()
-            return job_id
+        return start_reconciliation_service(self, handle)
 
     def cancel_job(self, handle: str, job_id: str) -> bool:
-        with self._active_lock:
-            event = self._cancel_events.get((handle, job_id))
-            if event is None:
-                return False
-            event.set()
-            return True
+        return cancel_job_service(self, handle, job_id)
 
-    def _run_indexing(
-        self,
-        handle: str,
-        workspace: Workspace,
-        job_id: str,
-        cancel_event: threading.Event,
-    ) -> None:
-        job_ids = [job_id]
-        current_job_id = job_id
-        timings = TimingRecorder()
-        try:
-            scan_result = scan(workspace, job_id=job_id, cancel_event=cancel_event, timings=timings)
-            if scan_result.cancelled:
-                return
-            media_job_id = JobStore(workspace).create("media_index")
-            with self._active_lock:
-                self._cancel_events[(handle, media_job_id)] = cancel_event
-            job_ids.append(media_job_id)
-            current_job_id = media_job_id
-            media_result = index_workspace(
-                workspace,
-                components=("metadata",),
-                job_id=media_job_id,
-                cancel_event=cancel_event,
-                timings=timings,
-            )
-            if media_result.cancelled:
-                return
-            reconciliation_job_id = JobStore(workspace).create("reconciliation")
-            with self._active_lock:
-                self._cancel_events[(handle, reconciliation_job_id)] = cancel_event
-            job_ids.append(reconciliation_job_id)
-            current_job_id = reconciliation_job_id
-            reconciliation_result = reconcile_workspace(
-                workspace, job_id=reconciliation_job_id, cancel_event=cancel_event
-            )
-            if reconciliation_result.cancelled:
-                return
-            thumbnail_job_id = JobStore(workspace).create("media_thumbnails")
-            with self._active_lock:
-                self._cancel_events[(handle, thumbnail_job_id)] = cancel_event
-            job_ids.append(thumbnail_job_id)
-            current_job_id = thumbnail_job_id
-            thumbnail_result = index_workspace(
-                workspace,
-                components=("thumbnail",),
-                job_id=thumbnail_job_id,
-                cancel_event=cancel_event,
-                timings=timings,
-            )
-            if thumbnail_result.cancelled:
-                return
-            quality_job_id = JobStore(workspace).create("media_quality")
-            with self._active_lock:
-                self._cancel_events[(handle, quality_job_id)] = cancel_event
-            job_ids.append(quality_job_id)
-            current_job_id = quality_job_id
-            quality_result = index_workspace(
-                workspace,
-                components=("quality",),
-                job_id=quality_job_id,
-                cancel_event=cancel_event,
-                timings=timings,
-            )
-            if quality_result.cancelled:
-                return
-            raw_quality_job_id = JobStore(workspace).create("raw_quality")
-            with self._active_lock:
-                self._cancel_events[(handle, raw_quality_job_id)] = cancel_event
-            job_ids.append(raw_quality_job_id)
-            current_job_id = raw_quality_job_id
-            raw_quality_result = index_raw_quality(
-                workspace,
-                job_id=raw_quality_job_id,
-                cancel_event=cancel_event,
-            )
-            if raw_quality_result.cancelled:
-                return
-            video_quality_job_id = JobStore(workspace).create("video_quality")
-            with self._active_lock:
-                self._cancel_events[(handle, video_quality_job_id)] = cancel_event
-            job_ids.append(video_quality_job_id)
-            current_job_id = video_quality_job_id
-            shared_video_quality = None
-            configuration = workspace.configuration()
-            if configuration["include_videos_in_semantic_search"] and configuration["semantic_search_enabled"]:
-                shared_video_quality = prepare_shared_video_quality(
-                    workspace,
-                    job_id=video_quality_job_id,
-                    cancel_event=cancel_event,
-                    timings=timings,
-                )
-            if shared_video_quality is None:
-                video_quality_result = index_video_quality(
-                    workspace,
-                    job_id=video_quality_job_id,
-                    cancel_event=cancel_event,
-                )
-                if video_quality_result.cancelled:
-                    return
-            embedding_job_id = JobStore(workspace).create("embeddings")
-            with self._active_lock:
-                self._cancel_events[(handle, embedding_job_id)] = cancel_event
-            job_ids.append(embedding_job_id)
-            current_job_id = embedding_job_id
-            embedding_result = index_embeddings(
-                workspace,
-                job_id=embedding_job_id,
-                cancel_event=cancel_event,
-                video_frame_consumer=shared_video_quality.consume if shared_video_quality is not None else None,
-            )
-            if embedding_result.cancelled:
-                if shared_video_quality is not None:
-                    shared_video_quality.finish()
-                return
-            if shared_video_quality is not None:
-                shared_video_quality.finish()
-            feature_job_id = JobStore(workspace).create("visual_features")
-            with self._active_lock:
-                self._cancel_events[(handle, feature_job_id)] = cancel_event
-            job_ids.append(feature_job_id)
-            current_job_id = feature_job_id
-            with timings.measure("visual_features.total"):
-                feature_result = extract_visual_features(
-                    workspace, job_id=feature_job_id, cancel_event=cancel_event, timings=timings
-                )
-            if feature_result.cancelled:
-                return
-            group_job_id = JobStore(workspace).create("grouping")
-            with self._active_lock:
-                self._cancel_events[(handle, group_job_id)] = cancel_event
-            job_ids.append(group_job_id)
-            current_job_id = group_job_id
-            with timings.measure("grouping.total"):
-                group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
-            if group_result.cancelled:
-                return
-            recommendation_job_id = JobStore(workspace).create("recommendations")
-            with self._active_lock:
-                self._cancel_events[(handle, recommendation_job_id)] = cancel_event
-            job_ids.append(recommendation_job_id)
-            current_job_id = recommendation_job_id
-            with timings.measure("recommendations.total"):
-                recommendation_result = build_recommendations(
-                    workspace, job_id=recommendation_job_id, cancel_event=cancel_event
-                )
-            if recommendation_result.cancelled:
-                return
-        except Exception:
-            LOGGER.exception("workspace indexing failed")
-            try:
-                row = JobStore(workspace).get(current_job_id)
-                if row is not None and row["status"] in {"pending", "running"}:
-                    JobStore(workspace).fail(current_job_id)
-            except Exception:
-                LOGGER.exception("could not mark workspace job failed")
-        finally:
-            LOGGER.info("workspace indexing timings: %s", timings.summary())
-            try:
-                JobStore(workspace).set_timing_summary(job_id, timings.summary())
-            except Exception:
-                LOGGER.exception("could not persist workspace indexing timings")
-            with self._active_lock:
-                for active_job_id in job_ids:
-                    self._cancel_events.pop((handle, active_job_id), None)
-                if self._active_threads.get(handle) is threading.current_thread():
-                    self._active_threads.pop(handle, None)
+    def _run_indexing(self, handle: str, workspace: Workspace, job_id: str, cancel_event: threading.Event) -> None:
+        return run_indexing_service(
+            self,
+            handle,
+            workspace,
+            job_id,
+            cancel_event,
+            scan_fn=scan,
+            index_workspace_fn=index_workspace,
+        )
 
-    def _run_embeddings_only(
-        self,
-        handle: str,
-        workspace: Workspace,
-        job_id: str,
-        cancel_event: threading.Event,
-    ) -> None:
-        try:
-            index_embeddings(workspace, job_id=job_id, cancel_event=cancel_event)
-        except Exception:
-            LOGGER.exception("embedding rebuild failed")
-            try:
-                row = JobStore(workspace).get(job_id)
-                if row is not None and row["status"] in {"pending", "running"}:
-                    JobStore(workspace).fail(job_id)
-            except Exception:
-                LOGGER.exception("could not mark embedding job failed")
-        finally:
-            with self._active_lock:
-                self._cancel_events.pop((handle, job_id), None)
-                if self._active_threads.get(handle) is threading.current_thread():
-                    self._active_threads.pop(handle, None)
+    def _run_embeddings_only(self, handle: str, workspace: Workspace, job_id: str, cancel_event: threading.Event) -> None:
+        return run_embeddings_only_service(self, handle, workspace, job_id, cancel_event)
 
-    def _run_grouping_only(
-        self,
-        handle: str,
-        workspace: Workspace,
-        feature_job_id: str,
-        cancel_event: threading.Event,
-    ) -> None:
-        job_ids = [feature_job_id]
-        current_job_id = feature_job_id
-        try:
-            feature_result = extract_visual_features(
-                workspace, job_id=feature_job_id, cancel_event=cancel_event
-            )
-            if feature_result.cancelled:
-                return
-            group_job_id = JobStore(workspace).create("grouping")
-            with self._active_lock:
-                self._cancel_events[(handle, group_job_id)] = cancel_event
-            job_ids.append(group_job_id)
-            current_job_id = group_job_id
-            group_result = build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event)
-            if group_result.cancelled:
-                return
-            recommendation_job_id = JobStore(workspace).create("recommendations")
-            with self._active_lock:
-                self._cancel_events[(handle, recommendation_job_id)] = cancel_event
-            job_ids.append(recommendation_job_id)
-            current_job_id = recommendation_job_id
-            recommendation_result = build_recommendations(
-                workspace, job_id=recommendation_job_id, cancel_event=cancel_event
-            )
-            if recommendation_result.cancelled:
-                return
-        except Exception:
-            LOGGER.exception("workspace grouping failed")
-            try:
-                row = JobStore(workspace).get(current_job_id)
-                if row is not None and row["status"] in {"pending", "running"}:
-                    JobStore(workspace).fail(current_job_id)
-            except Exception:
-                LOGGER.exception("could not mark grouping job failed")
-        finally:
-            with self._active_lock:
-                for active_job_id in job_ids:
-                    self._cancel_events.pop((handle, active_job_id), None)
-                if self._active_threads.get(handle) is threading.current_thread():
-                    self._active_threads.pop(handle, None)
+    def _run_grouping_only(self, handle: str, workspace: Workspace, feature_job_id: str, cancel_event: threading.Event) -> None:
+        return run_grouping_only_service(self, handle, workspace, feature_job_id, cancel_event)
 
-    def _run_recommendation_only(
-        self,
-        handle: str,
-        workspace: Workspace,
-        recommendation_job_id: str,
-        cancel_event: threading.Event,
-    ) -> None:
-        try:
-            build_recommendations(
-                workspace,
-                job_id=recommendation_job_id,
-                cancel_event=cancel_event,
-            )
-        except Exception:
-            LOGGER.exception("workspace recommendation rebuild failed")
-            try:
-                row = JobStore(workspace).get(recommendation_job_id)
-                if row is not None and row["status"] in {"pending", "running"}:
-                    JobStore(workspace).fail(recommendation_job_id)
-            except Exception:
-                LOGGER.exception("could not mark recommendation job failed")
-        finally:
-            with self._active_lock:
-                self._cancel_events.pop((handle, recommendation_job_id), None)
-                if self._active_threads.get(handle) is threading.current_thread():
-                    self._active_threads.pop(handle, None)
+    def _run_recommendation_only(self, handle: str, workspace: Workspace, recommendation_job_id: str, cancel_event: threading.Event) -> None:
+        return run_recommendation_only_service(self, handle, workspace, recommendation_job_id, cancel_event)
 
-    def _run_reconciliation_only(
-        self,
-        handle: str,
-        workspace: Workspace,
-        reconciliation_job_id: str,
-        cancel_event: threading.Event,
-    ) -> None:
-        try:
-            reconcile_workspace(
-                workspace,
-                job_id=reconciliation_job_id,
-                cancel_event=cancel_event,
-            )
-        except Exception:
-            LOGGER.exception("workspace reconciliation failed")
-            try:
-                row = JobStore(workspace).get(reconciliation_job_id)
-                if row is not None and row["status"] in {"pending", "running"}:
-                    JobStore(workspace).fail(reconciliation_job_id)
-            except Exception:
-                LOGGER.exception("could not mark reconciliation job failed")
-        finally:
-            with self._active_lock:
-                self._cancel_events.pop((handle, reconciliation_job_id), None)
-                if self._active_threads.get(handle) is threading.current_thread():
-                    self._active_threads.pop(handle, None)
+    def _run_reconciliation_only(self, handle: str, workspace: Workspace, reconciliation_job_id: str, cancel_event: threading.Event) -> None:
+        return run_reconciliation_only_service(self, handle, workspace, reconciliation_job_id, cancel_event)
 
 
 class ArchiveRequestHandler(BaseHTTPRequestHandler):
