@@ -7,7 +7,9 @@ $("index").addEventListener("click", () => state.setup ? applySetup() : startInd
 $("problems-button").addEventListener("click", showProblems);
 $("forget-offline-button").addEventListener("click", showOfflineCleanup);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
-$("cloud-view-toggle").onclick = () => setViewMode("cloud");
+$("geo-view-toggle").addEventListener("click", () => setViewMode("geo"));
+$("timeline-view-toggle").addEventListener("click", () => setViewMode("timeline"));
+$("vector-view-toggle").addEventListener("click", () => setViewMode("vector"));
 $("viewer-similar").onclick = () => state.similar ? closeSimilar() : showSimilar(state.viewerItems[state.viewerIndex].asset_id);
 $("workspace-explorer").onclick = () => revealFile();
 $("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex].preferred_physical_id);

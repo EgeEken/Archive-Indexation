@@ -110,7 +110,9 @@ _UI_RESOURCES = {
     "app-details.js",
     "app-maintenance.js",
     "app-groups.js",
+    "app-visualizations.js",
     "app-bootstrap.js",
+    "world.json",
 }
 _folder_picker_lock = threading.Lock()
 
@@ -264,7 +266,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if request.path.removeprefix("/") in _UI_RESOURCES:
                 name = request.path.removeprefix("/")
-                content_type = "text/css; charset=utf-8" if name == "app.css" else "text/javascript; charset=utf-8"
+                content_type = "text/css; charset=utf-8" if name == "app.css" else "application/json; charset=utf-8" if name == "world.json" else "text/javascript; charset=utf-8"
                 self._send_bytes(200, _ui_resource(name).encode("utf-8"), content_type)
                 return
             if request.path == "/api/health":

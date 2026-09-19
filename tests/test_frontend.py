@@ -16,6 +16,7 @@ WEB_SCRIPT_NAMES = (
     "app-details.js",
     "app-maintenance.js",
     "app-groups.js",
+    "app-visualizations.js",
     "app-bootstrap.js",
 )
 
@@ -500,9 +501,24 @@ class CorrectionFrontendTests(unittest.TestCase):
         start = source.index("async function loadWorkspace")
         end = source.index("function showSearchStatus", start)
         workspace = source[start:end]
-        self.assertLess(workspace.index("await loadJobs()"), workspace.index("if (state.viewMode === \"groups\") await loadGroups(); else await loadAssets();"))
+        self.assertLess(workspace.index("await loadJobs()"), workspace.index("await loadCurrentView();"))
         self.assertNotIn("const initialLoad", workspace)
         self.assertIn("loadWorkspace().then(() => setInterval", source)
+
+    def test_visualization_navigation_and_canvas_contract(self):
+        root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        source = javascript_source()
+        visualizations = (root / "app-visualizations.js").read_text(encoding="utf-8")
+        for label in ("Gallery", "Groupings", "Geo Map", "Timeline", "Vector Cloud"):
+            self.assertIn(label, html)
+        self.assertNotIn("Cloud Map", html)
+        self.assertNotIn("Not implemented yet", html)
+        self.assertIn("async function loadCurrentView()", source)
+        self.assertIn("/api/visualizations/", visualizations)
+        self.assertIn('getContext("2d")', visualizations)
+        for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
+            self.assertNotIn(remote_map_reference, visualizations)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_stale_job_bootstrap_cannot_replace_rendered_gallery(self):

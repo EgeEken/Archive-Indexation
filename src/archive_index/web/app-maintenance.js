@@ -19,7 +19,7 @@ async function loadJobs() {
         await api("/api/workspace");
         if (requestId !== state.jobsRequest) return;
         state.renderKeys = {};
-        if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
+        await loadCurrentView();
         await loadProblemsBadge();
       }
       return;

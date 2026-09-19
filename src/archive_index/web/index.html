@@ -9,7 +9,7 @@
 <body>
   <header class="app-header">
     <div class="brand"><a href="/">Archive Indexation</a><span id="workspace-crumb" class="crumb hidden"></span><button id="workspace-explorer" class="explorer-button hidden" aria-label="Open workspace in Explorer">📁</button></div>
-    <div id="workspace-tabs" class="view-tabs hidden" role="tablist"><button id="gallery-view-toggle" role="tab">Gallery</button><button id="groups-view-toggle" role="tab">Groupings</button><button id="cloud-view-toggle" role="tab">Cloud Map</button></div>
+    <div id="workspace-tabs" class="view-tabs hidden" role="tablist"><button id="gallery-view-toggle" role="tab">Gallery</button><button id="groups-view-toggle" role="tab">Groupings</button><button id="geo-view-toggle" role="tab">Geo Map</button><button id="timeline-view-toggle" role="tab">Timeline</button><button id="vector-view-toggle" role="tab">Vector Cloud</button></div>
     <div id="setup-header-summary" class="setup-header-summary hidden" aria-live="polite"><strong id="setup-index-summary">Planning…</strong></div>
     <nav>
       <button id="configure-workspace" class="secondary hidden" type="button">Configure</button>
@@ -50,7 +50,10 @@
       <div id="status" class="status" role="status"></div>
       <section id="gallery" class="gallery" aria-live="polite"></section>
       <section id="groups-view" class="hidden" aria-live="polite"><div id="groups-status" class="status"></div><div id="groups-pager-top" class="pager"><button id="groups-previous-top" class="secondary" type="button" aria-label="Previous group page">‹</button><div class="pager-info"><strong id="groups-page-label-top"></strong><span id="groups-range-label-top" class="pager-range"></span></div><button id="groups-next-top" class="secondary" type="button" aria-label="Next group page">›</button></div><div id="groups-list"></div><div id="groups-pager-bottom" class="pager"><button id="groups-previous-bottom" class="secondary" type="button" aria-label="Previous group page">‹</button><div class="pager-info"><strong id="groups-page-label-bottom"></strong><span id="groups-range-label-bottom" class="pager-range"></span></div><button id="groups-next-bottom" class="secondary" type="button" aria-label="Next group page">›</button></div></section>
-      <section id="cloud-view" class="empty hidden"><h2>Cloud Map</h2><p>Not implemented yet.</p></section>
+      <section id="geo-view" class="visualization-view hidden" aria-live="polite"><div class="visualization-heading"><div><h2>Geo Map</h2><p id="geo-status" class="muted"></p></div><div class="visualization-controls"><button id="geo-fit" class="secondary" type="button">Fit all</button><button id="geo-zoom-out" class="secondary" type="button" aria-label="Zoom out">−</button><button id="geo-zoom-in" class="secondary" type="button" aria-label="Zoom in">+</button></div></div><canvas id="geo-canvas" class="visualization-canvas" aria-label="Geo Map"></canvas></section>
+      <section id="timeline-view" class="visualization-view hidden" aria-live="polite"><div class="visualization-heading"><div><h2>Timeline</h2><p id="timeline-status" class="muted"></p></div><div class="visualization-controls"><button id="timeline-fit" class="secondary" type="button">Fit all</button><button id="timeline-zoom-out" class="secondary" type="button" aria-label="Zoom out">−</button><button id="timeline-zoom-in" class="secondary" type="button" aria-label="Zoom in">+</button></div></div><canvas id="timeline-canvas" class="visualization-canvas" aria-label="Timeline"></canvas></section>
+      <section id="vector-view" class="visualization-view hidden" aria-live="polite"><div class="visualization-heading"><div><h2>Vector Cloud</h2><p id="vector-status" class="muted"></p></div><div class="visualization-controls"><button id="vector-fit" class="secondary" type="button">Fit all</button><button id="vector-zoom-out" class="secondary" type="button" aria-label="Zoom out">−</button><button id="vector-zoom-in" class="secondary" type="button" aria-label="Zoom in">+</button></div></div><canvas id="vector-canvas" class="visualization-canvas" aria-label="Vector Cloud"></canvas></section>
+      <aside id="visualization-selection" class="visualization-selection hidden" aria-live="polite"></aside>
       </div>
     </section>
 
@@ -81,6 +84,7 @@
   <script src="/app-details.js"></script>
   <script src="/app-maintenance.js"></script>
   <script src="/app-groups.js"></script>
+  <script src="/app-visualizations.js"></script>
   <script src="/app-bootstrap.js"></script>
   <script src="/app.js"></script>
 </body>

@@ -273,7 +273,7 @@ async function applySetup() {
 }
 
 function cancelSetup() {
-  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("setup-header-summary").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb","workspace-tabs"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); if(state.viewMode === "groups") loadGroups(); else if(state.viewMode === "gallery") loadAssets(); }
+  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("setup-header-summary").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb","workspace-tabs"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); loadCurrentView(); }
   else { state.setup = null; loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 }
 

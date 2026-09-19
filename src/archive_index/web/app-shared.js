@@ -6,7 +6,7 @@ const state = {
   total: 0,
   items: [],
   viewerItems: [],
-  viewMode: ["groups", "cloud"].includes(query.get("view")) ? query.get("view") : "gallery",
+  viewMode: ["groups", "geo", "timeline", "vector"].includes(query.get("view")) ? query.get("view") : "gallery",
   searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, semanticEnabled: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [], folderCounts: {},
   scrollPositions: {}, windowStart: 0, windowRows: [], windowColumns: 1, windowHeight: 360, windowHasNext: false,
   collapsed: localStorage.getItem("archive-sidebar-collapsed") === "true",
@@ -33,6 +33,14 @@ const state = {
   dragging: false,
   viewerClickSuppressed: false,
   setup: null,
+  visualizationRequest: 0,
+  visualizationAbort: null,
+  visualizations: {
+    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: []},
+    timeline: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], origin: 0, span: 86400},
+    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], grid: new Map()},
+  },
+  visualizationSelectedId: null,
 };
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
@@ -205,7 +213,7 @@ async function setDecision(assetId, decision) {
     state.viewerItems.forEach(update);
     (state.groupItems || []).forEach(update);
     if ($("viewer").open) renderViewer();
-    if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
+    await loadCurrentView();
   } catch (error) {
     showToast(`Review update failed: ${error.message}`);
   }
@@ -219,4 +227,10 @@ function renderCard(item, index) {
   const capture = date ? `<div class="capture">${date[3]}/${date[2]}/${date[1]} · ${date[4]}</div>` : "";
   const automaticClass = item.auto_recommended ? " recommended-card" : item.is_representative ? " representative-card" : "";
   return `<article class="photo-card${automaticClass}" tabindex="0" data-index="${index}" aria-label="View ${escapeHtml(item.filename)}"><div class="photo-frame">${media}</div><button class="info-button" type="button" data-info="${index}" aria-label="Details for ${escapeHtml(item.filename)}">ⓘ</button><div class="photo-card-body"><div class="filename" title="${escapeHtml(item.filename)}">${filenameMarkup(item.filename)}</div><div class="card-metrics">${scoreMarkup(item.quality_score)}${similarityMarkup(item)}</div>${capture}<div class="card-state">${selectionStateMarkup(item)}</div><div class="issues">${issueMarkup(item.issues)}</div><div class="card-actions">${selectionActionsMarkup(item)}</div></div></article>`;
+}
+
+async function loadCurrentView() {
+  if (state.viewMode === "groups") return loadGroups();
+  if (["geo", "timeline", "vector"].includes(state.viewMode)) return loadVisualization(state.viewMode);
+  return loadAssets();
 }

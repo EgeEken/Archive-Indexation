@@ -34,7 +34,7 @@ async function loadWorkspace() {
   renderFilterButtons();
   setViewMode(state.viewMode, false);
   await loadJobs();
-  if (state.viewMode === "groups") await loadGroups(); else await loadAssets();
+  await loadCurrentView();
   setTimeout(prepareSearch, 250);
 }
 
@@ -91,7 +91,7 @@ async function browserData(params) {
   showSearchStatus(data.search, data);
   if (["loading","searching"].includes(data.search.state) && params.get("semantic") !== "0") {
     state.searchPoll = setTimeout(() => {
-      if (!$("workspace-view").classList.contains("hidden")) (state.viewMode === "groups" ? loadGroups() : loadAssets());
+      if (!$("workspace-view").classList.contains("hidden")) loadCurrentView();
     }, 100);
   }
   return data;

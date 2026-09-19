@@ -24,7 +24,7 @@ function refreshBrowser() {
     renderGalleryWindow({items: state.items, total: state.total, has_next: false, search: {state: "loading"}}, state.windowStart, state.windowColumns, state.windowHeight);
   }
   renderFilterButtons();
-  if (state.viewMode === "groups") loadGroups(); else if (state.viewMode === "gallery") loadAssets();
+  loadCurrentView();
 }
 
 function setupFilters() {
@@ -110,14 +110,16 @@ function setViewMode(mode, load = true) {
   const started = performance.now();
   if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
-  state.viewMode = ["groups", "cloud"].includes(mode) ? mode : "gallery";
+  state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
   $("gallery").classList.toggle("hidden", mode !== "gallery");
   $("groups-view").classList.toggle("hidden", mode !== "groups");
-  $("cloud-view").classList.toggle("hidden", mode !== "cloud");
-  for(const [id, value] of [["gallery-view-toggle","gallery"],["groups-view-toggle","groups"],["cloud-view-toggle","cloud"]]) $(id).setAttribute("aria-selected",String(mode===value));
+  $("geo-view").classList.toggle("hidden", mode !== "geo");
+  $("timeline-view").classList.toggle("hidden", mode !== "timeline");
+  $("vector-view").classList.toggle("hidden", mode !== "vector");
+  for(const [id, value] of [["gallery-view-toggle","gallery"],["groups-view-toggle","groups"],["geo-view-toggle","geo"],["timeline-view-toggle","timeline"],["vector-view-toggle","vector"]]) $(id).setAttribute("aria-selected",String(mode===value));
   syncUrl(); window.scrollTo(0, state.scrollPositions[mode] || 0);
   const focusing = Boolean(state.focusGroup);
-  if (load) (mode === "groups" ? loadGroups() : mode === "gallery" ? loadAssets() : Promise.resolve()).then(()=>{if(!focusing && state.viewMode===mode) window.scrollTo(0,state.scrollPositions[mode] || 0); requestAnimationFrame(()=>{performance.measure(`navigation:${mode}`,{start:started});console.debug(`navigation:${mode} ${(performance.now()-started).toFixed(1)} ms`);});});
+  if (load) loadCurrentView().then(()=>{if(!focusing && state.viewMode===mode) window.scrollTo(0,state.scrollPositions[mode] || 0); requestAnimationFrame(()=>{performance.measure(`navigation:${mode}`,{start:started});console.debug(`navigation:${mode} ${(performance.now()-started).toFixed(1)} ms`);});});
 }
 
 function renderGroup(group) {

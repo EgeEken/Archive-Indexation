@@ -1,0 +1,14 @@
+{"type":"FeatureCollection","features":[
+{"type":"Feature","properties":{"name":"Canada"},"geometry":{"type":"Polygon","coordinates":[[[-141,60],[-135,70],[-120,73],[-95,72],[-60,65],[-52,60],[-75,50],[-95,49],[-120,50],[-141,60]]]}},
+{"type":"Feature","properties":{"name":"United States"},"geometry":{"type":"Polygon","coordinates":[[[-125,49],[-117,32],[-106,30],[-94,29],[-82,25],[-67,45],[-75,49],[-95,49],[-125,49]]]}},
+{"type":"Feature","properties":{"name":"Mexico"},"geometry":{"type":"Polygon","coordinates":[[[-117,32],[-106,30],[-94,29],[-86,21],[-100,15],[-112,20],[-117,32]]]}},
+{"type":"Feature","properties":{"name":"South America"},"geometry":{"type":"Polygon","coordinates":[[[-81,12],[-68,10],[-50,4],[-35,-5],[-43,-23],[-49,-34],[-68,-55],[-75,-42],[-81,-18],[-81,12]]]}},
+{"type":"Feature","properties":{"name":"Greenland"},"geometry":{"type":"Polygon","coordinates":[[[-73,60],[-45,59],[-20,75],[-25,83],[-55,82],[-73,75],[-73,60]]]}},
+{"type":"Feature","properties":{"name":"Europe"},"geometry":{"type":"Polygon","coordinates":[[[-11,36],[-5,43],[8,44],[15,37],[25,40],[40,48],[35,60],[25,70],[5,71],[-10,62],[-11,36]]]}},
+{"type":"Feature","properties":{"name":"Asia"},"geometry":{"type":"Polygon","coordinates":[[[-10,35],[5,35],[25,40],[40,48],[60,55],[90,72],[140,70],[175,55],[160,35],[135,20],[120,8],[95,8],[70,20],[45,10],[25,25],[-10,35]]]}},
+{"type":"Feature","properties":{"name":"Africa"},"geometry":{"type":"Polygon","coordinates":[[[-17,35],[5,37],[25,32],[38,12],[50,0],[42,-35],[20,-35],[5,-30],[-8,-5],[-17,35]]]}},
+{"type":"Feature","properties":{"name":"India"},"geometry":{"type":"Polygon","coordinates":[[[68,24],[78,35],[90,26],[88,8],[78,7],[68,24]]]}},
+{"type":"Feature","properties":{"name":"Australia"},"geometry":{"type":"Polygon","coordinates":[[[113,-11],[153,-11],[154,-39],[137,-44],[115,-35],[113,-11]]]}},
+{"type":"Feature","properties":{"name":"Japan"},"geometry":{"type":"Polygon","coordinates":[[[130,32],[145,45],[146,30],[135,25],[130,32]]]}},
+{"type":"Feature","properties":{"name":"Madagascar"},"geometry":{"type":"Polygon","coordinates":[[[44,-12],[51,-13],[50,-25],[44,-25],[44,-12]]]}}
+]}
