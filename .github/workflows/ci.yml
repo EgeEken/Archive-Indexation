@@ -59,7 +59,10 @@ jobs:
         run: uv run python -m compileall -q src tests
 
       - name: Check JavaScript syntax
-        run: node --check src/archive_index/web/app.js
+        run: |
+          for file in src/archive_index/web/app*.js; do
+            node --check "$file"
+          done
 
       - name: Check diff whitespace
         run: git diff --check
