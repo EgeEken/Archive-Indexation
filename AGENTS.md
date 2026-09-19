@@ -1544,7 +1544,34 @@ The current workspace navigation remains `Gallery | Groupings | Cloud Map` while
 
 - Phase 10 image compression must first validate an actual `libjxl` runtime for decoding and eventual encoding. JXL files need explicit app-owned provenance and source/derivative relationships; filename or extension inference is not sufficient. External JXL files and their reconciliation behavior require a separate investigation before implementation.
 - ETA estimates should later be calibrated from machine-local completed-job throughput and compute characteristics rather than treated as universal constants.
-- Preserve the later navigation target `Gallery | Groupings | Geo Map | Timeline | Vector Cloud Map`, future `Strict | Broad` grouping, the Similar-viewer navigation redesign, comprehensive responsive/viewport/browser-zoom/mobile work, and Phase 9.3C end-to-end testing, CI, and modularization as deferred roadmap items.
+- Preserve the later navigation target `Gallery | Groupings | Geo Map | Timeline | Vector Cloud Map`, future `Strict | Broad` grouping, the Similar-viewer navigation redesign, and comprehensive responsive/viewport/browser-zoom/mobile work as deferred roadmap items.
+
+## Phase 9.3C — browser regression safety net, low-cost CI, and modularization
+
+Phase 9.3C is complete. `tests/e2e/test_browser_e2e.py` contains nine Playwright Chromium tests using temporary isolated workspaces and registries, tiny Pillow fixtures, controlled SQLite semantic state, and the real localhost server. The suite does not use `Early Testing/`, external services, native folder pickers, GPU, ffmpeg, or model downloads. Failures preserve screenshots, browser logs, and traces under ignored `test-results/e2e`.
+
+GitHub Actions is defined in `.github/workflows/ci.yml`. It uses one standard `ubuntu-latest` job with `contents: read`, a bounded timeout, concurrency cancellation, Python/uv caching, test-only dependencies, Node only for syntax checks, and Chromium only. It has no secrets, cron, paid or premium runners, Windows runners, GPU, model/checkpoint downloads, or external services. Browser artifacts upload only on failure. Windows-native folder-picker and Ctrl+C/`cmd.exe` behavior remain local/manual smoke coverage.
+
+Backend boundaries are:
+
+- `api/server.py`: localhost HTTP wiring, route dispatch, resource serving, and orchestration adapters.
+- `api/workspaces.py`: registry, Home, setup/planning, workspace removal, and offline helpers.
+- `api/browser.py`: browser-facing asset summaries, physical representations, and details.
+- `api/search.py`: search readiness, semantic query, Similar, and filter response services.
+- `api/jobs.py`: indexing, re-index, reconciliation, embedding, grouping, and recommendation job orchestration.
+
+Frontend uses ordered native browser scripts without a framework or bundler:
+
+- `app-shared.js`: state, API, shared formatting, review, and card utilities.
+- `app-setup.js`: Home and Configure/setup workflow.
+- `app-browser.js`: workspace bootstrap, search/gallery data, and virtual gallery.
+- `app-viewer.js`: fullscreen viewer and Similar mode.
+- `app-details.js`: details, metadata, and quality rendering.
+- `app-maintenance.js`: jobs, diagnostics, offline cleanup, and indexing.
+- `app-groups.js`: filters, folders, view switching, and Groupings.
+- `app-bootstrap.js`: event wiring and startup.
+
+`app.js` remains a compatibility resource. `app.css` was intentionally left unsplit because it remains manageable and a split would add risk without a clear benefit. Responsive-layout overhaul, broader grouping, Geo Map, Timeline, Vector Cloud Map, and Phase 10 remain deferred.
 
 ## Phase 10 — compression pipeline
 
