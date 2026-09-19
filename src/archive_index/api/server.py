@@ -32,6 +32,7 @@ from ..embeddings.models import (
 from ..embeddings.search import SearchResult, active_embedding, search_similar, search_text, provider_state, prepare_provider, request_text, select_provider
 from ..indexing.media_pipeline import index_workspace
 from ..indexing.scanner import scan
+from ..media.quality_provider import default_model_path
 from ..media.raw_preview import extract_embedded_preview
 from ..media.metadata import UnsupportedDecoderError
 from ..media_types import is_raw_extension
@@ -98,11 +99,24 @@ from .jobs import (
 
 LOGGER = logging.getLogger(__name__)
 MAX_PAGE_SIZE = 180
+_UI_RESOURCES = {
+    "app.css",
+    "app.js",
+    "app-shared.js",
+    "app-setup.js",
+    "app-browser.js",
+    "app-viewer.js",
+    "app-details.js",
+    "app-maintenance.js",
+    "app-groups.js",
+    "app-bootstrap.js",
+}
 _folder_picker_lock = threading.Lock()
 
 
 class WorkspaceHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 64
 
     def __init__(self, address, workspace: Workspace | None = None, registry_path: Path | None = None):
         super().__init__(address, ArchiveRequestHandler)
@@ -247,7 +261,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if request.path == "/":
                 self._send_bytes(200, _ui_html().encode("utf-8"), "text/html; charset=utf-8")
                 return
-            if request.path in {"/app.css", "/app.js"}:
+            if request.path.removeprefix("/") in _UI_RESOURCES:
                 name = request.path.removeprefix("/")
                 content_type = "text/css; charset=utf-8" if name == "app.css" else "text/javascript; charset=utf-8"
                 self._send_bytes(200, _ui_resource(name).encode("utf-8"), content_type)
@@ -784,7 +798,7 @@ def _ui_html() -> str:
 
 
 def _ui_resource(name: str) -> str:
-    if name not in {"app.css", "app.js"}:
+    if name not in _UI_RESOURCES:
         raise ResourceNotFound("resource not found")
     return files("archive_index.web").joinpath(name).read_text(encoding="utf-8")
 

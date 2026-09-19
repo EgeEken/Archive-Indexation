@@ -213,6 +213,19 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"aspect-ratio: 1 / 1", css)
         status, js = _get_bytes(self.base_url, "/app.js")
         self.assertEqual(status, 200)
+        for resource in (
+            "app-shared.js",
+            "app-setup.js",
+            "app-browser.js",
+            "app-viewer.js",
+            "app-details.js",
+            "app-maintenance.js",
+            "app-groups.js",
+            "app-bootstrap.js",
+        ):
+            resource_status, resource_body = _get_bytes(self.base_url, f"/{resource}")
+            self.assertEqual(resource_status, 200)
+            js += b"\n" + resource_body
         status, models = _get_json(self.base_url, "/api/embedding-models")
         self.assertEqual(status, 200)
         self.assertEqual({model["provider"] for model in models["models"]}, {"openclip-b16-datacomp-xl", "siglip2-base-patch16-224"})

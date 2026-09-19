@@ -7,11 +7,28 @@ import unittest
 from pathlib import Path
 
 
+WEB_SCRIPT_NAMES = (
+    "app-shared.js",
+    "app-setup.js",
+    "app-browser.js",
+    "app-viewer.js",
+    "app-details.js",
+    "app-maintenance.js",
+    "app-groups.js",
+    "app-bootstrap.js",
+)
+
+
+def javascript_source() -> str:
+    root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
+    return "\n".join((root / name).read_text(encoding="utf-8") for name in WEB_SCRIPT_NAMES)
+
+
 class FrontendTests(unittest.TestCase):
     def test_semantic_search_and_similar_ui_hooks_are_present(self) -> None:
         root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
         html = (root / "index.html").read_text(encoding="utf-8")
-        javascript = (root / "app.js").read_text(encoding="utf-8")
+        javascript = javascript_source()
         css = (root / "app.css").read_text(encoding="utf-8")
         self.assertNotIn('id="search-mode"', html)
         self.assertIn('id="setup-semantic-search"', html)
@@ -61,14 +78,14 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("Intentionally skipped work is not a problem", html)
 
     def test_configure_accent_fragments_are_inverted(self) -> None:
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         self.assertIn('<span>Assess</span> <span class="setup-accent">video</span> <span>quality and</span> <span class="setup-accent">include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>', source)
         self.assertIn('<span>Assess</span> <span class="setup-accent">video</span> <span>quality</span> <span class="setup-accent">too</span>', source)
         self.assertIn('<span class="setup-accent">Include videos</span> <span>in semantic search</span> <span class="setup-accent">too</span>', source)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_home_cards_format_counts_timestamps_and_thumbnails(self) -> None:
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         css=(Path(__file__).parents[1]/"src/archive_index/web/app.css").read_text(encoding="utf-8")
         timestamp=source[source.index("function formatHomeTimestamp"):source.index("function workspaceAssetCount")]
         count=source[source.index("function workspaceAssetCount"):source.index("function scoreMarkup")]
@@ -87,7 +104,7 @@ class FrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_eta_format_and_viewer_close_contract(self) -> None:
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function formatEta")
         end = source.index("function renderSetupPlanData", start)
         result = subprocess.run(
@@ -120,7 +137,7 @@ class FrontendTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_review_buttons_and_card_contract(self):
         root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
-        source = (root / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function selectionActionsMarkup")
         end = source.index("function bindSelectionButtons", start)
         script = "const escapeHtml=String;" + source[start:end] + "console.log(JSON.stringify(['undecided','selected','rejected'].map(user_decision=>selectionActionsMarkup({asset_id:'a',user_decision}))));"
@@ -143,7 +160,7 @@ class FrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_recommended_tag_replaces_representative_tag(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         start=source.index("function selectionStateMarkup")
         end=source.index("function selectionActionsMarkup",start)
         script="const escapeHtml=String;"+source[start:end]+"""
@@ -157,7 +174,7 @@ class FrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required for frontend formatter tests")
     def test_capture_formatter_keeps_offsets_and_limits_fractional_seconds(self) -> None:
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function formatCapture")
         end = source.index("\n}\n\nfunction renderReviewFilters", start) + 2
         function = source[start:end]
@@ -174,7 +191,7 @@ class FrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required for details formatter tests")
     def test_details_layout_contract_separates_standalone_and_drawer_quality(self) -> None:
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function renderDetails")
         end = source.index("function renderRepresentations", start)
         function = source[start:end]
@@ -200,7 +217,7 @@ class FrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_details_omits_missing_capture_time(self) -> None:
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function renderDetails")
         end = source.index("function renderRepresentations", start)
         function = source[start:end]
@@ -219,7 +236,7 @@ class FrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_details_location_uses_coordinates_and_safe_google_maps_link(self) -> None:
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function renderDetails")
         end = source.index("function renderRepresentations", start)
         function = source[start:end]
@@ -244,7 +261,7 @@ class FrontendTests(unittest.TestCase):
 
 class CorrectionFrontendTests(unittest.TestCase):
     def run_js(self, functions, body):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         parts = []
         for name, following in functions:
             end = source.index("function " + following)
@@ -302,7 +319,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         const $=()=>({querySelectorAll:()=>[video]});stopViewerMedia();console.log(JSON.stringify(calls));
         """)
         self.assertEqual(result,["pause","remove src","load"])
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         render=source[source.index("function renderViewer"):source.index("function applyViewerTransform")]
         self.assertLess(render.index("stopViewerMedia()"),render.index('$("viewer-media").innerHTML = ""'))
         drawer=source[source.index("async function toggleViewerInfo"):source.index("async function loadJobs")]
@@ -312,7 +329,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_representation_diagnostics_only_when_present(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         render=source[source.index("function renderRepresentations"):source.index("function renderQuality")]
         problems=source[source.index("function componentProblemMessage"):source.index("function cameraValue")]
         script="const escapeHtml=String,formatBytes=String;"+render+problems+"""
@@ -334,7 +351,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_details_omit_video_samples_and_representation_prefixes(self):
-        source=(Path(__file__).parents[1]/"src"/"archive_index"/"web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         render_details=source[source.index("function renderDetails"):source.index("function renderRepresentations")]
         render_representations=source[source.index("function renderRepresentations"):source.index("function renderQuality")]
         render_quality=source[source.index("function renderQuality"):source.index("function meterMarkup")]
@@ -346,7 +363,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_missing_detail_thumbnail_keeps_clickable_placeholder(self):
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("function renderDetails")
         end = source.index("function renderRepresentations", start)
         function = source[start:end]
@@ -362,7 +379,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_disabled_quality_is_omitted_but_requested_failure_remains(self):
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         render_quality = source[source.index("function renderQuality"):source.index("function meterMarkup")]
         script = "const escapeHtml=String,qualityColor=()=>'#fff';" + render_quality + """
         const image = renderQuality({media_type:'image', quality_score:null, components:{quality:{status:'not_requested'}}}, false);
@@ -391,7 +408,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_focal_length_prefers_valid_35mm_equivalent(self):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         functions = source[source.index("function meterMarkup"):source.index("async function loadViewerDetails")]
         script = "const escapeHtml=String;" + functions + """
         const base={metadata:{exif:{FocalLength:[554,100],FocalLengthIn35mmFilm:23}}};
@@ -434,7 +451,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_initial_gallery_load_fetches_legacy_assets_with_semantic_disabled(self):
-        source = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         gallery = source[source.index("async function loadAssets"):source.index("function bindGalleryCards")]
         script = gallery + """
         const galleryNode={clientWidth:900,getBoundingClientRect:()=>({top:0})};const $=()=>galleryNode;
@@ -449,7 +466,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_initial_gallery_load_matrix_renders_current_and_legacy_workspaces(self):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         gallery = source[source.index("async function loadAssets"):source.index("function bindGalleryCards")]
         script = gallery + """
         const galleryNode={clientWidth:900,getBoundingClientRect:()=>({top:0})};const $=()=>galleryNode;
@@ -476,7 +493,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         ])
 
     def test_workspace_bootstrap_orders_initial_gallery_load_after_jobs(self):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("async function loadWorkspace")
         end = source.index("function showSearchStatus", start)
         workspace = source[start:end]
@@ -486,7 +503,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_stale_job_bootstrap_cannot_replace_rendered_gallery(self):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("async function loadJobs")
         end = source.index("async function loadProblemsBadge", start)
         script = source[start:end] + r'''
@@ -521,7 +538,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn('checkpoint unreadable',result[-1]['text'])
 
     def test_technical_details_uses_single_column_and_collapses_missing_camera_cleanly(self):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         css = (Path(__file__).parents[1] / "src/archive_index/web/app.css").read_text(encoding="utf-8")
         self.assertIn("No camera info available", source)
         self.assertNotIn("grid-template-columns:max-content minmax(0,1fr) max-content minmax(0,1fr)", css)
@@ -533,7 +550,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertNotIn(".viewer-technical-quality { display:grid", css)
 
     def test_folder_picker_is_single_instance_and_restores_button_state(self):
-        source = (Path(__file__).parents[1] / "src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source = javascript_source()
         start = source.index("async function pickWorkspace()")
         end = source.index("function folderRule", start)
         picker = source[start:end]
@@ -556,7 +573,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn('--similarity-color: rgb(91, 190, 118)',result['green'])
 
     def test_windowed_similar_loading_and_semantic_disabled_hooks(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         html=(Path(__file__).parents[1]/"src/archive_index/web/index.html").read_text(encoding="utf-8")
         self.assertIn("async function loadSimilarPage",source)
         self.assertIn("id=\"similar-more\"",source)
@@ -576,7 +593,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_similar_paging_appends_all_ranked_pages(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         render=source[source.index("function renderSimilarResults"):source.index("function closeSimilar")]
         loader=source[source.index("async function loadSimilarPage"):source.index("async function showSimilar")]
         script="const escapeHtml=String;const countLabel=(count,singular,plural=`${singular}s`)=>`${count} ${count===1?singular:plural}`;"+render+loader+"""
@@ -594,7 +611,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_similar_empty_initial_page_keeps_load_more_and_count_labels(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         render=source[source.index("function renderSimilarResults"):source.index("function closeSimilar")]
         script="const escapeHtml=String;const countLabel=(count,singular,plural=`${singular}s`)=>`${count} ${count===1?singular:plural}`;"+render+"""
         const section={innerHTML:'',querySelectorAll:()=>[],classList:{},addEventListener(){}};
@@ -613,7 +630,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_similar_one_strong_then_weaker_page_has_no_duplicate(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         loader=source[source.index("async function loadSimilarPage"):source.index("async function showSimilar")]
         script=loader+"""
         const renderSimilarResults=()=>{};const syncSimilarViewer=()=>{};
@@ -631,7 +648,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_similar_viewer_sequence_keeps_source_at_index_zero(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         helper=source[source.index("function similarViewerItems"):source.index("function syncSimilarViewer")]
         script=helper+"""
         const state={similar:{source:{asset_id:'source'},items:[{asset_id:'source'},{asset_id:'similar-1'},{asset_id:'similar-2'}]}};
@@ -645,7 +662,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_gallery_bottom_scroll_keeps_virtual_window_at_end(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         gallery=source[source.index("async function loadAssets"):source.index("function bindGalleryCards")]
         scroll=source[source.index("let scrollTimer;"):source.index('$("viewer").addEventListener("cancel"')]
         script=gallery+"""
@@ -679,7 +696,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_initial_short_gallery_does_not_prefetch_next_window(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         gallery=source[source.index("async function loadAssets"):source.index("function bindGalleryCards")]
         script=gallery+"""
         const galleryNode={clientWidth:900,getBoundingClientRect:()=>({top:0}),style:{setProperty(){}},setAttribute(){}};
@@ -695,7 +712,7 @@ class CorrectionFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_cached_gallery_and_group_windows_skip_fetch(self):
-        source=(Path(__file__).parents[1]/"src/archive_index/web/app.js").read_text(encoding="utf-8")
+        source=javascript_source()
         gallery=source[source.index('async function loadAssets'):source.index('function bindGalleryCards')]
         groups=source[source.index('async function loadGroups'):source.index('function renderGroupPager')]
         script=gallery+groups+"""
