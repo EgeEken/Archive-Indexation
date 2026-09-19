@@ -192,14 +192,19 @@ class BrowserE2ETests(unittest.TestCase):
     def _wait_index_idle(self) -> None:
         deadline = time.monotonic() + 90
         observed_active = False
+        idle_since = None
         while time.monotonic() < deadline:
             response = self.page.request.get(f"{self.base_url}/api/jobs?workspace={self.offline_handle}&limit=10")
             self.assertEqual(response.status, 200)
             jobs = response.json()["jobs"]
             active = any(job["status"] in {"pending", "running"} for job in jobs)
             observed_active |= active
-            if observed_active and not active:
-                break
+            if active:
+                idle_since = None
+            elif observed_active:
+                idle_since = idle_since or time.monotonic()
+                if time.monotonic() - idle_since >= 2:
+                    break
             self.page.wait_for_timeout(250)
         self.assertTrue(observed_active, "indexing job did not become active")
         self.assertFalse(active, "indexing job did not become idle")
