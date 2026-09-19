@@ -16,3 +16,4 @@ dist/
 *.sqlite
 *.sqlite-*
 .archive-index-workspaces.json
+test-results/

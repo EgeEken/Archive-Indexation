@@ -12,6 +12,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+test = [
+    "numpy>=1.26,<3",
+    "playwright>=1.50,<2",
+]
 quality-lar-cpu = [
     "torch==2.11.0+cpu",
     "torchvision==0.26.0+cpu",
