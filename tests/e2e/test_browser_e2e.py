@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import re
 import struct
 import tempfile
@@ -22,6 +23,7 @@ from archive_index.api.server import WorkspaceHTTPServer
 from archive_index.app_state import WorkspaceRegistry, workspace_id
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.media_pipeline import index_workspace
+from archive_index.indexing.projection import build_semantic_projection
 from archive_index.indexing.scanner import scan
 from archive_index.media.quality_provider import OffQualityProvider
 from archive_index.workspace import Workspace
@@ -129,16 +131,29 @@ class BrowserE2ETests(unittest.TestCase):
             rows = connection.execute(
                 "SELECT logical_asset_id, relative_path FROM physical_file ORDER BY relative_path"
             ).fetchall()
+            gps = {
+                "alpha.jpg": (48.792146, 2.369163),
+                "portrait.jpg": (41.008238, 28.978359),
+                "child.jpg": (40.712776, -74.005974),
+            }
             for index, row in enumerate(rows):
                 capture = f"2026-01-01T12:00:{index:02d}"
                 connection.execute(
                     "UPDATE logical_asset SET capture_time = ?, capture_time_kind = 'exif_local_unknown' WHERE id = ?",
                     (capture, row["logical_asset_id"]),
                 )
+                filename = Path(row["relative_path"]).name
+                if filename in gps:
+                    latitude, longitude = gps[filename]
+                    connection.execute(
+                        "UPDATE physical_file SET metadata_json = ? WHERE logical_asset_id = ?",
+                        (json.dumps({"gps": {"latitude": latitude, "longitude": longitude}}), row["logical_asset_id"]),
+                    )
         if semantic:
             extract_visual_features(workspace, workers=1)
             build_groups(workspace)
             cls._seed_embeddings(workspace)
+            build_semantic_projection(workspace)
         return workspace
 
     @staticmethod
@@ -379,6 +394,53 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertIn("group-", self.page.locator("#viewer-title").inner_text())
         self.page.locator("#viewer-close").click()
         self.page.locator("#groups-view").wait_for(state="visible")
+
+    def test_geo_map_renders_count_and_asset_preview(self) -> None:
+        self._open_main()
+        self.page.get_by_role("tab", name="Geo Map").click()
+        self.page.locator("#geo-view").wait_for(state="visible")
+        self.page.locator("#geo-canvas").wait_for()
+        self.page.wait_for_function("() => Number(document.querySelector('#geo-canvas').dataset.pointCount) === 3")
+        self.assertIn("3 geotagged assets · 5 filtered assets", self.page.locator("#geo-status").inner_text())
+        canvas = self.page.locator("#geo-canvas")
+        canvas.click(position={
+            "x": float(canvas.get_attribute("data-first-target-x")),
+            "y": float(canvas.get_attribute("data-first-target-y")),
+        })
+        self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
+        self.page.get_by_role("button", name="Details").click()
+        self.page.locator("#details[open]").wait_for()
+        self.page.locator("#details-close").click()
+
+    def test_timeline_renders_and_zoom_changes_range(self) -> None:
+        self._open_main()
+        self.page.get_by_role("tab", name="Timeline").click()
+        self.page.locator("#timeline-view").wait_for(state="visible")
+        self.page.wait_for_function("() => Number(document.querySelector('#timeline-canvas').dataset.pointCount) === 5")
+        self.assertIn("5 timed assets · 5 filtered assets", self.page.locator("#timeline-status").inner_text())
+        canvas = self.page.locator("#timeline-canvas")
+        before = float(canvas.get_attribute("data-view-scale"))
+        self.page.locator("#timeline-zoom-in").click()
+        self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) > before", arg=before)
+        canvas.click(position={
+            "x": float(canvas.get_attribute("data-first-target-x")),
+            "y": float(canvas.get_attribute("data-first-target-y")),
+        })
+        self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
+
+    def test_vector_cloud_uses_stored_projection_and_selects_asset(self) -> None:
+        self._open_main()
+        self.page.get_by_role("tab", name="Vector Cloud").click()
+        self.page.locator("#vector-view").wait_for(state="visible")
+        self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').dataset.pointCount) === 5")
+        self.assertIn("5 projected assets · 5 filtered assets", self.page.locator("#vector-status").inner_text())
+        self.assertFalse(any("openclip" in entry.lower() or "model" in entry.lower() for entry in self.browser_log))
+        canvas = self.page.locator("#vector-canvas")
+        canvas.click(position={
+            "x": float(canvas.get_attribute("data-first-target-x")),
+            "y": float(canvas.get_attribute("data-first-target-y")),
+        })
+        self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
 
     def test_reindex_add_remove_offline_cleanup_preserves_fixture_boundary(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}", wait_until="domcontentloaded")
