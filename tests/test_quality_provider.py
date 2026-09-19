@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import tempfile
 import unittest
 from contextlib import closing, contextmanager
@@ -74,6 +75,7 @@ class BatchSessionProvider(FakeProvider):
 
 
 class QualityProviderTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("torch") is not None, "quality ML extra is not installed")
     def test_cpu_quality_preparation_default_is_two_workers(self) -> None:
         with patch("torch.cuda.is_available", return_value=False):
             self.assertEqual(default_quality_preparation_workers(), 2)

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install base and test dependencies
+        run: uv sync --locked --extra test
+
+      - name: Set up Node.js for JavaScript checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Chromium only
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run production tests
+        env:
+          PYTHONPATH: tests
+        run: |
+          modules=$(find tests -maxdepth 1 -type f -name 'test_*.py' -printf '%f ' | sed 's/\.py / /g')
+          uv run python -m unittest $modules -v
+
+      - name: Run frontend tests
+        env:
+          PYTHONPATH: tests
+        run: uv run python -m unittest test_frontend -v
+
+      - name: Compile Python
+        run: uv run python -m compileall -q src tests
+
+      - name: Check JavaScript syntax
+        run: node --check src/archive_index/web/app.js
+
+      - name: Check diff whitespace
+        run: git diff --check
+
+      - name: Run browser E2E tests
+        run: uv run python -m unittest tests.e2e.test_browser_e2e -v
+
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-artifacts
+          path: test-results/e2e
+          if-no-files-found: ignore
+          retention-days: 5

@@ -137,7 +137,7 @@ class CorrectionTests(unittest.TestCase):
         app=server.WorkspaceHTTPServer(("127.0.0.1",0),self.workspace,registry_path=self.workspace.root / "registry.json")
         thread=threading.Thread(target=app.serve_forever,daemon=True);thread.start()
         self.addCleanup(app.server_close);self.addCleanup(app.shutdown)
-        with patch("archive_index.api.server._embedding_model_status",return_value={}), patch("archive_index.api.server.model_status",return_value={"installed":True}), patch("archive_index.embeddings.search.create_embedding_provider",return_value=provider),patch.object(provider,"preflight",side_effect=lambda:gate.wait(5)):
+        with patch("archive_index.api.server._embedding_model_status",return_value={}), patch("archive_index.api.server.model_status",return_value={"installed":True}), patch("archive_index.api.server.importlib.util.find_spec",return_value=object()), patch("archive_index.embeddings.search.create_embedding_provider",return_value=provider),patch.object(provider,"preflight",side_effect=lambda:gate.wait(5)):
             base=f"http://127.0.0.1:{app.server_port}"
             with urlopen(base+"/api/workspace",timeout=2) as r: json.load(r)
             self.assertEqual(search.provider_state(provider.provider_id),"loading")
@@ -217,7 +217,7 @@ class CorrectionTests(unittest.TestCase):
 
     def test_ready_available_missing_and_failed_status(self):
         self.enable_embeddings()
-        with patch("archive_index.api.server.model_status",return_value={"installed":True}):
+        with patch("archive_index.api.server.model_status",return_value={"installed":True}), patch("archive_index.api.server.importlib.util.find_spec",return_value=object()):
             for phase,word in [("ready","ready"),("available","available"),("loading","Preparing")]:
                 with patch("archive_index.api.server.provider_state",return_value=phase):
                     status=server._search_status(self.workspace)
@@ -226,7 +226,7 @@ class CorrectionTests(unittest.TestCase):
         with patch("archive_index.api.server.model_status",return_value={"installed":False}):
             self.assertEqual(server._search_status(self.workspace)["state"],"missing_model")
         with self.workspace.transaction() as c:c.execute("UPDATE workspace_embedding SET active_run_id=NULL")
-        with patch("archive_index.api.server.model_status",return_value={"installed":True}):
+        with patch("archive_index.api.server.model_status",return_value={"installed":True}), patch("archive_index.api.server.importlib.util.find_spec",return_value=object()):
             self.assertEqual(server._search_status(self.workspace)["state"],"missing_embeddings")
 
     def test_ambiguous_candidates_with_null_side_remain_actionable(self):

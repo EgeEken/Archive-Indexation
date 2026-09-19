@@ -200,7 +200,7 @@ class BrowserTests(unittest.TestCase):
         self.workspace.apply_configuration(config)
         with patch("archive_index.api.server.model_status", return_value={"installed":False}):
             self.assertEqual(_search_status(self.workspace)["state"], "missing_model")
-        with patch("archive_index.api.server.model_status", return_value={"installed":True}):
+        with patch("archive_index.api.server.model_status", return_value={"installed":True}), patch("archive_index.api.server.importlib.util.find_spec", return_value=object()):
             self.assertEqual(_search_status(self.workspace)["state"], "missing_embeddings")
 
     def test_substage_does_not_fabricate_rate(self):
