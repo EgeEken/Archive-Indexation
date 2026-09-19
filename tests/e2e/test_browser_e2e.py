@@ -410,7 +410,8 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
         self.page.get_by_role("button", name="Details").click()
         self.page.locator("#details[open]").wait_for()
-        self.page.locator("#details-close").click()
+        self.page.keyboard.press("Escape")
+        self.page.locator("#details").wait_for(state="hidden")
 
     def test_timeline_renders_and_zoom_changes_range(self) -> None:
         self._open_main()
