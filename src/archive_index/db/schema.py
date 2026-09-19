@@ -432,7 +432,10 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "INSERT INTO workspace_embedding(id, active_provider, active_run_id, updated_at) VALUES (1, NULL, NULL, datetime('now'))",
     ),
-    17: ("ALTER TABLE workspace_config ADD COLUMN recommendation_threshold REAL NOT NULL DEFAULT '0.70' CHECK(recommendation_threshold BETWEEN 0 AND 1)",),
+    17: (
+        "ALTER TABLE workspace_config ADD COLUMN recommendation_threshold REAL NOT NULL DEFAULT 0 CHECK(recommendation_threshold BETWEEN 0 AND 1)",
+        "UPDATE workspace_config SET recommendation_threshold = 0.70 WHERE id = 1",
+    ),
     18: ("ALTER TABLE physical_file ADD COLUMN file_created_time TEXT",),
     19: (
         "ALTER TABLE workspace_config ADD COLUMN include_videos_in_semantic_search INTEGER NOT NULL DEFAULT 1 CHECK (include_videos_in_semantic_search IN (0, 1))",
@@ -562,7 +565,11 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         applied_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with connection:
             for statement in MIGRATIONS[version]:
-                if version == 17 and _has_column(connection, "workspace_config", "recommendation_threshold"):
+                if (
+                    version == 17
+                    and statement.startswith("ALTER TABLE workspace_config ADD COLUMN")
+                    and _has_column(connection, "workspace_config", "recommendation_threshold")
+                ):
                     continue
                 if version == 18 and _has_column(connection, "physical_file", "file_created_time"):
                     continue
