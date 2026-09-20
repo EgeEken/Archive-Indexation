@@ -63,12 +63,13 @@ function renderVisualization(mode) {
   if (mode === "geo") drawGeo(canvas, view, data);
   else if (mode === "timeline") drawTimeline(canvas, view, data);
   else drawVector(canvas, view, data);
-  markVisualizationCanvas(canvas, view, data);
+  markVisualizationCanvas(mode, canvas, view, data);
 }
 
-function markVisualizationCanvas(canvas, view, data) {
+function markVisualizationCanvas(mode, canvas, view, data) {
   canvas.dataset.pointCount = String(data.available ? data.represented_point_count || 0 : 0);
   canvas.dataset.viewScale = String(view.scale);
+  if (mode === "timeline") canvas.dataset.timeMode = view.timeMode || "capture";
   const target = view.hitTargets?.[0] || [...(view.grid?.values() || [])][0]?.[0];
   if (target) {
     canvas.dataset.firstTargetX = String(target.x);

@@ -423,7 +423,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#timeline-zoom-in").click()
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) > before", arg=before)
         self.page.locator("#timeline-time-mode").select_option("file_created")
-        self.page.locator("#timeline-status").wait_for()
+        self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
         canvas.click(position={
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
