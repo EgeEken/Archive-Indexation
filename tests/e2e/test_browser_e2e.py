@@ -145,6 +145,10 @@ class BrowserE2ETests(unittest.TestCase):
                     "UPDATE logical_asset SET capture_time = ?, capture_time_kind = 'exif_local_unknown' WHERE id = ?",
                     (capture, row["logical_asset_id"]),
                 )
+                connection.execute(
+                    "UPDATE physical_file SET file_created_time = ? WHERE logical_asset_id = ?",
+                    (f"2025-12-01T08:00:{index:02d}", row["logical_asset_id"]),
+                )
                 filename = Path(row["relative_path"]).name
                 if filename in gps:
                     latitude, longitude = gps[filename]
