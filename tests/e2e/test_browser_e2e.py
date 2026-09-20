@@ -366,12 +366,14 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#viewer[open]").wait_for()
         self.page.locator("#viewer-similar").click()
         self.page.locator("#similar-gallery").wait_for(state="visible")
+        self.assertTrue(self.page.locator("#viewer-open-normal").evaluate("node => node.classList.contains('hidden')"))
         self.page.get_by_text("No strongly similar assets found").wait_for()
         self.page.locator("#similar-more").wait_for()
         self.page.locator("#similar-more").click()
         self.page.locator(".similar-result").first.wait_for()
         self.assertEqual(self.page.locator(".similar-result").count(), 4)
         self.page.locator(".similar-result").first.click()
+        self.page.locator("#viewer-open-normal").wait_for(state="visible")
         self.assertIn("child.jpg", self.page.locator("#viewer-title").inner_text())
         self.assertEqual(self.page.locator("#viewer-count").inner_text(), "2 of 5")
         self.page.locator("#viewer-previous").click()
@@ -398,9 +400,21 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(group.count(), 1)
         group.locator(".group-photo").first.click()
         self.page.locator("#viewer[open]").wait_for()
+        self.page.locator("#viewer-grouping").wait_for(state="visible")
         self.assertIn("group-", self.page.locator("#viewer-title").inner_text())
         self.page.locator("#viewer-close").click()
         self.page.locator("#groups-view").wait_for(state="visible")
+
+    def test_unavailable_visualizations_are_hidden_and_url_falls_back(self) -> None:
+        self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
+        self.page.locator("#timeline-view-toggle").wait_for(state="visible")
+        self.page.locator("#geo-view-toggle").wait_for(state="hidden")
+        self.page.locator("#vector-view-toggle").wait_for(state="hidden")
+        self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}&view=geo", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
+        self.page.locator("#gallery").wait_for(state="visible")
+        self.page.locator("#geo-view-toggle").wait_for(state="hidden")
 
     def test_geo_map_renders_count_and_asset_preview(self) -> None:
         self._open_main()
@@ -415,6 +429,11 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
+        self.page.locator("#visualization-selection").wait_for(state="visible", timeout=15000)
+        self.page.locator("#visualization-selection [data-visualization-details]").click()
+        self.page.locator("#details[open]").wait_for(timeout=15000)
+        self.page.locator("#details-close").click()
+        self.page.locator("#visualization-selection [data-visualization-open]").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
         self.page.locator("#viewer-close").click()
@@ -431,13 +450,15 @@ class BrowserE2ETests(unittest.TestCase):
         before = float(canvas.get_attribute("data-view-scale"))
         self.page.locator("#timeline-zoom-in").click()
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) > before", arg=before)
-        self.page.locator("#timeline-time-mode").select_option("file_created")
+        self.page.locator("#timeline-mode-file-created").click()
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
         canvas.click(position={
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
+        self.page.locator("#visualization-selection").wait_for(state="visible", timeout=15000)
+        self.page.locator("#visualization-selection [data-visualization-open]").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 
@@ -454,6 +475,8 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
+        self.page.locator("#visualization-selection").wait_for(state="visible", timeout=15000)
+        self.page.locator("#visualization-selection [data-visualization-open]").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 

@@ -537,15 +537,51 @@ class CorrectionFrontendTests(unittest.TestCase):
             self.assertIn(label, html)
         self.assertNotIn("Cloud Map", html)
         self.assertNotIn("Not implemented yet", html)
-        self.assertNotIn("visualization-selection", html)
-        self.assertIn("timeline-time-mode", html)
+        self.assertIn("visualization-selection", html)
+        self.assertIn("timeline-mode-capture", html)
+        self.assertIn("timeline-mode-file-created", html)
+        self.assertIn("visualizationCapabilities", source)
+        self.assertIn("loadVisualizationCapabilities", source)
+        self.assertIn("similarSourceId", source)
+        self.assertIn("item.asset_id !== similarSourceId", source)
         self.assertIn("async function loadCurrentView()", source)
         self.assertIn("/api/visualizations/", visualizations)
         self.assertIn('getContext("2d")', visualizations)
         self.assertIn("representativeVisualizationPoint", visualizations)
-        self.assertNotIn("visualization-selection", visualizations)
+        self.assertIn("visualization-selection", visualizations)
+        self.assertNotIn("stableLane", visualizations)
+        self.assertIn("timelineBucketInterval", visualizations)
+        self.assertIn("vectorCellKey", visualizations)
+        self.assertIn("drawVectorDensity", visualizations)
+        self.assertNotIn("Math.floor(screen.x / clusterCellSize", visualizations)
+        self.assertNotIn("fillRect(column", visualizations)
         for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
             self.assertNotIn(remote_map_reference, visualizations)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_visualization_lod_keys_are_world_or_time_anchored(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        snippets = []
+        for start_marker, end_marker in (
+            ("function timelineBucketInterval", "function timelineX"),
+            ("function vectorCellKey", "function fitVector"),
+            ("function thumbnailTier", "function visualizationThumbnail"),
+        ):
+            start = visualizations.index(start_marker)
+            end = visualizations.index(end_marker, start)
+            snippets.append(visualizations[start:end])
+        intervals_start = visualizations.index("const TIMELINE_INTERVALS = ")
+        intervals_end = visualizations.index(";", intervals_start) + 1
+        script = visualizations[intervals_start:intervals_end] + "\n" + "\n".join(snippets) + r'''
+        const intervals = [timelineBucketInterval(86400, 900), timelineBucketInterval(86400, 900)];
+        const cells = [vectorCellKey(1.2, -3.4, .5, 0, 0), vectorCellKey(1.2, -3.4, .5, 0, 0)];
+        console.log(JSON.stringify({intervals, cells, tiers:[thumbnailTier(30, 1), thumbnailTier(100, 1), thumbnailTier(240, 1)]}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["intervals"][0], output["intervals"][1])
+        self.assertEqual(output["cells"][0], output["cells"][1])
+        self.assertEqual(output["tiers"], [36, 64, 112])
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_stale_job_bootstrap_cannot_replace_rendered_gallery(self):

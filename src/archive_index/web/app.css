@@ -429,6 +429,17 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 .visualization-canvas.dragging { cursor:grabbing; }
 .visualization-select { display:flex; align-items:center; gap:.35rem; color:#aeb9c3; font-size:.82rem; }
 .visualization-select select { min-height:2rem; }
+.timeline-mode-toggle { display:flex; gap:0; }
+.timeline-mode-toggle button { border-radius:0; }
+.timeline-mode-toggle button:first-child { border-radius:.35rem 0 0 .35rem; }
+.timeline-mode-toggle button:last-child { border-radius:0 .35rem .35rem 0; }
+.timeline-mode-toggle button.active { color:#edf0f3; background:#31556a; border-color:#5d8ba2; }
+.visualization-selection { display:flex; align-items:center; gap:.75rem; margin-top:.65rem; padding:.55rem .7rem; border:1px solid #435463; border-radius:.45rem; background:#18232c; }
+.visualization-selection-thumb { width:5rem; height:3.5rem; object-fit:contain; background:#10161c; border-radius:.25rem; }
+.visualization-selection-copy { display:grid; gap:.18rem; min-width:0; flex:1; }
+.visualization-selection-copy strong, .visualization-selection-copy span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.visualization-selection-copy span { color:#aeb9c3; font-size:.8rem; }
+.visualization-selection-actions { display:flex; align-items:center; gap:.35rem; }
 .visualization-local-strip { position:absolute; left:.7rem; right:.7rem; bottom:.7rem; max-height:11rem; padding:.6rem; overflow:auto; border:1px solid #435463; border-radius:.45rem; background:rgba(20,29,37,.96); box-shadow:0 .45rem 1.4rem rgba(0,0,0,.35); }
 .visualization-local-strip-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:.45rem; }
 .visualization-local-strip-items { display:flex; gap:.45rem; }
