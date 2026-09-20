@@ -5,11 +5,13 @@ function resetViewerZoom() {
 }
 
 function showViewer(index, items = state.items, context = { mode: "gallery" }) {
-  state.viewerItems = items;
+  state.viewerItems = [...items];
   if (!state.viewerItems[index]) return;
   state.viewerIndex = index;
   state.viewerContext = context.mode || "gallery";
   state.viewerStart = context.start ?? (state.viewerContext === "gallery" ? state.windowStart : 0);
+  state.viewerTotal = context.total ?? (state.viewerContext === "gallery" ? state.total : state.viewerItems.length);
+  state.viewerFilterKey = state.viewerContext === "gallery" ? String(filterParams()) : null;
   state.viewerGroupId = context.groupId || state.viewerItems[index].current_group_id || null;
   state.viewerInfoOpen = false;
   state.viewerDetail = null;
@@ -27,14 +29,13 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
 function renderViewer() {
   const item = state.viewerItems[state.viewerIndex];
   if (!item) return;
+  const total = state.viewerContext === "gallery" ? state.viewerTotal : state.viewerItems.length;
+  const absoluteIndex = state.viewerStart + state.viewerIndex;
   $("viewer-title").innerHTML = filenameMarkup(item.filename);
-  $("viewer-count").textContent = `${state.viewerStart + state.viewerIndex + 1} of ${state.viewerContext === "gallery" ? state.total : state.viewerItems.length}`;
-  $("viewer-previous").disabled = state.viewerIndex <= 0 && (state.viewerContext !== "gallery" || state.viewerStart === 0);
-  $("viewer-next").disabled = state.viewerContext === "gallery" ? state.viewerStart + state.viewerIndex >= state.total - 1 : state.viewerIndex >= state.viewerItems.length - 1;
-  $("viewer-selection").innerHTML = selectionActionsMarkup(item);
-  $("viewer-similar").classList.toggle("hidden", item.media_type === "video");
-  $("viewer-similar").textContent = state.similar ? "Close similar images" : "Show similar images";
-  bindSelectionButtons($("viewer-selection"));
+  $("viewer-count").textContent = (absoluteIndex + 1) + " of " + total;
+  $("viewer-previous").disabled = absoluteIndex <= 0;
+  $("viewer-next").disabled = absoluteIndex >= total - 1;
+  updateViewerReviewState();
   $("viewer-grouping").classList.toggle("hidden", item.media_type === "video" || !state.viewerGroupId);
   $("smooth-control").classList.toggle("hidden", item.media_type === "video");
   $("viewer-smooth").checked = state.viewerSmooth;
@@ -47,6 +48,11 @@ function renderViewer() {
     media.className = "viewer-media";
     media.alt = item.filename;
     media.controls = item.media_type === "video";
+    if (item.media_type === "video") {
+      media.preload = "metadata";
+      media.playsInline = true;
+      media.classList.add("viewer-video");
+    }
     media.draggable = false;
     media.src = item.display_url || item.original_url;
     media.addEventListener("error", () => {
@@ -87,23 +93,44 @@ function clampViewerPan(media) {
 }
 
 async function moveViewer(delta) {
-  let next = state.viewerIndex + delta;
-  if (state.viewerContext === "gallery" && (next < 0 || next >= state.viewerItems.length)) {
-    const offset = next < 0 ? Math.max(0, state.viewerStart - 60) : state.viewerStart + state.viewerItems.length;
-    if (offset < 0 || offset >= state.total) return;
-    const params = filterParams(); params.set("offset",offset); params.set("limit",60);
-    try {
-      const data = await api(`/api/browser?${params}`);
-      if (!data.items.length) return;
-      if (next < 0) { next = data.items.length - 1; state.viewerItems = [...data.items, ...state.viewerItems]; state.viewerStart = offset; }
-      else state.viewerItems = [...state.viewerItems, ...data.items];
-    } catch(error) { $("viewer-title").textContent=error.message;return; }
+  if (state.viewerContext === "gallery") {
+    const target = state.viewerStart + state.viewerIndex + delta;
+    if (target < 0 || target >= state.viewerTotal) return;
+    if (target < state.viewerStart || target >= state.viewerStart + state.viewerItems.length) {
+      try { await loadViewerPageAt(target); } catch (error) { $("viewer-title").textContent = error.message; return; }
+    } else {
+      state.viewerIndex = target - state.viewerStart;
+    }
+  } else {
+    const next = state.viewerIndex + delta;
+    if (next < 0 || next >= state.viewerItems.length) return;
+    state.viewerIndex = next;
   }
-  if (next < 0 || next >= state.viewerItems.length) return;
-  state.viewerIndex = next;
   resetViewerZoom();
   state.viewerDetail = null;
   renderViewer();
+}
+
+async function loadViewerPageAt(absoluteIndex) {
+  const params = filterParams();
+  const offset = Math.floor(absoluteIndex / state.viewerPageSize) * state.viewerPageSize;
+  params.set("offset", String(offset));
+  params.set("limit", String(state.viewerPageSize));
+  const data = await api("/api/browser?" + params);
+  if (!data.items.length || absoluteIndex >= data.total) throw new Error("The requested asset is no longer in this filtered result.");
+  state.viewerItems = data.items;
+  state.viewerStart = offset;
+  state.viewerTotal = data.total;
+  state.viewerIndex = absoluteIndex - offset;
+}
+
+function updateViewerReviewState() {
+  const item = state.viewerItems[state.viewerIndex];
+  if (!item) return;
+  $("viewer-selection").innerHTML = selectionActionsMarkup(item);
+  bindSelectionButtons($("viewer-selection"));
+  $("viewer-similar").textContent = state.similar ? "Close similar assets" : "Show similar assets";
+  $("viewer-similar").classList.remove("hidden");
 }
 
 function stopViewerMedia() {
@@ -114,6 +141,19 @@ function stopViewerMedia() {
 
 function closeDialog(dialog) {
   if (dialog.id === "viewer") {
+    if (state.viewerCloseInFlight) return;
+    state.viewerCloseInFlight = true;
+    prepareViewerReturn().catch(error => showToast("Viewer return failed: " + error.message)).finally(() => {
+      state.viewerCloseInFlight = false;
+      finishCloseDialog(dialog);
+    });
+    return;
+  }
+  finishCloseDialog(dialog);
+}
+
+function finishCloseDialog(dialog) {
+  if (dialog.id === "viewer") {
     stopViewerMedia();
     state.similar = null;
     state.similarSource = null;
@@ -123,6 +163,48 @@ function closeDialog(dialog) {
   }
   if (dialog.open) dialog.close();
   if (!["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
+  if (dialog.id === "viewer") {
+    highlightViewerReturn(state.viewerReturnAssetId);
+    state.viewerReturnAssetId = null;
+    if (state.viewDirty) {
+      state.viewDirty = false;
+      loadCurrentView();
+    }
+  }
+}
+
+async function prepareViewerReturn() {
+  const item = state.viewerItems[state.viewerIndex];
+  if (!item) return;
+  state.viewerReturnAssetId = item.asset_id;
+  if (state.viewerContext === "gallery") {
+    const absolute = state.viewerStart + state.viewerIndex;
+    const params = filterParams();
+    params.set("offset", String(Math.floor(absolute / state.viewerPageSize) * state.viewerPageSize));
+    params.set("limit", String(state.viewerPageSize));
+    const data = await api("/api/browser?" + params);
+    if (data.items.length) {
+      state.items = data.items;
+      state.total = data.total;
+      state.windowStart = Number(params.get("offset"));
+      state.windowHasNext = Boolean(data.has_next);
+      renderGalleryWindow({...data, items: state.items}, state.windowStart, state.windowColumns, state.windowHeight);
+      syncUrl();
+    }
+  } else if (state.viewerContext === "group") {
+    document.querySelector(".group-member[data-asset-id=\"" + CSS.escape(item.asset_id) + "\"]")?.scrollIntoView({block: "center", behavior: "instant"});
+  }
+}
+
+function highlightViewerReturn(assetId) {
+  if (!assetId) return;
+  const target = document.querySelector("[data-asset-id=\"" + CSS.escape(assetId) + "\"]");
+  if (!target) return;
+  target.classList.remove("viewer-return-focus");
+  void target.offsetWidth;
+  target.classList.add("viewer-return-focus");
+  target.scrollIntoView({block: "center", behavior: "instant"});
+  setTimeout(() => target.classList.remove("viewer-return-focus"), 1200);
 }
 
 function bindBackdropClose(dialog) {
@@ -152,7 +234,7 @@ async function showDetails(assetId, context = { mode: "gallery", items: state.it
     $("details").querySelector("[data-detail-thumbnail]")?.addEventListener("click", () => {
       closeDialog($("details"));
       const item = context.items?.[context.index] || assetToViewerItem(asset);
-      showViewer(context.index || 0, context.items || [item], context);
+      showViewer(context.index || 0, context.items || [item], {...context, total: context.total ?? (context.mode === "gallery" ? state.total : (context.items || [item]).length)});
     });
   } catch (error) {
     showToast(`Details request failed: ${error.message}`);

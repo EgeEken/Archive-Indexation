@@ -7,7 +7,7 @@ async function loadWorkspace() {
   ["index", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
   state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.assetRequest++; state.jobsRequest++; state.groupRequest++;
   state.items = []; state.total = 0; state.windowStart = 0; state.windowHasNext = false; state.groupItems = [];
-  state.activeJobId = null; state.browserRevision = null; state.viewerItems = []; state.viewerDetail = null;
+  state.activeJobId = null; state.browserRevision = null; state.viewerItems = []; state.viewerDetail = null; state.viewerTotal = 0; state.viewerFilterKey = null; state.viewDirty = false;
   state.renderKeys = {}; state.galleryRequestInFlight = false; state.galleryLoading = true; state.semanticPending = false; state.folders = null;
   $("gallery").innerHTML = ""; $("groups-list").innerHTML = "";
   const data = await api("/api/workspace");
@@ -167,9 +167,13 @@ function reflowGallery() {
 
 function bindGalleryCards() {
   $("gallery").querySelectorAll(".photo-card").forEach((card) => {
-    card.addEventListener("click", (event) => { if (!event.target.closest("button")) showViewer(Number(card.dataset.index), state.items, { mode: "gallery" }); });
+    const item = state.items[Number(card.dataset.index)];
+    if (item) card.dataset.assetId = item.asset_id;
+  });
+  $("gallery").querySelectorAll(".photo-card").forEach((card) => {
+    card.addEventListener("click", (event) => { if (!event.target.closest("button")) showViewer(Number(card.dataset.index), state.items, { mode: "gallery", start: state.windowStart, total: state.total }); });
     card.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && event.target === card) { event.preventDefault(); showViewer(Number(card.dataset.index), state.items, { mode: "gallery" }); } });
   });
-  $("gallery").querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); showDetails(state.items[Number(button.dataset.info)].asset_id, { mode: "gallery", items: state.items, index: Number(button.dataset.info) }); }));
+  $("gallery").querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); showDetails(state.items[Number(button.dataset.info)].asset_id, { mode: "gallery", items: state.items, index: Number(button.dataset.info), start: state.windowStart, total: state.total }); }));
   bindSelectionButtons($("gallery"));
 }

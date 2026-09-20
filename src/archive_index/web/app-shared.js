@@ -15,6 +15,11 @@ const state = {
   groupPageSize: 10,
   focusGroup: query.get("focus_group"),
   viewerIndex: -1,
+  viewerTotal: 0,
+  viewerPageSize: 60,
+  viewerFilterKey: null,
+  viewerReturnAssetId: null,
+  viewDirty: false,
   viewerZoom: 1,
   viewerPanX: 0,
   viewerPanY: 0,
@@ -151,7 +156,11 @@ function scoreMarkup(score) {
 
 function similarityMarkup(item) {
   if (item.similarity == null) return "";
-  const timestamp = item.best_match_timestamp == null ? "" : ` · ${Number(item.best_match_timestamp).toFixed(1)} s`;
+  const candidateTimestamp = item.best_match_timestamp == null ? "" : " · Match " + Number(item.best_match_timestamp).toFixed(1) + " s";
+  const sourceTimestamp = item.source_match_timestamp == null ? "" : " · Source " + Number(item.source_match_timestamp).toFixed(1) + " s";
+  const timestamp = item.source_match_timestamp != null && item.best_match_timestamp != null
+    ? " · " + Number(item.source_match_timestamp).toFixed(1) + " s ↔ " + Number(item.best_match_timestamp).toFixed(1) + " s"
+    : candidateTimestamp || sourceTimestamp;
   const value = Math.max(0, Math.min(1, Number(item.similarity)));
   const kind = item.similarity_kind || (item.best_match_timestamp == null ? "image" : "text");
   const progress = kind === "text" ? Math.max(0, Math.min(1, (value - 0.18) / 0.17)) : value;
@@ -212,8 +221,13 @@ async function setDecision(assetId, decision) {
     state.items.forEach(update);
     state.viewerItems.forEach(update);
     (state.groupItems || []).forEach(update);
-    if ($("viewer").open) renderViewer();
-    await loadCurrentView();
+    if ($("viewer").open) {
+      updateViewerReviewState();
+      if (state.similar) renderSimilarResults();
+      state.viewDirty = true;
+    } else {
+      await loadCurrentView();
+    }
   } catch (error) {
     showToast(`Review update failed: ${error.message}`);
   }

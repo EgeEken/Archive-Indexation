@@ -153,6 +153,10 @@ async function loadGroups() {
       row.querySelectorAll("[data-group-index]").forEach((button) => button.addEventListener("click", () => showViewer(Number(button.dataset.groupIndex), group.members, { mode: "group", groupId: group.group_id })));
       row.querySelectorAll("[data-info]").forEach((button) => button.addEventListener("click", (event) => { event.stopPropagation(); showDetails(group.members[Number(button.dataset.info)].asset_id, { mode: "group", items: group.members, index: Number(button.dataset.info), groupId: group.group_id }); }));
     });
+    data.groups.forEach((group) => {
+      const row = $("groups-list").querySelector('[data-group-id="' + CSS.escape(group.group_id) + '"]');
+      row?.querySelectorAll(".group-member").forEach((member, index) => { if (group.members[index]) member.dataset.assetId = group.members[index].asset_id; });
+    });
     bindSelectionButtons($("groups-list"));
     renderGroupPager(data);
     syncUrl();

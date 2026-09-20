@@ -332,6 +332,29 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn('addEventListener("close", stopViewerMedia)',source)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_viewer_paging_keeps_absolute_asset_identity_across_sixty_item_boundaries(self):
+        source = javascript_source()
+        start = source.index("async function moveViewer")
+        end = source.index("function stopViewerMedia", start)
+        result = subprocess.run(
+            [shutil.which("node"), "--eval", source[start:end] + """
+            const records=Array.from({length:240},(_,index)=>({asset_id:'asset-'+index,filename:'asset-'+index}));
+            const state={viewerContext:'gallery',viewerStart:0,viewerIndex:59,viewerItems:records.slice(0,60),viewerTotal:240,viewerPageSize:60};
+            const filterParams=()=>new URLSearchParams();
+            const api=async path=>{const query=new URL('http://localhost/'+path).searchParams;const offset=Number(query.get('offset'));const limit=Number(query.get('limit'));return {items:records.slice(offset,offset+limit),total:records.length};};
+            const resetViewerZoom=()=>{};const renderViewer=()=>{};
+            const $=()=>({textContent:''});
+            const visited=[];
+            for(let index=0;index<151;index++){await moveViewer(1);visited.push(state.viewerItems[state.viewerIndex].asset_id);}
+            for(let index=0;index<150;index++){await moveViewer(-1);}
+            console.log(JSON.stringify({first:visited[0],last:visited.at(-1),unique:new Set(visited).size,final:state.viewerItems[state.viewerIndex].asset_id,ordinal:state.viewerStart+state.viewerIndex+1}));
+            """],
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        )
+        result = json.loads(result.stdout)
+        self.assertEqual(result, {"first":"asset-60","last":"asset-210","unique":151,"final":"asset-60","ordinal":61})
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_representation_diagnostics_only_when_present(self):
         source=javascript_source()
         render=source[source.index("function renderRepresentations"):source.index("function renderQuality")]

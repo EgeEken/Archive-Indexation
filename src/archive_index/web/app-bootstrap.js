@@ -22,7 +22,7 @@ $("viewer-next").addEventListener("click", () => moveViewer(1));
 $("viewer-info").addEventListener("click", () => toggleViewerInfo());
 $("viewer-grouping").addEventListener("click", locateCurrentGroup);
 $("viewer-smooth").addEventListener("change", (event) => { state.viewerSmooth = event.target.checked; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
-$("viewer-stage").addEventListener("click", (event) => { if (state.viewerClickSuppressed) { state.viewerClickSuppressed = false; return; } if (["viewer-stage", "viewer-media-pane", "viewer-media"].includes(event.target.id)) closeDialog($("viewer")); });
+$("viewer-stage").addEventListener("click", (event) => { if (state.viewerClickSuppressed) { state.viewerClickSuppressed = false; return; } if (event.target.closest("video")) return; if (["viewer-stage", "viewer-media-pane", "viewer-media"].includes(event.target.id)) closeDialog($("viewer")); });
 $("viewer-media-pane").addEventListener("wheel", (event) => {
   const media = $("viewer-media").querySelector("img.viewer-media");
   if (!media) return;
