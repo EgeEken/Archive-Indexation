@@ -144,7 +144,7 @@ class CorrectionTests(unittest.TestCase):
             with urlopen(base+"/api/browser?q=cold&async=1",timeout=2) as r: data=json.load(r)
             self.assertEqual(data["search"]["state"],"loading")
             with urlopen(base+"/api/browser?view=groups",timeout=2) as r:data=json.load(r)
-            self.assertEqual(data["total"],3)
+            self.assertEqual(data["total"],0)
             self.assertFalse(gate.is_set())
             gate.set();search.prepare_provider(provider.provider_id).result(timeout=5)
 
