@@ -670,6 +670,24 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(headers["Accept-Ranges"], "bytes")
         self.assertEqual(headers["Content-Range"], "bytes 0-3/16")
 
+        status, headers, body = _get_response(
+            self.base_url,
+            f"/api/files/{file_id}/original",
+            {"Range": "bytes=4-"},
+        )
+        self.assertEqual(status, 206)
+        self.assertEqual(body, b"a real video")
+        self.assertEqual(headers["Content-Range"], "bytes 4-15/16")
+
+        status, headers, body = _get_response(
+            self.base_url,
+            f"/api/files/{file_id}/original",
+            {"Range": "bytes=-4"},
+        )
+        self.assertEqual(status, 206)
+        self.assertEqual(body, b"ideo")
+        self.assertEqual(headers["Content-Range"], "bytes 12-15/16")
+
         status, headers, _ = _get_response(
             self.base_url,
             f"/api/files/{file_id}/original",
