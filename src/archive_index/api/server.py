@@ -41,6 +41,7 @@ from ..planning import _historical_rate, analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
+from .exports import selected_zip
 from .workspaces import (
     _active_job,
     _configuration_quality_readiness,
@@ -319,6 +320,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="timeline"))
             elif request.path == "/api/visualizations/vector":
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="vector"))
+            elif request.path == "/api/exports/selected.zip":
+                archive, _, _ = selected_zip(workspace)
+                try:
+                    self._send_file(
+                        archive,
+                        "application/zip",
+                        content_disposition='attachment; filename="selected-assets.zip"',
+                    )
+                finally:
+                    archive.unlink(missing_ok=True)
             elif request.path == "/api/search-status":
                 self._send_json(200, _search_status(workspace))
             elif request.path == "/api/search":
@@ -684,7 +695,7 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         finally:
             preview.image.close()
 
-    def _send_file(self, path: Path, content_type: str, allow_range: bool = False) -> None:
+    def _send_file(self, path: Path, content_type: str, allow_range: bool = False, content_disposition: str | None = None) -> None:
         if not path.is_file():
             raise ResourceNotFound("file is unavailable")
         try:
@@ -732,6 +743,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 source.seek(start)
             self.send_response(206 if partial else 200)
             self.send_header("Content-Type", content_type)
+            if content_disposition:
+                self.send_header("Content-Disposition", content_disposition)
             if allow_range:
                 self.send_header("Accept-Ranges", "bytes")
             if partial:

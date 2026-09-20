@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from contextlib import closing
 from io import BytesIO
 from pathlib import Path
@@ -695,6 +696,28 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 416)
         self.assertEqual(headers["Content-Range"], "bytes */16")
+
+    def test_selected_zip_export_is_byte_identical_and_relative(self) -> None:
+        with closing(self.workspace.connect()) as connection:
+            ids = [row[0] for row in connection.execute(
+                "SELECT logical_asset_id FROM physical_file WHERE relative_path IN ('root.jpg', 'nested/nested.jpg')"
+            )]
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE logical_asset SET selection_state = 'selected' WHERE id IN (?, ?)", ids)
+        originals = {
+            "root.jpg": (self.workspace.root / "root.jpg").read_bytes(),
+            "nested/nested.jpg": (self.workspace.root / "nested" / "nested.jpg").read_bytes(),
+        }
+        status, headers, body = _get_response(self.base_url, "/api/exports/selected.zip")
+        self.assertEqual(status, 200)
+        self.assertIn("selected-assets.zip", headers["Content-Disposition"])
+        with zipfile.ZipFile(BytesIO(body)) as archive:
+            self.assertEqual(sorted(archive.namelist()), sorted(originals))
+            for name, content in originals.items():
+                self.assertEqual(archive.read(name), content)
+        self.assertFalse(list((self.workspace.index_path("tmp")).glob("selected-*.zip")))
+        for name, content in originals.items():
+            self.assertEqual((self.workspace.root / name).read_bytes(), content)
 
     def test_recommendation_filters_and_workspace_scoped_decisions(self) -> None:
         with closing(self.workspace.connect()) as connection:

@@ -15,6 +15,7 @@ $("viewer-open-normal").onclick = openSimilarNormally;
 $("workspace-explorer").onclick = () => revealFile();
 $("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex].preferred_physical_id);
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));
+$("export-selected").addEventListener("click", () => { window.location.href = apiPath("/api/exports/selected.zip"); });
 
 ["top", "bottom"].forEach((place) => { $(`groups-previous-${place}`).addEventListener("click", () => { state.groupPage = Math.max(1, state.groupPage - 1); syncUrl(); loadGroups().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }); $(`groups-next-${place}`).addEventListener("click", () => { state.groupPage += 1; syncUrl(); loadGroups().then(() => window.scrollTo({ top: 0, behavior: "smooth" })); }); });
 $("viewer-close").addEventListener("click", () => closeDialog($("viewer")));
