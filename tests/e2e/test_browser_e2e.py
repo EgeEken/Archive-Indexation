@@ -55,7 +55,10 @@ class BrowserE2ETests(unittest.TestCase):
         cls.server_thread.start()
         cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
         cls.playwright = sync_playwright().start()
-        cls.browser = cls.playwright.chromium.launch(headless=True, args=["--disable-gpu"])
+        cls.browser = cls.playwright.chromium.launch(
+            headless=True,
+            args=["--disable-gpu", "--disable-dev-shm-usage"],
+        )
 
     @classmethod
     def tearDownClass(cls) -> None:
