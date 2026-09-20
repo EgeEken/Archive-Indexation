@@ -148,4 +148,5 @@ class ProjectionTests(unittest.TestCase):
         )
         self.assertEqual(data["filtered_asset_count"], 2)
         self.assertEqual(data["represented_point_count"], 2)
-        self.assertTrue(all(set(point) == {"asset_id", "x", "y", "media_type"} for point in data["points"]))
+        self.assertTrue(all({"asset_id", "x", "y", "media_type"}.issubset(point) for point in data["points"]))
+        self.assertTrue(all(set(point).issubset({"asset_id", "x", "y", "media_type", "filename", "quality_score"}) for point in data["points"]))

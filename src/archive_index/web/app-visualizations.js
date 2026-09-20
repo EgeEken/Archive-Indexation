@@ -35,7 +35,7 @@ async function loadVisualization(mode) {
       } else view.needsFit = true;
       view.hitTargets = [];
       state.visualizationSelectedId = null;
-      hideVisualizationSelection();
+      clearVisualizationSelection();
     }
     state.searchProvider = data.search?.provider || state.searchProvider;
     showSearchStatus(data.search || {state: "complete"}, {
@@ -480,7 +480,7 @@ async function selectVisualizationAsset(point) {
   } catch (error) { showToast(`Asset preview unavailable: ${error.message}`); }
 }
 
-function hideVisualizationSelection() { state.visualizationSelectedId = null; state.visualizationSelectionRequest = (state.visualizationSelectionRequest || 0) + 1; $("visualization-selection")?.classList.add("hidden"); $("geo-local-strip")?.classList.add("hidden"); }
+function clearVisualizationSelection() { state.visualizationSelectedId = null; state.visualizationSelectionRequest = (state.visualizationSelectionRequest || 0) + 1; $("geo-local-strip")?.classList.add("hidden"); }
 
 function bindVisualizationEvents(mode) {
   const canvas = visualizationCanvas(mode); let dragging = false; let startX = 0; let startY = 0; let moved = false;

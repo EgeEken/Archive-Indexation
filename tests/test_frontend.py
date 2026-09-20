@@ -537,9 +537,13 @@ class CorrectionFrontendTests(unittest.TestCase):
             self.assertIn(label, html)
         self.assertNotIn("Cloud Map", html)
         self.assertNotIn("Not implemented yet", html)
+        self.assertNotIn("visualization-selection", html)
+        self.assertIn("timeline-time-mode", html)
         self.assertIn("async function loadCurrentView()", source)
         self.assertIn("/api/visualizations/", visualizations)
         self.assertIn('getContext("2d")', visualizations)
+        self.assertIn("representativeVisualizationPoint", visualizations)
+        self.assertNotIn("visualization-selection", visualizations)
         for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
             self.assertNotIn(remote_map_reference, visualizations)
 
