@@ -401,6 +401,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#geo-view").wait_for(state="visible")
         self.page.locator("#geo-canvas").wait_for()
         self.page.wait_for_function("() => Number(document.querySelector('#geo-canvas').dataset.pointCount) === 3")
+        self.page.wait_for_function("() => document.querySelector('#geo-canvas').dataset.firstTargetX !== undefined")
         self.assertIn("3 geotagged assets · 5 filtered assets", self.page.locator("#geo-status").inner_text())
         canvas = self.page.locator("#geo-canvas")
         canvas.click(position={
@@ -417,6 +418,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.get_by_role("tab", name="Timeline").click()
         self.page.locator("#timeline-view").wait_for(state="visible")
         self.page.wait_for_function("() => Number(document.querySelector('#timeline-canvas').dataset.pointCount) === 5")
+        self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
         self.assertIn("5 timed assets · 5 filtered assets", self.page.locator("#timeline-status").inner_text())
         canvas = self.page.locator("#timeline-canvas")
         before = float(canvas.get_attribute("data-view-scale"))
@@ -424,6 +426,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) > before", arg=before)
         self.page.locator("#timeline-time-mode").select_option("file_created")
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
+        self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
         canvas.click(position={
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
@@ -436,6 +439,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#workspace-view").wait_for(state="visible")
         self.page.locator("#vector-view").wait_for(state="visible")
         self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').dataset.pointCount) === 5")
+        self.page.wait_for_function("() => document.querySelector('#vector-canvas').dataset.firstTargetX !== undefined")
         self.assertIn("5 projected assets · 5 filtered assets", self.page.locator("#vector-status").inner_text())
         self.assertFalse(any("openclip" in entry.lower() or "model" in entry.lower() for entry in self.browser_log))
         canvas = self.page.locator("#vector-canvas")
