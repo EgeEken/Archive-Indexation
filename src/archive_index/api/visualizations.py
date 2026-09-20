@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from math import isfinite
@@ -15,6 +16,47 @@ _CAPTURE_PREFIX = re.compile(
     r"(?:[T ](?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})"
     r"(?:\.(?P<fraction>\d+))?)?"
 )
+
+
+def visualization_capabilities(workspace) -> dict[str, bool]:
+    from ..indexing.projection import current_projection
+
+    return {
+        "geo": _workspace_has_gps(workspace),
+        "timeline": True,
+        "vector": current_projection(workspace)[0] is not None,
+    }
+
+
+def _workspace_has_gps(workspace) -> bool:
+    connection = workspace.connect()
+    try:
+        last_rowid = 0
+        while True:
+            rows = connection.execute(
+                """
+                SELECT rowid, metadata_json
+                FROM physical_file
+                WHERE rowid > ? AND in_scope = 1 AND metadata_json LIKE '%gps%'
+                ORDER BY rowid
+                LIMIT ?
+                """,
+                (last_rowid, _ID_CHUNK_SIZE),
+            ).fetchall()
+            if not rows:
+                return False
+            for row in rows:
+                try:
+                    gps = (json.loads(row["metadata_json"]) or {}).get("gps") or {}
+                    latitude = float(gps["latitude"])
+                    longitude = float(gps["longitude"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isfinite(latitude) and isfinite(longitude) and -90 <= latitude <= 90 and -180 <= longitude <= 180:
+                    return True
+            last_rowid = rows[-1]["rowid"]
+    finally:
+        connection.close()
 
 
 def visualization_data(workspace, query, handle, *, filter_assets, kind: str) -> dict[str, object]:
@@ -63,15 +105,6 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
             base.update(available=False, empty_reason=reason)
             return base | {"points": []}
         points = projection_points(workspace, projection["id"], [item["asset_id"] for item in items])
-        summaries = {item["asset_id"]: item for item in items}
-        points = [
-            {
-                **point,
-                "filename": summaries[point["asset_id"]].get("filename"),
-                "quality_score": summaries[point["asset_id"]].get("quality_score"),
-            }
-            for point in points
-        ]
         base.update(
             points=points,
             represented_point_count=len(points),
@@ -109,19 +142,11 @@ def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, obj
                 by_asset[row["logical_asset_id"]].append(row)
     finally:
         connection.close()
-    summaries = {item["asset_id"]: item for item in items}
     points = []
     for asset_id in asset_ids:
         location = asset_location(by_asset[asset_id])
         if location is not None:
-            item = summaries[asset_id]
-            points.append({
-                "asset_id": asset_id,
-                **location,
-                "filename": item.get("filename"),
-                "media_type": item.get("media_type"),
-                "quality_score": item.get("quality_score"),
-            })
+            points.append({"asset_id": asset_id, **location})
     return points
 
 
@@ -163,9 +188,7 @@ def _timeline_points(workspace, items, time_mode: str = "capture") -> list[dict[
                 "capture_time": item.get("capture_time"),
                 "capture_time_kind": item.get("capture_time_kind"),
                 "file_created_time": chosen["file_created_time"] if chosen else None,
-                "filename": item.get("filename"),
                 "media_type": item.get("media_type"),
-                "quality_score": item.get("quality_score"),
             }
         )
     points.sort(key=lambda point: (point["time"], point["asset_id"]))

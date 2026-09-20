@@ -4,6 +4,10 @@ function resetViewerZoom() {
   state.viewerPanY = 0;
 }
 
+function visibleStrictGroupId(item) {
+  return Number(item?.strict_group_member_count) >= 2 ? item.current_group_id : null;
+}
+
 function showViewer(index, items = state.items, context = { mode: "gallery" }) {
   state.viewerItems = [...items];
   if (!state.viewerItems[index]) return;
@@ -12,7 +16,7 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
   state.viewerStart = context.start ?? (state.viewerContext === "gallery" ? state.windowStart : 0);
   state.viewerTotal = context.total ?? (state.viewerContext === "gallery" ? state.total : state.viewerItems.length);
   state.viewerFilterKey = state.viewerContext === "gallery" ? String(filterParams()) : null;
-  state.viewerGroupId = context.groupId || state.viewerItems[index].current_group_id || null;
+  state.viewerGroupId = context.groupId || visibleStrictGroupId(state.viewerItems[index]);
   state.viewerInfoOpen = false;
   state.viewerDetail = null;
   if (!context.keepSimilar) {
@@ -135,7 +139,9 @@ function updateViewerReviewState() {
   bindSelectionButtons($("viewer-selection"));
   $("viewer-similar").textContent = state.similar ? "Close similar assets" : "Show similar assets";
   $("viewer-similar").classList.remove("hidden");
-  $("viewer-open-normal")?.classList.toggle("hidden", state.viewerContext !== "similar");
+  const similarSourceId = state.similar?.source?.asset_id;
+  const canOpenNormally = state.viewerContext === "similar" && item.asset_id !== similarSourceId;
+  $("viewer-open-normal")?.classList.toggle("hidden", !canOpenNormally);
 }
 
 function stopViewerMedia() {
@@ -311,7 +317,7 @@ function closeSimilar() {
 async function openSimilarNormally() {
   if (!state.similar || state.viewerContext !== "similar") return;
   const item = state.viewerItems[state.viewerIndex];
-  if (!item) return;
+  if (!item || item.asset_id === state.similar.source.asset_id) return;
   const assetId = item.asset_id;
   state.similar = null;
   state.similarSource = null;
@@ -331,7 +337,7 @@ async function openSimilarNormally() {
       state.viewerTotal = page.total;
       state.viewerIndex = located.index - located.offset;
       state.viewerContext = "gallery";
-      state.viewerGroupId = item.current_group_id || null;
+      state.viewerGroupId = visibleStrictGroupId(item);
       renderViewer();
       return;
     }
@@ -343,7 +349,7 @@ async function openSimilarNormally() {
   state.viewerTotal = 1;
   state.viewerItems = [item];
   state.viewerIndex = 0;
-  state.viewerGroupId = item.current_group_id || null;
+  state.viewerGroupId = visibleStrictGroupId(item);
   renderViewer();
 }
 

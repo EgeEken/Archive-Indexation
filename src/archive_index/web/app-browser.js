@@ -29,6 +29,7 @@ async function loadWorkspace() {
   renderSemanticControls();
   $("recommendation-threshold").value = config.configuration?.recommendation_threshold ?? 0.70;
   $("recommendation-value").textContent = Number($("recommendation-threshold").value).toFixed(2);
+  await loadVisualizationCapabilities();
   document.body.classList.toggle("sidebar-collapsed", state.collapsed);
   $("sidebar-reopen").classList.toggle("hidden", !state.collapsed);
   renderFilterButtons();

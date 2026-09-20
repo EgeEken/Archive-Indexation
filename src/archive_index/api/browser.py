@@ -22,6 +22,7 @@ def asset_summary(
     is_recommended: bool = False,
     recommendation_run_id: str | None = None,
     current_group_id: str | None = None,
+    strict_group_member_count: int | None = None,
 ) -> dict[str, object]:
     physical = physical_rows(workspace, asset["id"]) if physical is None else physical
     active_physical = [row for row in physical if row["in_scope"]] or physical
@@ -81,6 +82,7 @@ def asset_summary(
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
         "preferred_physical_id": representative["id"],
+        "strict_group_member_count": strict_group_member_count,
         "width": width,
         "height": height,
     }
@@ -130,6 +132,7 @@ def asset_detail(
     handle: str,
     current_recommendations,
     current_group_ids,
+    current_group_details=None,
 ) -> dict[str, object]:
     connection = workspace.connect()
     try:
@@ -145,7 +148,8 @@ def asset_detail(
     ]
     relationships = current_relationships(workspace, [row["id"] for row in physical])
     recommendation_ids, recommendation_run_id = current_recommendations(workspace)
-    current_group_id = current_group_ids(workspace, [asset_id]).get(asset_id)
+    details = current_group_details(workspace, [asset_id]).get(asset_id, {}) if current_group_details else {}
+    current_group_id = details.get("group_id") or current_group_ids(workspace, [asset_id]).get(asset_id)
     location = asset_location(physical)
     return {
         "asset_id": asset["id"],
@@ -157,6 +161,7 @@ def asset_detail(
         "user_decision_updated_at": asset["selection_updated_at"],
         "recommendation_run_id": recommendation_run_id,
         "current_group_id": current_group_id,
+        "strict_group_member_count": details.get("member_count"),
         "location": location,
         "physical_files": [
             {

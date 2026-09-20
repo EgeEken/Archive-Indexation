@@ -175,9 +175,8 @@ class BrowserTests(unittest.TestCase):
         (self.workspace.root / "video.mp4").write_bytes(b"fixture")
         scan(self.workspace)
         data = self.browser(view="groups", media_type="video")
-        self.assertEqual(data["total"], 1)
-        self.assertEqual(data["groups"][0]["member_count"], 1)
-        self.assertEqual(data["groups"][0]["members"][0]["media_type"], "video")
+        self.assertEqual(data["total"], 0)
+        self.assertEqual(data["groups"], [])
 
     def test_query_vector_and_ranking_reuse(self):
         config = self.workspace.configuration(); config["semantic_search_enabled"] = True

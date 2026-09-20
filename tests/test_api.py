@@ -589,13 +589,19 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(assets["items"]), 3)
 
     def test_group_api_uses_bulk_physical_lookup(self) -> None:
+        _write_image(self.workspace.root / "nested" / "nested.jpg", (640, 480))
+        scan(self.workspace)
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE logical_asset SET capture_time = '2026-09-20T12:00:00+03:00', capture_time_kind = 'exif_offset'"
+            )
         extract_visual_features(self.workspace)
         build_groups(self.workspace)
         with patch("archive_index.api.server._physical_rows", side_effect=AssertionError("N+1 group lookup")):
             status, groups = _get_json(self.base_url, "/api/groups")
         self.assertEqual(status, 200)
-        self.assertEqual(len(groups["groups"]), 2)
-        self.assertTrue(all(group["members"] for group in groups["groups"]))
+        self.assertEqual(len(groups["groups"]), 1)
+        self.assertTrue(all(len(group["members"]) >= 2 for group in groups["groups"]))
         self.assertTrue(
             all(
                 member["current_group_id"] == group["group_id"]
@@ -605,28 +611,24 @@ class ApiTests(unittest.TestCase):
         )
         status, filename_groups = _get_json(self.base_url, "/api/groups?sort_by=filename&direction=asc")
         self.assertEqual(status, 200)
-        self.assertEqual(
-            [group["members"][0]["filename"] for group in filename_groups["groups"]],
-            ["nested.jpg", "root.jpg"],
-        )
+        self.assertEqual(filename_groups["total"], 1)
+        self.assertGreaterEqual(len(filename_groups["groups"][0]["members"]), 2)
         status, reverse_filename_groups = _get_json(self.base_url, "/api/groups?sort_by=filename&direction=desc")
         self.assertEqual(status, 200)
-        self.assertEqual(
-            [group["members"][0]["filename"] for group in reverse_filename_groups["groups"]],
-            ["root.jpg", "nested.jpg"],
-        )
+        self.assertEqual(reverse_filename_groups["total"], 1)
+        self.assertGreaterEqual(len(reverse_filename_groups["groups"][0]["members"]), 2)
 
         status, filtered = _get_json(self.base_url, "/api/groups?q=root.jpg")
-        self.assertEqual((status, filtered["total"], len(filtered["groups"][0]["members"])), (200, 1, 1))
+        self.assertEqual((status, filtered["total"], len(filtered["groups"][0]["members"])), (200, 1, 2))
         status, video_groups = _get_json(self.base_url, "/api/groups?media_type=video")
-        self.assertEqual((status, video_groups["total"]), (200, 1))
+        self.assertEqual((status, video_groups["total"], video_groups["groups"]), (200, 0, []))
         group_id = groups["groups"][0]["group_id"]
         status, location = _get_json(self.base_url, f"/api/groups/locate?group_id={group_id}")
         self.assertEqual((status, location["found"], location["page"]), (200, True, 1))
 
         status, representatives = _get_json(self.base_url, "/api/assets?representatives=1")
         self.assertEqual(status, 200)
-        self.assertEqual(representatives["total"], 3)
+        self.assertEqual(representatives["total"], 2)
         self.assertTrue(all(item["is_representative"] for item in representatives["items"]))
 
     def test_group_rebuild_refreshes_recommendations_for_new_grouping_run(self) -> None:

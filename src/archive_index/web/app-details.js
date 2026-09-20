@@ -8,6 +8,7 @@ function assetToViewerItem(asset) {
     original_url: first.original_url,
     display_url: asset.display_url || first.display_url || first.original_url,
     current_group_id: asset.current_group_id,
+    strict_group_member_count: asset.strict_group_member_count,
     user_decision: asset.user_decision,
     auto_recommended: asset.auto_recommended,
   };

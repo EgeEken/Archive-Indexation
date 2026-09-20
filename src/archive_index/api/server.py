@@ -84,7 +84,7 @@ from .browser import (
     physical_rows as physical_rows_service,
     physical_rows_for_assets as physical_rows_for_assets_service,
 )
-from .visualizations import visualization_data
+from .visualizations import visualization_capabilities, visualization_data
 from .jobs import (
     cancel_job as cancel_job_service,
     run_embeddings_only as run_embeddings_only_service,
@@ -286,6 +286,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             if request.path == "/api/workspace":
                 _prepare_search(workspace)
                 self._send_json(200, _workspace_summary(workspace, handle))
+            elif request.path == "/api/workspace/visualization-capabilities":
+                self._send_json(200, visualization_capabilities(workspace))
             elif request.path == "/api/workspace/configuration":
                 self._send_json(200, {"configuration": workspace.configuration()})
             elif request.path == "/api/folders":
@@ -1027,7 +1029,7 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     finally:
         connection.close()
     physical_by_asset = _physical_rows_for_assets(workspace, [row["id"] for row in rows])
-    group_by_asset = _current_group_ids(workspace, [row["id"] for row in rows])
+    group_details = _current_group_details(workspace, [row["id"] for row in rows])
     return {
         "items": [
             _asset_summary(
@@ -1038,7 +1040,8 @@ def _assets(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 row["id"] in representative_ids,
                 row["id"] in recommendation_ids,
                 recommendation_run_id,
-                group_by_asset.get(row["id"]),
+                (group := group_details.get(row["id"], {})).get("group_id"),
+                group.get("member_count"),
             )
             for row in rows
         ],
@@ -1138,7 +1141,7 @@ def _browser_catalog(workspace, handle):
     physical_by_asset = {}
     for row in physical_rows:
         physical_by_asset.setdefault(row["logical_asset_id"], []).append(row)
-    group_by_asset = _current_group_ids(workspace, [row["id"] for row in rows])
+    group_details = _current_group_details(workspace, [row["id"] for row in rows])
     return [
         _asset_summary(
             workspace,
@@ -1148,7 +1151,8 @@ def _browser_catalog(workspace, handle):
             row["id"] in representative_ids,
             row["id"] in recommendation_ids,
             recommendation_run_id,
-            group_by_asset.get(row["id"]),
+            (group := group_details.get(row["id"], {})).get("group_id"),
+            group.get("member_count"),
         )
         for row in rows
     ], grouping_available
@@ -1277,7 +1281,7 @@ def _browser_assets(workspace, query, handle):
             group = groups.setdefault(group_id, {"group_id": group_id, "label": "Video" if item["media_type"] == "video" else "Group", "members": [], "first_capture_time": item["capture_time"]})
             group["members"].append(item)
             group["member_count"] = len(group["members"])
-        values = list(groups.values())
+        values = [group for group in groups.values() if group["member_count"] >= 2]
         result.update(groups=values[offset:offset + limit], total=len(values), has_next=offset + limit < len(values))
     else:
         result.update(items=items[offset:offset + limit], has_next=offset + limit < len(items))
@@ -1325,7 +1329,7 @@ def _search_response(workspace: Workspace, handle: str, results: list[SearchResu
     physical = _physical_rows_for_assets(workspace, asset_ids)
     representatives, _ = _current_representatives(workspace)
     recommendations, recommendation_run_id = _current_recommendations(workspace)
-    groups = _current_group_ids(workspace, asset_ids)
+    group_details = _current_group_details(workspace, asset_ids)
     items = []
     for result in selected:
         asset = by_id.get(result.asset_id)
@@ -1339,7 +1343,8 @@ def _search_response(workspace: Workspace, handle: str, results: list[SearchResu
             result.asset_id in representatives,
             result.asset_id in recommendations,
             recommendation_run_id,
-            groups.get(result.asset_id),
+            (group := group_details.get(result.asset_id, {})).get("group_id"),
+            group.get("member_count"),
         )
         item["similarity"] = result.similarity
         item["similarity_kind"] = "text" if query_text is not None else "image"
@@ -1387,7 +1392,12 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
                 "total": 0, "has_next": False,
             }
         if filters["media_type"] == "video":
-            return _video_groups(workspace, query, handle, filters, active, page, page_size)
+            return {
+                "run_id": active["id"], "algorithm": active["algorithm"],
+                "version": active["version"], "settings": _json_or_none(active["settings_json"]),
+                "groups": [], "page": page, "page_size": page_size,
+                "total": 0, "has_next": False, "filters": filters,
+            }
         condition, condition_params, order = _group_query_parts(active["id"], filters)
         total = connection.execute(
             f"SELECT COUNT(*) FROM strict_group AS sg WHERE sg.run_id = ? {condition}",
@@ -1437,6 +1447,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
     member_asset_ids = [row["logical_asset_id"] for row in members]
     physical_by_asset = _physical_rows_for_assets(workspace, member_asset_ids)
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+    group_member_counts = {row["group_id"]: row["member_count"] for row in group_rows}
     members_by_group: dict[str, list[dict[str, object]]] = {group_id: [] for group_id in group_ids}
     for row in members:
         summary = _asset_summary(
@@ -1448,6 +1459,7 @@ def _groups(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -
             row["logical_asset_id"] in recommendation_ids,
             recommendation_run_id,
             row["group_id"],
+            group_member_counts[row["group_id"]],
         )
         members_by_group[row["group_id"]].append({"asset": summary, "member_order": row["member_order"]})
     response_groups = []
@@ -1537,6 +1549,7 @@ def _video_groups(workspace: Workspace, query, handle, filters, active, page, pa
             row["id"] in recommendation_ids,
             recommendation_run_id,
             None,
+            1,
         )
         groups.append({
             "group_id": f"video:{row['id']}",
@@ -1585,6 +1598,7 @@ def _group_filters(workspace: Workspace, query: Mapping[str, list[str]]) -> dict
 
 def _group_query_parts(run_id: str, filters: Mapping[str, object]) -> tuple[str, list[object], str]:
     clauses: list[str] = [
+        "sg.member_count >= 2",
         "EXISTS (SELECT 1 FROM strict_group_member AS sgm_scope "
         "JOIN physical_file AS pf_scope ON pf_scope.logical_asset_id = sgm_scope.logical_asset_id "
         "WHERE sgm_scope.run_id = sg.run_id AND sgm_scope.group_id = sg.group_id AND pf_scope.in_scope = 1)"
@@ -1725,7 +1739,7 @@ def _current_representatives(workspace: Workspace) -> tuple[set[str], bool]:
     return {row["representative_logical_asset_id"] for row in rows} | {row["id"] for row in videos}, True
 
 
-def _current_group_ids(workspace: Workspace, asset_ids: list[str]) -> dict[str, str]:
+def _current_group_details(workspace: Workspace, asset_ids: list[str]) -> dict[str, dict[str, object]]:
     if not asset_ids:
         return {}
     connection = workspace.connect()
@@ -1736,16 +1750,30 @@ def _current_group_ids(workspace: Workspace, asset_ids: list[str]) -> dict[str, 
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(connection.execute(
                 f"""
-                SELECT sgm.logical_asset_id, sgm.group_id
+                SELECT sgm.logical_asset_id, sgm.group_id, sg.member_count
                 FROM workspace_grouping AS wg
                 JOIN strict_group_member AS sgm ON sgm.run_id = wg.active_run_id
+                JOIN strict_group AS sg ON sg.run_id = sgm.run_id AND sg.group_id = sgm.group_id
                 WHERE wg.id = 1 AND sgm.logical_asset_id IN ({placeholders})
                 """,
                 chunk,
             ).fetchall())
     finally:
         connection.close()
-    return {row["logical_asset_id"]: row["group_id"] for row in rows}
+    return {
+        row["logical_asset_id"]: {
+            "group_id": row["group_id"],
+            "member_count": int(row["member_count"]),
+        }
+        for row in rows
+    }
+
+
+def _current_group_ids(workspace: Workspace, asset_ids: list[str]) -> dict[str, str]:
+    return {
+        asset_id: details["group_id"]
+        for asset_id, details in _current_group_details(workspace, asset_ids).items()
+    }
 
 
 def _current_recommendations(workspace: Workspace) -> tuple[set[str], str | None]:
@@ -1888,6 +1916,7 @@ def _asset_detail(workspace: Workspace, asset_id: str, handle: str) -> dict[str,
         handle,
         _current_recommendations,
         _current_group_ids,
+        _current_group_details,
     )
 
 

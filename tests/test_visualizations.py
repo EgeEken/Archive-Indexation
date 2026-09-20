@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from archive_index.api.server import _browser_filtered_assets
-from archive_index.api.visualizations import visualization_data, wall_clock_coordinate
+from archive_index.api.visualizations import visualization_capabilities, visualization_data, wall_clock_coordinate
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.quality_provider import OffQualityProvider
@@ -67,6 +67,7 @@ class VisualizationDataTests(unittest.TestCase):
         points = {point["asset_id"]: point for point in data["points"]}
         self.assertEqual(points[self.gps_id]["latitude"], 48.792146)
         self.assertEqual(points[self.fallback_id]["latitude"], 41.0082)
+        self.assertEqual(set(points[self.gps_id]), {"asset_id", "latitude", "longitude"})
         filtered = visualization_data(
             self.workspace,
             {"folders": [json.dumps([""])], "media_type": ["image"]},
@@ -85,6 +86,10 @@ class VisualizationDataTests(unittest.TestCase):
         self.assertEqual(geo["represented_point_count"], 1)
         self.assertEqual(timeline["represented_point_count"], 2)
         self.assertEqual(timeline["points"][0]["capture_time"], "2026-09-19T12:34:56")
+        self.assertEqual(
+            set(timeline["points"][0]),
+            {"asset_id", "time", "time_kind", "capture_time", "capture_time_kind", "file_created_time", "media_type"},
+        )
 
     def test_wall_clock_coordinate_ignores_timezone_suffix(self):
         self.assertEqual(
@@ -123,3 +128,14 @@ class VisualizationDataTests(unittest.TestCase):
         self.assertEqual(points[self.gps_id]["time_kind"], "file_created")
         self.assertEqual(points[self.fallback_id]["file_created_time"], "2024-01-03T04:05:06+03:00")
         self.assertEqual(points[self.fallback_id]["time"], wall_clock_coordinate("2024-01-03T04:05:06+03:00"))
+        self.assertEqual(set(points[self.gps_id]), {"asset_id", "time", "time_kind", "capture_time", "capture_time_kind", "file_created_time", "media_type"})
+
+    def test_workspace_visualization_capabilities_use_workspace_state(self):
+        capabilities = visualization_capabilities(self.workspace)
+        self.assertEqual(capabilities, {"geo": True, "timeline": True, "vector": False})
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE physical_file SET metadata_json = ?",
+                (json.dumps({"gps": {"latitude": 95, "longitude": 2}}),),
+            )
+        self.assertFalse(visualization_capabilities(self.workspace)["geo"])

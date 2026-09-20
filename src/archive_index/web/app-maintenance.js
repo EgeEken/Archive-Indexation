@@ -18,6 +18,8 @@ async function loadJobs() {
         state.activeJobId = null;
         await api("/api/workspace");
         if (requestId !== state.jobsRequest) return;
+        await loadVisualizationCapabilities();
+        if (requestId !== state.jobsRequest) return;
         state.renderKeys = {};
         await loadCurrentView();
         await loadProblemsBadge();

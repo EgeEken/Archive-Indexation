@@ -41,11 +41,12 @@ const state = {
   visualizationRequest: 0,
   visualizationAbort: null,
   visualizations: {
-    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: []},
-    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {origin: 0, span: 86400, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true}, file_created: {origin: 0, span: 86400, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true}}, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], origin: 0, span: 86400},
-    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], grid: new Map()},
+    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, baseScale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: []},
+    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {origin: 0, span: 86400, centerX: .5, centerY: .5, scale: 1, baseScale: 1, panX: 0, panY: 0, needsFit: true}, file_created: {origin: 0, span: 86400, centerX: .5, centerY: .5, scale: 1, baseScale: 1, panX: 0, panY: 0, needsFit: true}}, centerX: .5, centerY: .5, scale: 1, baseScale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], origin: 0, span: 86400},
+    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, baseScale: 1, baseCellWorld: 1, gridOriginX: 0, gridOriginY: 0, panX: 0, panY: 0, needsFit: true, hitTargets: [], grid: new Map()},
   },
   visualizationSelectedId: null,
+  visualizationCapabilities: {geo: true, timeline: true, vector: true},
 };
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
@@ -247,4 +248,38 @@ async function loadCurrentView() {
   if (state.viewMode === "groups") return loadGroups();
   if (["geo", "timeline", "vector"].includes(state.viewMode)) return loadVisualization(state.viewMode);
   return loadAssets();
+}
+
+function viewModeAvailable(mode) {
+  return ["gallery", "groups", "timeline"].includes(mode) || Boolean(state.visualizationCapabilities[mode]);
+}
+
+function renderVisualizationNavigation() {
+  for (const [id, mode] of [["gallery-view-toggle", "gallery"], ["groups-view-toggle", "groups"], ["geo-view-toggle", "geo"], ["timeline-view-toggle", "timeline"], ["vector-view-toggle", "vector"]]) {
+    const button = $(id);
+    const available = viewModeAvailable(mode);
+    button.classList.toggle("hidden", !available);
+    button.setAttribute("aria-selected", String(available && state.viewMode === mode));
+  }
+}
+
+function applyVisualizationCapabilities(capabilities) {
+  state.visualizationCapabilities = {
+    geo: Boolean(capabilities?.geo),
+    timeline: true,
+    vector: Boolean(capabilities?.vector),
+  };
+  renderVisualizationNavigation();
+  if (!viewModeAvailable(state.viewMode)) {
+    if (typeof setViewMode === "function") setViewMode("gallery", false);
+    else {
+      state.viewMode = "gallery";
+      syncUrl();
+    }
+  }
+}
+
+async function loadVisualizationCapabilities() {
+  const capabilities = await api("/api/workspace/visualization-capabilities");
+  applyVisualizationCapabilities(capabilities);
 }

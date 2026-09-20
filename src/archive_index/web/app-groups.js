@@ -108,6 +108,7 @@ function renderFolderTree() {
 
 function setViewMode(mode, load = true) {
   const started = performance.now();
+  mode = viewModeAvailable(mode) ? mode : "gallery";
   if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
@@ -116,7 +117,7 @@ function setViewMode(mode, load = true) {
   $("geo-view").classList.toggle("hidden", mode !== "geo");
   $("timeline-view").classList.toggle("hidden", mode !== "timeline");
   $("vector-view").classList.toggle("hidden", mode !== "vector");
-  for(const [id, value] of [["gallery-view-toggle","gallery"],["groups-view-toggle","groups"],["geo-view-toggle","geo"],["timeline-view-toggle","timeline"],["vector-view-toggle","vector"]]) $(id).setAttribute("aria-selected",String(mode===value));
+  renderVisualizationNavigation();
   syncUrl(); window.scrollTo(0, state.scrollPositions[mode] || 0);
   const focusing = Boolean(state.focusGroup);
   if (load) loadCurrentView().then(()=>{if(!focusing && state.viewMode===mode) window.scrollTo(0,state.scrollPositions[mode] || 0); requestAnimationFrame(()=>{performance.measure(`navigation:${mode}`,{start:started});console.debug(`navigation:${mode} ${(performance.now()-started).toFixed(1)} ms`);});});
@@ -187,13 +188,13 @@ function renderGroupPager(data) {
 async function locateCurrentGroup() {
   const started = performance.now();
   const item = state.viewerItems[state.viewerIndex];
-  if (!item?.current_group_id) return;
+  if (!item || !state.viewerGroupId) return;
   const params = filterParams("groups");
-  params.set("group_id", item.current_group_id);
+  params.set("group_id", state.viewerGroupId);
   const target = await api(`/api/browser/locate?${params}`);
   closeDialog($("viewer"));
   state.groupPage = target.found ? target.page : 1;
-  state.focusGroup = item.current_group_id;
+  state.focusGroup = state.viewerGroupId;
   setViewMode("groups");
   performance.measure("navigation:locate",{start:started});
   console.debug(`navigation:locate ${(performance.now()-started).toFixed(1)} ms`);
