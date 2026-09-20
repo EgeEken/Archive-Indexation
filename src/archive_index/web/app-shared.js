@@ -42,7 +42,7 @@ const state = {
   visualizationAbort: null,
   visualizations: {
     geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: []},
-    timeline: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], origin: 0, span: 86400},
+    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {origin: 0, span: 86400, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true}, file_created: {origin: 0, span: 86400, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true}}, centerX: .5, centerY: .5, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], origin: 0, span: 86400},
     vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, panX: 0, panY: 0, needsFit: true, hitTargets: [], grid: new Map()},
   },
   visualizationSelectedId: null,

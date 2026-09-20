@@ -1,5 +1,6 @@
 const VISUALIZATION_MODES = ["geo", "timeline", "vector"];
 let worldFeaturesPromise;
+const visualizationThumbnailCache = new Map();
 
 function visualizationCanvas(mode) { return $(`${mode}-canvas`); }
 function visualizationView(mode) { return state.visualizations[mode]; }
@@ -12,6 +13,7 @@ async function loadVisualization(mode) {
   state.visualizationAbort = controller;
   const params = filterParams();
   params.set("view", mode);
+  if (mode === "timeline") params.set("time_mode", visualizationView(mode).timeMode || "capture");
   const key = String(params);
   const view = visualizationView(mode);
   if (view.key === key && view.data) {
@@ -25,7 +27,12 @@ async function loadVisualization(mode) {
     view.key = key;
     view.data = data;
     if (changed) {
-      view.needsFit = true;
+      if (mode === "timeline" && view.preserveTransform) {
+        const transform = view.modes?.[view.timeMode];
+        if (transform) Object.assign(view, transform);
+        else view.needsFit = true;
+        view.preserveTransform = false;
+      } else view.needsFit = true;
       view.hitTargets = [];
       state.visualizationSelectedId = null;
       hideVisualizationSelection();
@@ -52,6 +59,7 @@ function renderVisualization(mode) {
     ? `${Number(data.represented_point_count || 0).toLocaleString()} ${noun} · ${Number(data.filtered_asset_count || 0).toLocaleString()} filtered assets${data.empty_reason ? ` · ${data.empty_reason}` : ""}`
     : data.empty_reason || "Visualization unavailable.";
   const canvas = visualizationCanvas(mode);
+  if (mode === "timeline") $("timeline-time-mode").value = view.timeMode || "capture";
   if (mode === "geo") drawGeo(canvas, view, data);
   else if (mode === "timeline") drawTimeline(canvas, view, data);
   else drawVector(canvas, view, data);
@@ -119,6 +127,26 @@ function panVisualization(mode, dx, dy) {
   view.panX += dx;
   if (mode !== "timeline") view.panY += dy;
   renderVisualization(mode);
+}
+
+function saveTimelineTransform(view) {
+  return {
+    origin: view.origin, span: view.span, centerX: view.centerX, centerY: view.centerY,
+    scale: view.scale, panX: view.panX, panY: view.panY, needsFit: view.needsFit,
+  };
+}
+
+function switchTimelineMode(mode) {
+  if (!['capture', 'file_created'].includes(mode)) return;
+  const view = visualizationView('timeline');
+  view.modes[view.timeMode] = saveTimelineTransform(view);
+  view.timeMode = mode;
+  Object.assign(view, view.modes[mode]);
+  view.preserveTransform = true;
+  view.key = null;
+  view.data = null;
+  state.visualizationSelectedId = null;
+  loadVisualization('timeline');
 }
 
 function geoWorld(longitude, latitude) {
@@ -195,10 +223,14 @@ function drawTimeline(canvas, view, data) {
   const surface = canvasSurface(canvas);
   const {context: ctx, width, height} = surface;
   ctx.fillStyle = "#10161c"; ctx.fillRect(0, 0, width, height);
-  if (!data.available || !data.points?.length) { view.hitTargets = []; drawCanvasMessage(ctx, width, height, data.empty_reason || "No timed assets."); return; }
+  if (!data.available || !data.points?.length) {
+    view.hitTargets = [];
+    drawCanvasMessage(ctx, width, height, data.empty_reason || "No timed assets.");
+    return;
+  }
   const points = data.points;
   if (view.needsFit) fitTimeline(view, points, width, height);
-  const axisY = screenPoint(view, .5, .82, width, height).y;
+  const axisY = height * .82;
   ctx.strokeStyle = "#465663"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, axisY); ctx.lineTo(width, axisY); ctx.stroke();
   const left = Math.max(0, worldPoint(view, 0, .5, width, height).x);
   const right = Math.min(1, worldPoint(view, width, .5, width, height).x);
@@ -207,43 +239,65 @@ function drawTimeline(canvas, view, data) {
   const first = lowerBound(points, visibleStart);
   const last = upperBound(points, visibleEnd);
   const visible = points.slice(first, last);
-  const bucketWidth = Math.max(1, (visibleEnd - visibleStart) / Math.max(8, width / 50));
-  const broad = visible.length > width * 1.35;
+  const pixelsPerPoint = width / Math.max(1, visible.length);
+  const broad = visible.length > Math.max(220, width * 0.85) || pixelsPerPoint < 8;
   view.hitTargets = [];
   if (broad) {
-    const buckets = new Map();
-    for (const point of visible) {
-      const index = Math.floor((point.time - visibleStart) / bucketWidth);
-      const bucket = buckets.get(index) || {count: 0, min: point.time, max: point.time};
-      bucket.count += 1; bucket.min = Math.min(bucket.min, point.time); bucket.max = Math.max(bucket.max, point.time); buckets.set(index, bucket);
-    }
-    const maxCount = Math.max(...[...buckets.values()].map(bucket => bucket.count), 1);
-    for (const [index, bucket] of buckets) {
-      const start = visibleStart + index * bucketWidth;
-      const end = start + bucketWidth;
-      const leftPoint = screenPoint(view, (start - view.origin) / view.span, .78, width, height);
-      const rightPoint = screenPoint(view, (end - view.origin) / view.span, .78, width, height);
-      const barHeight = 22 + 150 * bucket.count / maxCount;
-      ctx.fillStyle = "#5f8eae"; ctx.fillRect(leftPoint.x, axisY - barHeight, Math.max(2, rightPoint.x - leftPoint.x - 1), barHeight);
-      view.hitTargets.push({x: (leftPoint.x + rightPoint.x) / 2, y: axisY - barHeight / 2, bucket: {start, end}});
-    }
+    drawTimelineBuckets(ctx, view, visible, visibleStart, visibleEnd, axisY, width, height);
   } else {
-    visible.forEach((point, index) => {
-      const x = screenPoint(view, (point.time - view.origin) / view.span, .35 + (index % 6) * .07, width, height).x;
-      const y = screenPoint(view, (point.time - view.origin) / view.span, .35 + (index % 6) * .07, width, height).y;
-      ctx.beginPath(); ctx.arc(x, y, point.asset_id === state.visualizationSelectedId ? 6 : 4, 0, Math.PI * 2);
-      ctx.fillStyle = point.asset_id === state.visualizationSelectedId ? "#d9e0e6" : "#7fc7e8"; ctx.fill();
-      view.hitTargets.push({x, y, point});
-    });
+    drawTimelinePoints(ctx, view, visible, axisY, width, height);
   }
   drawTimelineTicks(ctx, view, visibleStart, visibleEnd, axisY, width, height);
+}
+
+function drawTimelineBuckets(ctx, view, points, visibleStart, visibleEnd, axisY, width, height) {
+  const bucketCount = Math.max(8, Math.ceil(width / 72));
+  const bucketWidth = Math.max(1, (visibleEnd - visibleStart) / bucketCount);
+  const buckets = new Map();
+  for (const point of points) {
+    const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((point.time - visibleStart) / bucketWidth)));
+    const bucket = buckets.get(index) || {points: []};
+    bucket.points.push(point);
+    buckets.set(index, bucket);
+  }
+  const maxCount = Math.max(...[...buckets.values()].map(bucket => bucket.points.length), 1);
+  for (const [index, bucket] of buckets) {
+    const start = visibleStart + index * bucketWidth;
+    const end = start + bucketWidth;
+    const leftPoint = screenPoint(view, (start - view.origin) / view.span, 0, width, height);
+    const rightPoint = screenPoint(view, (end - view.origin) / view.span, 0, width, height);
+    const barWidth = Math.max(2, rightPoint.x - leftPoint.x - 2);
+    const barHeight = 20 + 165 * bucket.points.length / maxCount;
+    const centerX = (leftPoint.x + rightPoint.x) / 2;
+    ctx.fillStyle = "#35566d";
+    ctx.fillRect(leftPoint.x, axisY - barHeight, barWidth, barHeight);
+    const representative = representativeVisualizationPoint(bucket.points);
+    if (barWidth >= 52) drawVisualizationThumbnail(ctx, representative, centerX - 24, axisY - barHeight - 44, 48, 36);
+    view.hitTargets.push({x: centerX, y: axisY - barHeight / 2, bucket: {start, end}});
+  }
+}
+
+function drawTimelinePoints(ctx, view, points, axisY, width, height) {
+  const lanes = 6;
+  for (const point of points) {
+    const x = screenPoint(view, (point.time - view.origin) / view.span, 0, width, height).x;
+    const lane = stableLane(point.asset_id, lanes);
+    const y = height * (.24 + lane * .085);
+    const size = point.asset_id === state.visualizationSelectedId ? 66 : 56;
+    drawVisualizationThumbnail(ctx, point, x - size / 2, y - 20, size, 40);
+    if (point.asset_id === state.visualizationSelectedId) {
+      ctx.strokeStyle = "#d9e0e6"; ctx.lineWidth = 2; ctx.strokeRect(x - size / 2 - 2, y - 22, size + 4, 44);
+    }
+    view.hitTargets.push({x, y, point});
+  }
 }
 
 function fitTimeline(view, points, width, height) {
   const min = points[0].time; const max = points[points.length - 1].time;
   view.origin = min === max ? min - 43200 : min;
   view.span = min === max ? 86400 : Math.max(1, max - min);
-  view.centerX = .5; view.centerY = .5; view.scale = Math.min(width / 1.08, height / .85); view.panX = view.panY = 0; view.needsFit = false;
+  view.centerX = .5; view.centerY = .5; view.scale = Math.max(1, width / 1.08); view.panX = view.panY = 0; view.needsFit = false;
+  view.modes[view.timeMode] = saveTimelineTransform(view);
 }
 
 function drawTimelineTicks(ctx, view, start, end, axisY, width, height) {
@@ -269,6 +323,49 @@ function formatTimelineTick(value, step) {
   if (step < 86400) return `${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
   if (step < 31536000) return `${pad(date.getUTCDate())}/${pad(date.getUTCMonth() + 1)}/${date.getUTCFullYear()}`;
   return String(date.getUTCFullYear());
+}
+
+function representativeVisualizationPoint(points) {
+  return [...points].sort((left, right) => {
+    const leftQuality = Number.isFinite(Number(left.quality_score)) ? Number(left.quality_score) : -Infinity;
+    const rightQuality = Number.isFinite(Number(right.quality_score)) ? Number(right.quality_score) : -Infinity;
+    return rightQuality - leftQuality || String(left.asset_id).localeCompare(String(right.asset_id));
+  })[0];
+}
+
+function stableLane(assetId, laneCount) {
+  let hash = 2166136261;
+  for (const char of String(assetId)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  return Math.abs(hash) % laneCount;
+}
+
+function visualizationThumbnail(assetId) {
+  if (visualizationThumbnailCache.has(assetId)) return visualizationThumbnailCache.get(assetId);
+  const entry = {image: null, loading: true};
+  const image = new Image();
+  image.onload = () => { entry.image = image; entry.loading = false; renderVisualization(state.viewMode); };
+  image.onerror = () => { entry.loading = false; entry.failed = true; };
+  image.src = apiPath(`/api/assets/${encodeURIComponent(assetId)}/thumbnail`);
+  visualizationThumbnailCache.set(assetId, entry);
+  while (visualizationThumbnailCache.size > 240) visualizationThumbnailCache.delete(visualizationThumbnailCache.keys().next().value);
+  return entry;
+}
+
+function drawVisualizationThumbnail(ctx, point, x, y, width, height) {
+  const entry = visualizationThumbnail(point.asset_id);
+  if (entry.image) {
+    const imageRatio = entry.image.naturalWidth / Math.max(1, entry.image.naturalHeight);
+    const boxRatio = width / height;
+    let drawWidth = width; let drawHeight = height;
+    if (imageRatio > boxRatio) drawHeight = width / imageRatio;
+    else drawWidth = height * imageRatio;
+    ctx.drawImage(entry.image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+    return;
+  }
+  ctx.fillStyle = point.media_type === "video" ? "#9c7240" : "#39708d";
+  ctx.fillRect(x, y, width, height);
+  ctx.fillStyle = "#c9d5dc"; ctx.font = "600 10px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(point.media_type === "video" ? "VIDEO" : "IMAGE", x + width / 2, y + height / 2);
 }
 
 function drawVector(canvas, view, data) {
@@ -342,21 +439,14 @@ function showVisualizationCluster(points) {
 async function selectVisualizationAsset(point) {
   if (!point?.asset_id) return;
   state.visualizationSelectedId = point.asset_id;
-  const panel = $("visualization-selection"); panel.classList.remove("hidden"); panel.innerHTML = `<div class="muted">Loading asset preview…</div>`;
   VISUALIZATION_MODES.forEach(mode => { if (visualizationView(mode).data) renderVisualization(mode); });
   const token = (state.visualizationSelectionRequest || 0) + 1; state.visualizationSelectionRequest = token;
   try {
     const asset = await api(`/api/assets/${encodeURIComponent(point.asset_id)}`);
     if (token !== state.visualizationSelectionRequest) return;
-    const first = asset.physical_files?.[0] || {}; const thumbnail = first.thumbnail_url ? `<img class="visualization-selection-thumb" src="${escapeHtml(first.thumbnail_url)}" alt="">` : "";
-    const quality = first.quality_score == null ? "" : ` · Quality ${Number(first.quality_score).toFixed(2)}`;
-    panel.innerHTML = `<div class="visualization-selection-header"><div><h3>${escapeHtml(first.filename || "Asset")}</h3><div class="muted">${escapeHtml(formatCapture(asset.capture_time) || "Capture time unavailable")} · ${escapeHtml(asset.media_type || "media")}${quality}</div></div><button class="icon" type="button" data-visualization-close aria-label="Close preview">×</button></div><div class="visualization-selection-body">${thumbnail}<div class="visualization-selection-copy"><span>${escapeHtml(first.relative_path || "")}</span><span class="muted">${first.width && first.height ? `${first.width} × ${first.height}` : ""}</span></div></div><div class="visualization-selection-actions"><button type="button" data-visualization-open>Open</button><button type="button" class="secondary" data-visualization-details>Details</button></div>`;
-    const image = panel.querySelector("img"); if (image) image.onerror = () => image.remove();
-    panel.querySelector("[data-visualization-close]").onclick = hideVisualizationSelection;
     const viewerItem = assetToViewerItem(asset);
-    panel.querySelector("[data-visualization-open]").onclick = () => showViewer(0, [viewerItem], {mode: "visualization"});
-    panel.querySelector("[data-visualization-details]").onclick = () => showDetails(asset.asset_id, {mode: "visualization", items: [viewerItem], index: 0});
-  } catch (error) { panel.innerHTML = `<div class="error">Asset preview unavailable: ${escapeHtml(error.message)}</div>`; }
+    showViewer(0, [viewerItem], {mode: "visualization", total: 1});
+  } catch (error) { showToast(`Asset preview unavailable: ${error.message}`); }
 }
 
 function hideVisualizationSelection() { state.visualizationSelectedId = null; state.visualizationSelectionRequest = (state.visualizationSelectionRequest || 0) + 1; $("visualization-selection").classList.add("hidden"); }

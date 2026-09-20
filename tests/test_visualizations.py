@@ -92,3 +92,34 @@ class VisualizationDataTests(unittest.TestCase):
             wall_clock_coordinate("2026-09-20T12:34:56+03:00", "exif_offset"),
         )
         self.assertIsNone(wall_clock_coordinate("not-a-date"))
+
+    def test_file_created_timeline_uses_preferred_persisted_representation(self):
+        with self.workspace.transaction() as connection:
+            connection.execute(
+                "UPDATE physical_file SET file_created_time = ? WHERE relative_path = 'gps.jpg'",
+                ("2024-01-02T03:04:05+03:00",),
+            )
+            connection.execute(
+                "UPDATE physical_file SET file_created_time = ? WHERE relative_path = 'fallback.jpg'",
+                ("2024-01-03T04:05:06+03:00",),
+            )
+            connection.execute(
+                "UPDATE physical_file SET file_created_time = ? WHERE relative_path = 'fallback.arw'",
+                ("2024-01-04T05:06:07+03:00",),
+            )
+            connection.execute(
+                "UPDATE physical_file SET file_created_time = NULL WHERE relative_path = 'plain.jpg'",
+            )
+        data = visualization_data(
+            self.workspace,
+            {"time_mode": ["file_created"]},
+            self.handle,
+            filter_assets=_browser_filtered_assets,
+            kind="timeline",
+        )
+        self.assertEqual(data["time_mode"], "file_created")
+        self.assertEqual(data["represented_point_count"], 2)
+        points = {point["asset_id"]: point for point in data["points"]}
+        self.assertEqual(points[self.gps_id]["time_kind"], "file_created")
+        self.assertEqual(points[self.fallback_id]["file_created_time"], "2024-01-03T04:05:06+03:00")
+        self.assertEqual(points[self.fallback_id]["time"], wall_clock_coordinate("2024-01-03T04:05:06+03:00"))

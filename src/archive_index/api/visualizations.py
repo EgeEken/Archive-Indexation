@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from math import isfinite
 
 from ..api.browser import asset_location
+from ..indexing.representations import preferred_physical
 
 _ID_CHUNK_SIZE = 500
 _CAPTURE_PREFIX = re.compile(
@@ -29,7 +30,7 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
         "empty_reason": None,
     }
     if kind == "geo":
-        points = _geo_points(workspace, [item["asset_id"] for item in items])
+        points = _geo_points(workspace, items)
         base.update(points=points, represented_point_count=len(points))
         if not points:
             base["empty_reason"] = (
@@ -39,13 +40,19 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
             )
         return base
     if kind == "timeline":
-        points = _timeline_points(items)
+        time_mode = (query.get("time_mode") or ["capture"])[0]
+        if time_mode not in {"capture", "file_created"}:
+            time_mode = "capture"
+        points = _timeline_points(workspace, items, time_mode)
+        base["time_mode"] = time_mode
         base.update(points=points, represented_point_count=len(points))
         if not points:
             base["empty_reason"] = (
                 "No assets match these filters."
                 if not items
                 else "No filtered assets have a usable capture time."
+                if time_mode == "capture"
+                else "No filtered assets have a usable file-created time."
             )
         return base
     if kind == "vector":
@@ -69,7 +76,8 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
     raise ValueError(f"unknown visualization: {kind}")
 
 
-def _geo_points(workspace, asset_ids: list[str]) -> list[dict[str, object]]:
+def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, object]]:
+    asset_ids = [item["asset_id"] for item in items]
     if not asset_ids:
         return []
     by_asset: dict[str, list] = {asset_id: [] for asset_id in asset_ids}
@@ -92,26 +100,63 @@ def _geo_points(workspace, asset_ids: list[str]) -> list[dict[str, object]]:
                 by_asset[row["logical_asset_id"]].append(row)
     finally:
         connection.close()
+    summaries = {item["asset_id"]: item for item in items}
     points = []
     for asset_id in asset_ids:
         location = asset_location(by_asset[asset_id])
         if location is not None:
-            points.append({"asset_id": asset_id, **location})
+            item = summaries[asset_id]
+            points.append({
+                "asset_id": asset_id,
+                **location,
+                "filename": item.get("filename"),
+                "media_type": item.get("media_type"),
+                "quality_score": item.get("quality_score"),
+            })
     return points
 
 
-def _timeline_points(items) -> list[dict[str, object]]:
+def _timeline_points(workspace, items, time_mode: str = "capture") -> list[dict[str, object]]:
+    created_by_asset = {}
+    if time_mode == "file_created" and items:
+        asset_ids = [item["asset_id"] for item in items]
+        connection = workspace.connect()
+        try:
+            for start in range(0, len(asset_ids), _ID_CHUNK_SIZE):
+                chunk = asset_ids[start : start + _ID_CHUNK_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM physical_file
+                    WHERE logical_asset_id IN ({placeholders}) AND in_scope = 1
+                    ORDER BY logical_asset_id, is_online DESC, relative_path
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    created_by_asset.setdefault(row["logical_asset_id"], []).append(row)
+        finally:
+            connection.close()
     points = []
     for item in items:
-        coordinate = wall_clock_coordinate(item.get("capture_time"), item.get("capture_time_kind"))
+        physical = created_by_asset.get(item["asset_id"], [])
+        chosen = preferred_physical(physical)
+        value = item.get("capture_time") if time_mode == "capture" else (chosen["file_created_time"] if chosen else None)
+        kind = item.get("capture_time_kind") if time_mode == "capture" else "file_created"
+        coordinate = wall_clock_coordinate(value, kind)
         if coordinate is None:
             continue
         points.append(
             {
                 "asset_id": item["asset_id"],
                 "time": coordinate,
+                "time_kind": time_mode,
                 "capture_time": item.get("capture_time"),
                 "capture_time_kind": item.get("capture_time_kind"),
+                "file_created_time": chosen["file_created_time"] if chosen else None,
+                "filename": item.get("filename"),
+                "media_type": item.get("media_type"),
+                "quality_score": item.get("quality_score"),
             }
         )
     points.sort(key=lambda point: (point["time"], point["asset_id"]))

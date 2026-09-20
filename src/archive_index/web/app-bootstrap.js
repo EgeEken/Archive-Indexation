@@ -9,6 +9,7 @@ $("forget-offline-button").addEventListener("click", showOfflineCleanup);
 $("gallery-view-toggle").addEventListener("click", () => setViewMode("gallery"));
 $("geo-view-toggle").addEventListener("click", () => setViewMode("geo"));
 $("timeline-view-toggle").addEventListener("click", () => setViewMode("timeline"));
+$("timeline-time-mode").addEventListener("change", (event) => switchTimelineMode(event.target.value));
 $("vector-view-toggle").addEventListener("click", () => setViewMode("vector"));
 $("viewer-similar").onclick = () => state.similar ? closeSimilar() : showSimilar(state.viewerItems[state.viewerIndex].asset_id);
 $("viewer-open-normal").onclick = openSimilarNormally;
