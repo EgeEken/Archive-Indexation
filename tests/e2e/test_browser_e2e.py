@@ -407,11 +407,10 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
-        self.page.get_by_role("button", name="Details").click()
-        self.page.locator("#details[open]").wait_for()
-        self.page.keyboard.press("Escape")
-        self.page.locator("#details").wait_for(state="hidden")
+        self.page.locator("#viewer[open]").wait_for(timeout=15000)
+        self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
+        self.page.locator("#viewer-close").click()
+        self.page.locator("#viewer").wait_for(state="hidden")
 
     def test_timeline_renders_and_zoom_changes_range(self) -> None:
         self._open_main()
@@ -423,11 +422,14 @@ class BrowserE2ETests(unittest.TestCase):
         before = float(canvas.get_attribute("data-view-scale"))
         self.page.locator("#timeline-zoom-in").click()
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) > before", arg=before)
+        self.page.locator("#timeline-time-mode").select_option("file_created")
+        self.page.locator("#timeline-status").wait_for()
         canvas.click(position={
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
+        self.page.locator("#viewer[open]").wait_for(timeout=15000)
+        self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 
     def test_vector_cloud_uses_stored_projection_and_selects_asset(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.main_handle}&view=vector", wait_until="domcontentloaded")
@@ -441,7 +443,8 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        self.page.locator("#visualization-selection").filter(has_text=".jpg").wait_for(timeout=15000)
+        self.page.locator("#viewer[open]").wait_for(timeout=15000)
+        self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 
     def test_reindex_add_remove_offline_cleanup_preserves_fixture_boundary(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}", wait_until="domcontentloaded")
