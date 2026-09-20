@@ -82,7 +82,7 @@ def similar_assets(
     response_builder: Callable,
     search_similar_callback=search_similar,
 ) -> dict[str, object]:
-    allowed = asset_filter(workspace, {"media_type": ["image"]})
+    allowed = asset_filter(workspace, {})
     query = query or {}
     offset = _positive_int(_first(query, "offset", "0"), "offset") if _first(query, "offset", "0") != "0" else 0
     limit = min(_positive_int(_first(query, "limit", "12"), "limit"), MAX_PAGE_SIZE)

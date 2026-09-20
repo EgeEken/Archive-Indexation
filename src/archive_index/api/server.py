@@ -301,6 +301,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                         self._send_json(200, {"found": found is not None, "page": (offset + found) // 10 + 1 if found is not None else 1})
                         break
                     offset += 180
+            elif request.path == "/api/browser/locate-asset":
+                asset_id = _first(query, "asset_id", "")
+                items, _, _, _ = _browser_filtered_assets(workspace, query, handle)
+                found = next((index for index, item in enumerate(items) if item["asset_id"] == asset_id), None)
+                self._send_json(200, {
+                    "found": found is not None,
+                    "index": found if found is not None else 0,
+                    "offset": (found // 60) * 60 if found is not None else 0,
+                    "total": len(items),
+                })
             elif request.path == "/api/browser":
                 self._send_json(200, _browser_assets(workspace, query, handle))
             elif request.path == "/api/visualizations/geo":
@@ -1321,6 +1331,7 @@ def _search_response(workspace: Workspace, handle: str, results: list[SearchResu
         item["similarity"] = result.similarity
         item["similarity_kind"] = "text" if query_text is not None else "image"
         item["best_match_timestamp"] = result.best_timestamp
+        item["source_match_timestamp"] = result.source_timestamp
         items.append(item)
     return {
         "items": items,

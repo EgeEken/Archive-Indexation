@@ -319,9 +319,12 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 .viewer-stage { min-height:60vh; max-height:80vh; }
 #similar-gallery { max-height:none; overflow:visible; padding:1rem max(.8rem, 3vw) 2rem; overscroll-behavior:visible; }
 .similar-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.7rem; }
-.similar-result { display:flex; flex-direction:column; gap:.3rem; min-width:0; background:#252c33; color:#dde5ec; font-size:.75rem; }
-.similar-result img { width:100%; aspect-ratio:1; object-fit:cover; }
-.similar-result > span { max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+.similar-result { display:flex; flex-direction:column; gap:.3rem; min-width:0; background:#252c33; color:#dde5ec; font-size:.75rem; border:1px solid #3d4752; border-radius:.35rem; overflow:hidden; }
+.similar-result-media { display:block; width:100%; padding:0; border:0; border-radius:0; background:#111417; color:inherit; cursor:pointer; }
+.similar-result img, .similar-placeholder { display:block; width:100%; aspect-ratio:1; object-fit:cover; }
+.similar-placeholder { display:grid; place-items:center; padding:.4rem; color:#7f8b96; font-size:.72rem; }
+.similar-result-body { display:flex; flex-direction:column; gap:.3rem; padding:.35rem .45rem .45rem; }
+.similar-result-body .filename { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .folder-check { display:flex; align-items:center; gap:.5rem; margin:.6rem 0; }
 .folder-check .folder-count { margin-left:auto; font-size:.72rem; }
 .folder-check input { width:auto; }

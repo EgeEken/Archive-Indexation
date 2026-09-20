@@ -21,6 +21,7 @@ class SearchResult:
     asset_id: str
     similarity: float
     best_timestamp: float | None = None
+    source_timestamp: float | None = None
 
 
 _search_lock = RLock()
@@ -184,24 +185,84 @@ def search_similar(
     active = active_embedding(workspace)
     if active is None or active["active_run_id"] is None or active["status"] != "complete":
         raise RuntimeError("semantic embeddings are not available; enable search and index the workspace")
+    source_vectors = _load_asset_vectors(workspace, active, asset_id)
+    if not source_vectors:
+        raise RuntimeError("this asset does not have compatible semantic embeddings")
+    import numpy as np
+
+    source_matrix = np.vstack([vector for vector, _ in source_vectors]).astype("float32", copy=False)
+    cache_key = (
+        str(workspace.root),
+        active["active_provider"],
+        active["active_run_id"],
+        int(active["embedding_dimension"]),
+        active["browser_generation"],
+    )
+    with _search_lock:
+        cached = _embedding_matrices.get(cache_key)
+        if cached is None:
+            matrix, records = _load_embedding_matrix(workspace, active, int(active["embedding_dimension"]))
+            _embedding_matrices[cache_key] = (matrix, records)
+            cached = (matrix, records)
+        else:
+            _embedding_matrices.move_to_end(cache_key)
+    matrix, records = cached
+    if not records:
+        return []
+    scores = source_matrix @ matrix.T
+    best: dict[str, SearchResult] = {}
+    for candidate_index, (candidate_id, candidate_timestamp) in enumerate(records):
+        if allowed_asset_ids is not None and candidate_id not in allowed_asset_ids:
+            continue
+        if candidate_id == asset_id:
+            continue
+        source_index = int(np.argmax(scores[:, candidate_index]))
+        score = float(scores[source_index, candidate_index])
+        old = best.get(candidate_id)
+        if old is None or score > old.similarity:
+            best[candidate_id] = SearchResult(
+                candidate_id,
+                score,
+                candidate_timestamp,
+                source_vectors[source_index][1],
+            )
+    return sorted(best.values(), key=lambda result: (-result.similarity, result.asset_id))[:top_k]
+
+
+def _load_asset_vectors(workspace, active, asset_id):
     connection = workspace.connect()
     try:
-        row = connection.execute(
-            "SELECT embedding, embedding_dimension FROM logical_asset_embedding WHERE run_id = ? AND logical_asset_id = ?",
-            (active["active_run_id"], asset_id),
-        ).fetchone()
+        image_rows = connection.execute(
+            """
+            SELECT le.embedding, le.embedding_dimension
+            FROM logical_asset_embedding AS le
+            JOIN physical_file AS pf ON pf.id = le.source_physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
+            JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
+            JOIN embedding_run AS er ON er.id = le.run_id AND cs.version = er.model_version
+            WHERE le.run_id = ? AND le.logical_asset_id = ? AND cs.status = 'complete'
+            """,
+            (active["active_provider"], active["active_run_id"], asset_id),
+        ).fetchall()
+        frame_rows = connection.execute(
+            """
+            SELECT vfe.timestamp_seconds, vfe.embedding, vfe.embedding_dimension
+            FROM video_frame_embedding AS vfe
+            JOIN physical_file AS pf ON pf.id = vfe.physical_file_id AND pf.in_scope = 1 AND pf.is_online = 1
+            JOIN component_state AS cs ON cs.physical_file_id = pf.id AND cs.component = ('embedding:' || ?)
+            JOIN embedding_run AS er ON er.id = vfe.run_id AND cs.version = er.model_version
+            WHERE vfe.run_id = ? AND vfe.logical_asset_id = ? AND cs.status = 'complete'
+            ORDER BY vfe.sample_index
+            """,
+            (active["active_provider"], active["active_run_id"], asset_id),
+        ).fetchall()
     finally:
         connection.close()
-    if row is None:
-        raise RuntimeError("this image does not have a compatible semantic embedding")
-    query = blob_to_vector(row["embedding"], row["embedding_dimension"])
-    return search_vector(
-        workspace,
-        query,
-        allowed_asset_ids=allowed_asset_ids,
-        top_k=top_k,
-        exclude_asset_id=asset_id,
-    )
+    vectors = []
+    for row in image_rows:
+        vectors.append((blob_to_vector(row["embedding"], int(row["embedding_dimension"])), None))
+    for row in frame_rows:
+        vectors.append((blob_to_vector(row["embedding"], int(row["embedding_dimension"])), row["timestamp_seconds"]))
+    return vectors
 
 
 def search_vector(

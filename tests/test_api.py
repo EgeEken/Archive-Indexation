@@ -309,7 +309,7 @@ class ApiTests(unittest.TestCase):
         with closing(self.workspace.connect()) as connection:
             asset_ids = [row[0] for row in connection.execute("SELECT logical_asset_id FROM physical_file ORDER BY logical_asset_id")]
         asset_id = asset_ids[0]
-        results = [SearchResult(other_id, 0.81 - index * 0.01) for index, other_id in enumerate(asset_ids[1:])]
+        results = [SearchResult(other_id, 0.81 - index * 0.01, 12.3, 8.1) for index, other_id in enumerate(asset_ids[1:])]
         with patch(
             "archive_index.api.server.search_similar",
             return_value=results,
@@ -321,6 +321,8 @@ class ApiTests(unittest.TestCase):
                 pages.append(result)
         self.assertEqual([page["items"][0]["asset_id"] for page in pages], asset_ids[1:])
         self.assertEqual([page["total"] for page in pages], [len(results), len(results)])
+        self.assertEqual(pages[0]["items"][0]["best_match_timestamp"], 12.3)
+        self.assertEqual(pages[0]["items"][0]["source_match_timestamp"], 8.1)
 
     def test_similar_initial_page_caps_strong_results_and_keeps_alternatives(self) -> None:
         with closing(self.workspace.connect()) as connection:

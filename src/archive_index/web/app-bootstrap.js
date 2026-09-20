@@ -11,6 +11,7 @@ $("geo-view-toggle").addEventListener("click", () => setViewMode("geo"));
 $("timeline-view-toggle").addEventListener("click", () => setViewMode("timeline"));
 $("vector-view-toggle").addEventListener("click", () => setViewMode("vector"));
 $("viewer-similar").onclick = () => state.similar ? closeSimilar() : showSimilar(state.viewerItems[state.viewerIndex].asset_id);
+$("viewer-open-normal").onclick = openSimilarNormally;
 $("workspace-explorer").onclick = () => revealFile();
 $("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex].preferred_physical_id);
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));

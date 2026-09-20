@@ -359,7 +359,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#viewer[open]").wait_for()
         self.page.locator("#viewer-similar").click()
         self.page.locator("#similar-gallery").wait_for(state="visible")
-        self.page.get_by_text("No strongly similar images found").wait_for()
+        self.page.get_by_text("No strongly similar assets found").wait_for()
         self.page.locator("#similar-more").wait_for()
         self.page.locator("#similar-more").click()
         self.page.locator(".similar-result").first.wait_for()

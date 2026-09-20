@@ -287,6 +287,13 @@ class EmbeddingTests(unittest.TestCase):
             self.assertAlmostEqual(results[0].best_timestamp, 1.0)
             similar = search_similar(workspace, image_id, top_k=10)
             self.assertNotIn(image_id, {result.asset_id for result in similar})
+            video_match = next(result for result in similar if result.asset_id == video_id)
+            self.assertAlmostEqual(video_match.best_timestamp, 0.0)
+            self.assertIsNone(video_match.source_timestamp)
+            reverse = search_similar(workspace, video_id, top_k=10)
+            image_match = next(result for result in reverse if result.asset_id == image_id)
+            self.assertIsNone(image_match.best_timestamp)
+            self.assertAlmostEqual(image_match.source_timestamp, 0.0)
 
     def test_search_filter_is_chunked_beyond_sqlite_variable_limit(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -102,7 +102,11 @@ async function moveViewer(delta) {
       state.viewerIndex = target - state.viewerStart;
     }
   } else {
-    const next = state.viewerIndex + delta;
+    let next = state.viewerIndex + delta;
+    if (state.viewerContext === "similar" && delta > 0 && next >= state.viewerItems.length && state.similar?.autoLoad && state.similar.hasNext) {
+      await loadSimilarPage();
+      next = state.viewerIndex + delta;
+    }
     if (next < 0 || next >= state.viewerItems.length) return;
     state.viewerIndex = next;
   }
@@ -131,6 +135,7 @@ function updateViewerReviewState() {
   bindSelectionButtons($("viewer-selection"));
   $("viewer-similar").textContent = state.similar ? "Close similar assets" : "Show similar assets";
   $("viewer-similar").classList.remove("hidden");
+  $("viewer-open-normal")?.classList.toggle("hidden", state.viewerContext !== "similar");
 }
 
 function stopViewerMedia() {
@@ -248,20 +253,30 @@ function renderSimilarResults() {
   const section = $("similar-gallery");
   if (!similar) return;
   const strong = similar.strongCount;
-  const heading = similar.loading && !similar.items.length ? "Similar images" : strong ? countLabel(strong, "similar image found", "similar images found") : "No strongly similar images found";
+  const heading = similar.loading && !similar.items.length ? "Similar assets" : strong ? countLabel(strong, "similar asset found", "similar assets found") : "No strongly similar assets found";
   const loadMore = similar.loading
-    ? '<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Loading similar images…</div>'
+    ? '<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Loading similar assets…</div>'
     : similar.hasNext && similar.autoLoad
       ? '<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>Scroll for more</div>'
       : similar.hasNext
         ? '<button id="similar-more" class="secondary" type="button">Load more</button>'
         : '';
-  section.innerHTML = `<div class="dialog-header"><h3>${heading}</h3><button id="similar-close" type="button">Close similar images</button></div><div class="similar-grid">${similar.items.map((item, index) => `<button data-similar-index="${index}" class="similar-result"><img src="${item.thumbnail_url || ''}" alt=""><span>${filenameMarkup(item.filename)}</span>${similarityMarkup(item)}</button>`).join("")}</div>${loadMore}`;
+  const cards = similar.items.map((item, index) => {
+    const media = item.thumbnail_url
+      ? '<img src="' + escapeHtml(item.thumbnail_url) + '" alt="' + escapeHtml(item.filename) + '">'
+      : '<div class="similar-placeholder">Preview unavailable</div>';
+    const score = typeof scoreMarkup === "function" ? scoreMarkup(item.quality_score) : "";
+    const reviewState = typeof selectionStateMarkup === "function" ? selectionStateMarkup(item) : "";
+    const reviewActions = typeof selectionActionsMarkup === "function" ? selectionActionsMarkup(item) : "";
+    return '<article class="similar-result"><button type="button" class="similar-result-media" data-similar-index="' + index + '" aria-label="Open ' + escapeHtml(item.filename) + '">' + media + '</button><div class="similar-result-body"><div class="filename" title="' + escapeHtml(item.filename) + '">' + filenameMarkup(item.filename) + '</div><div class="card-metrics">' + score + similarityMarkup(item) + '</div><div class="card-state">' + reviewState + '</div><div class="card-actions">' + reviewActions + '</div></div></article>';
+  }).join("");
+  section.innerHTML = '<div class="dialog-header"><h3>' + heading + '</h3><button id="similar-close" type="button">Close similar assets</button></div><div class="similar-grid">' + cards + '</div>' + loadMore;
   $("similar-close").onclick = closeSimilar;
   $("similar-more")?.addEventListener("click", () => { similar.autoLoad = true; loadSimilarPage(); });
   section.querySelectorAll("[data-similar-index]").forEach(button => button.onclick = () => {
     showViewer(Number(button.dataset.similarIndex) + 1, similarViewerItems(), {mode: "similar", keepSimilar:true});
   });
+  if (typeof bindSelectionButtons === "function") bindSelectionButtons(section);
 }
 
 function similarViewerItems() {
@@ -275,7 +290,12 @@ function syncSimilarViewer() {
   const currentId = state.viewerItems[state.viewerIndex]?.asset_id || state.similar.source.asset_id;
   state.viewerItems = similarViewerItems();
   state.viewerIndex = Math.max(0, state.viewerItems.findIndex(item => item.asset_id === currentId));
-  renderViewer();
+  const current = state.viewerItems[state.viewerIndex];
+  if (!current) return;
+  $("viewer-count").textContent = (state.viewerIndex + 1) + " of " + state.viewerItems.length;
+  $("viewer-previous").disabled = state.viewerIndex <= 0;
+  $("viewer-next").disabled = state.viewerIndex >= state.viewerItems.length - 1;
+  updateViewerReviewState();
 }
 
 function closeSimilar() {
@@ -286,6 +306,45 @@ function closeSimilar() {
   $("similar-gallery").classList.add("hidden");
   if (source) showViewer(source.index, source.items, {...source.context, keepSimilar:false});
   else { renderViewer(); $("viewer").scrollTop = 0; }
+}
+
+async function openSimilarNormally() {
+  if (!state.similar || state.viewerContext !== "similar") return;
+  const item = state.viewerItems[state.viewerIndex];
+  if (!item) return;
+  const assetId = item.asset_id;
+  state.similar = null;
+  state.similarSource = null;
+  $("viewer").onscroll = null;
+  $("similar-gallery").classList.add("hidden");
+  try {
+    const params = filterParams();
+    params.set("asset_id", assetId);
+    const located = await api("/api/browser/locate-asset?" + params);
+    if (located.found) {
+      const pageParams = new URLSearchParams(params);
+      pageParams.set("offset", String(located.offset));
+      pageParams.set("limit", String(state.viewerPageSize));
+      const page = await api("/api/browser?" + pageParams);
+      state.viewerItems = page.items;
+      state.viewerStart = located.offset;
+      state.viewerTotal = page.total;
+      state.viewerIndex = located.index - located.offset;
+      state.viewerContext = "gallery";
+      state.viewerGroupId = item.current_group_id || null;
+      renderViewer();
+      return;
+    }
+  } catch (error) {
+    showToast("Normal viewer lookup failed: " + error.message);
+  }
+  state.viewerContext = "single";
+  state.viewerStart = 0;
+  state.viewerTotal = 1;
+  state.viewerItems = [item];
+  state.viewerIndex = 0;
+  state.viewerGroupId = item.current_group_id || null;
+  renderViewer();
 }
 
 async function loadSimilarPage() {
@@ -311,7 +370,7 @@ async function loadSimilarPage() {
     if (state.similar === similar) {
       similar.loading = false;
       renderSimilarResults();
-      if (similar.error) { showToast(`Similar images failed: ${similar.error}`); similar.error = null; }
+      if (similar.error) { showToast(`Similar assets failed: ${similar.error}`); similar.error = null; }
     }
   }
 }
@@ -323,7 +382,7 @@ async function showSimilar(assetId) {
   state.similar = {assetId, source, items: [], offset: 0, total: 0, strongCount: 0, hasNext: true, initial: true, loading: false, autoLoad: false, error: null};
   section.classList.remove("hidden");
   section.textContent = "";
-  $("viewer-similar").textContent = "Close similar images";
+  $("viewer-similar").textContent = "Close similar assets";
   showViewer(0, [source], {mode: "similar", keepSimilar:true});
   $("viewer").onscroll = () => {
     if (state.similar?.autoLoad && $("viewer").scrollTop + $("viewer").clientHeight >= $("viewer").scrollHeight - 240) loadSimilarPage();
