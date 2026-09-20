@@ -63,6 +63,15 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
             base.update(available=False, empty_reason=reason)
             return base | {"points": []}
         points = projection_points(workspace, projection["id"], [item["asset_id"] for item in items])
+        summaries = {item["asset_id"]: item for item in items}
+        points = [
+            {
+                **point,
+                "filename": summaries[point["asset_id"]].get("filename"),
+                "quality_score": summaries[point["asset_id"]].get("quality_score"),
+            }
+            for point in points
+        ]
         base.update(
             points=points,
             represented_point_count=len(points),

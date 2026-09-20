@@ -174,10 +174,11 @@ function drawGeo(canvas, view, data) {
   }
   for (const feature of view.world?.features || []) drawGeoFeature(ctx, feature, view, width, height);
   const clusters = new Map();
+  const clusterCellSize = Math.max(30, Math.min(64, 56 / Math.sqrt(Math.max(1, view.scale / 700))));
   for (const point of points) {
     const world = geoWorld(point.longitude, point.latitude);
     const screen = screenPoint(view, world.x, world.y, width, height);
-    const key = `${Math.floor(screen.x / 42)}:${Math.floor(screen.y / 42)}`;
+    const key = `${Math.floor(screen.x / clusterCellSize)}:${Math.floor(screen.y / clusterCellSize)}`;
     const cluster = clusters.get(key) || [];
     cluster.push({...point, screenX: screen.x, screenY: screen.y});
     clusters.set(key, cluster);
@@ -186,14 +187,20 @@ function drawGeo(canvas, view, data) {
   for (const cluster of clusters.values()) {
     const x = cluster.reduce((sum, point) => sum + point.screenX, 0) / cluster.length;
     const y = cluster.reduce((sum, point) => sum + point.screenY, 0) / cluster.length;
-    const radius = cluster.length === 1 ? 4.5 : Math.min(18, 7 + Math.sqrt(cluster.length) * 1.8);
-    ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fillStyle = cluster.some(point => point.asset_id === state.visualizationSelectedId) ? "#d9e0e6" : cluster.length === 1 ? "#7fc7e8" : "#5f8eae";
-    ctx.fill();
-    if (cluster.length > 1) {
-      ctx.fillStyle = "#edf0f3"; ctx.font = "600 11px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(cluster.length), x, y);
+    const representative = representativeVisualizationPoint(cluster);
+    const thumbWidth = cluster.length === 1 ? 36 : 44;
+    const thumbHeight = cluster.length === 1 ? 28 : 32;
+    drawVisualizationThumbnail(ctx, representative, x - thumbWidth / 2, y - thumbHeight / 2, thumbWidth, thumbHeight);
+    if (cluster.some(point => point.asset_id === state.visualizationSelectedId)) {
+      ctx.strokeStyle = "#d9e0e6"; ctx.lineWidth = 2; ctx.strokeRect(x - thumbWidth / 2 - 2, y - thumbHeight / 2 - 2, thumbWidth + 4, thumbHeight + 4);
     }
-    view.hitTargets.push({x, y, points: cluster});
+    const badgeX = x + thumbWidth / 2 - 2;
+    const badgeY = y - thumbHeight / 2 + 2;
+    if (cluster.length > 1) {
+      ctx.beginPath(); ctx.arc(badgeX, badgeY, 10, 0, Math.PI * 2); ctx.fillStyle = "#17222b"; ctx.fill();
+      ctx.fillStyle = "#edf0f3"; ctx.font = "600 10px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(cluster.length), badgeX, badgeY);
+    }
+    view.hitTargets.push({x, y, badgeX, badgeY, points: cluster});
   }
 }
 
@@ -377,14 +384,30 @@ function drawVector(canvas, view, data) {
   ctx.strokeStyle = "#33424e"; ctx.lineWidth = 1; const horizontal = screenPoint(view, view.centerX, view.centerY, width, height);
   ctx.beginPath(); ctx.moveTo(0, horizontal.y); ctx.lineTo(width, horizontal.y); ctx.moveTo(horizontal.x, 0); ctx.lineTo(horizontal.x, height); ctx.stroke();
   ctx.fillStyle = "#8393a0"; ctx.font = "11px system-ui"; ctx.fillText("PCA 1", width - 42, Math.max(14, horizontal.y - 8)); ctx.save(); ctx.translate(Math.max(12, horizontal.x - 8), 42); ctx.rotate(-Math.PI / 2); ctx.fillText("PCA 2", 0, 0); ctx.restore();
+  const cellSize = 72;
   view.grid = new Map(); view.hitTargets = [];
   for (const point of data.points) {
     const screen = screenPoint(view, Number(point.x), Number(point.y), width, height);
     if (screen.x < -8 || screen.x > width + 8 || screen.y < -8 || screen.y > height + 8) continue;
-    const selected = point.asset_id === state.visualizationSelectedId;
-    ctx.beginPath(); ctx.arc(screen.x, screen.y, selected ? 5.5 : 3.2, 0, Math.PI * 2); ctx.fillStyle = selected ? "#d9e0e6" : point.media_type === "video" ? "#e5ae64" : "#72a7ff"; ctx.fill();
-    const key = `${Math.floor(screen.x / 24)}:${Math.floor(screen.y / 24)}`;
-    const cell = view.grid.get(key) || []; cell.push({point, x: screen.x, y: screen.y}); view.grid.set(key, cell);
+    const key = `${Math.floor(screen.x / cellSize)}:${Math.floor(screen.y / cellSize)}`;
+    const cell = view.grid.get(key) || {points: [], x: 0, y: 0};
+    cell.points.push({point, x: screen.x, y: screen.y}); cell.x += screen.x; cell.y += screen.y; view.grid.set(key, cell);
+  }
+  for (const cell of view.grid.values()) {
+    const count = cell.points.length;
+    const centerX = cell.x / count; const centerY = cell.y / count;
+    const column = Math.floor(centerX / cellSize) * cellSize;
+    const row = Math.floor(centerY / cellSize) * cellSize;
+    ctx.fillStyle = count > 1 ? `rgba(95, 142, 174, ${Math.min(.34, .08 + count / 80)})` : "rgba(95, 142, 174, .04)";
+    ctx.fillRect(column + 1, row + 1, cellSize - 2, cellSize - 2);
+    const representative = representativeVisualizationPoint(cell.points.map(item => item.point));
+    const selected = representative.asset_id === state.visualizationSelectedId;
+    drawVisualizationThumbnail(ctx, representative, centerX - 27, centerY - 19, 54, 38);
+    if (count > 1) {
+      ctx.fillStyle = "#edf0f3"; ctx.font = "600 11px system-ui"; ctx.textAlign = "right"; ctx.textBaseline = "top"; ctx.fillText(String(count), column + cellSize - 5, row + 5);
+    }
+    if (selected) { ctx.strokeStyle = "#d9e0e6"; ctx.lineWidth = 2; ctx.strokeRect(centerX - 29, centerY - 21, 58, 42); }
+    view.hitTargets.push({x: centerX, y: centerY, point: representative});
   }
 }
 
@@ -410,8 +433,8 @@ function drawCanvasMessage(ctx, width, height, message) { ctx.fillStyle = "#9faa
 function hitVisualization(mode, event) {
   const canvas = visualizationCanvas(mode); const view = visualizationView(mode); const rect = canvas.getBoundingClientRect(); const x = event.clientX - rect.left; const y = event.clientY - rect.top;
   if (mode === "vector") {
-    const cellX = Math.floor(x / 24); const cellY = Math.floor(y / 24); let nearest = null; let distance = 12;
-    for (let ix = cellX - 1; ix <= cellX + 1; ix++) for (let iy = cellY - 1; iy <= cellY + 1; iy++) for (const target of view.grid.get(`${ix}:${iy}`) || []) { const current = Math.hypot(target.x - x, target.y - y); if (current < distance) {distance = current; nearest = target.point;} }
+    let nearest = null; let distance = 38;
+    for (const target of view.hitTargets) { const current = Math.hypot(target.x - x, target.y - y); if (current < distance) { distance = current; nearest = target.point; } }
     if (nearest) selectVisualizationAsset(nearest);
     return;
   }
@@ -420,8 +443,13 @@ function hitVisualization(mode, event) {
   if (!nearest) return;
   if (nearest.bucket) { focusTimelineRange(nearest.bucket.start, nearest.bucket.end); return; }
   if (nearest.points?.length > 1) {
-    if (mode === "geo" && view.scale < 900) { zoomVisualization("geo", 2.5, {x: nearest.x, y: nearest.y}); return; }
-    showVisualizationCluster(nearest.points); return;
+    if (mode === "geo") {
+      const onBadge = Math.hypot(nearest.badgeX - x, nearest.badgeY - y) <= 14;
+      if (onBadge && view.scale >= 900) showGeoLocalStrip(nearest.points);
+      else if (onBadge) zoomVisualization("geo", 2.5, {x: nearest.x, y: nearest.y});
+      else selectVisualizationAsset(representativeVisualizationPoint(nearest.points));
+      return;
+    }
   }
   selectVisualizationAsset(nearest.point || nearest.points[0]);
 }
@@ -430,10 +458,13 @@ function focusTimelineRange(start, end) {
   const view = visualizationView("timeline"); const canvas = visualizationCanvas("timeline"); const {width} = canvasSurface(canvas); const range = Math.max(1, end - start); view.centerX = ((start + end) / 2 - view.origin) / view.span; view.panX = 0; view.scale = Math.min(100000, Math.max(view.scale * 1.4, width / (range / view.span))); renderVisualization("timeline");
 }
 
-function showVisualizationCluster(points) {
-  const panel = $("visualization-selection"); state.visualizationSelectedId = null; panel.classList.remove("hidden"); panel.innerHTML = `<div class="visualization-selection-header"><div><h3>${points.length.toLocaleString()} assets at this location</h3><div class="muted">Choose an asset to preview.</div></div><button class="icon" type="button" data-visualization-close aria-label="Close preview">×</button></div><div class="visualization-cluster-list">${points.slice(0, 100).map(point => `<button type="button" data-visualization-cluster="${escapeHtml(point.asset_id)}">${escapeHtml(point.asset_id.slice(0, 8))}</button>`).join("")}</div>`;
-  panel.querySelector("[data-visualization-close]").onclick = hideVisualizationSelection;
-  panel.querySelectorAll("[data-visualization-cluster]").forEach(button => button.onclick = () => selectVisualizationAsset(points.find(point => point.asset_id === button.dataset.visualizationCluster)));
+function showGeoLocalStrip(points) {
+  const strip = $("geo-local-strip");
+  if (!strip) return;
+  strip.classList.remove("hidden");
+  strip.innerHTML = `<div class="visualization-local-strip-header"><strong>${points.length.toLocaleString()} assets at this position</strong><button type="button" class="icon" data-geo-strip-close aria-label="Close asset list">×</button></div><div class="visualization-local-strip-items">${points.slice(0, 24).map(point => `<button type="button" class="visualization-local-strip-item" data-geo-strip-asset="${escapeHtml(point.asset_id)}"><img src="${escapeHtml(apiPath(`/api/assets/${encodeURIComponent(point.asset_id)}/thumbnail`))}" alt=""><span>${escapeHtml(point.filename || point.asset_id.slice(0, 8))}</span></button>`).join("")}</div>${points.length > 24 ? `<div class="muted">Showing 24 of ${points.length.toLocaleString()}</div>` : ""}`;
+  strip.querySelector("[data-geo-strip-close]").onclick = () => strip.classList.add("hidden");
+  strip.querySelectorAll("[data-geo-strip-asset]").forEach(button => button.onclick = () => selectVisualizationAsset(points.find(point => point.asset_id === button.dataset.geoStripAsset)));
 }
 
 async function selectVisualizationAsset(point) {
@@ -449,7 +480,7 @@ async function selectVisualizationAsset(point) {
   } catch (error) { showToast(`Asset preview unavailable: ${error.message}`); }
 }
 
-function hideVisualizationSelection() { state.visualizationSelectedId = null; state.visualizationSelectionRequest = (state.visualizationSelectionRequest || 0) + 1; $("visualization-selection").classList.add("hidden"); }
+function hideVisualizationSelection() { state.visualizationSelectedId = null; state.visualizationSelectionRequest = (state.visualizationSelectionRequest || 0) + 1; $("visualization-selection")?.classList.add("hidden"); $("geo-local-strip")?.classList.add("hidden"); }
 
 function bindVisualizationEvents(mode) {
   const canvas = visualizationCanvas(mode); let dragging = false; let startX = 0; let startY = 0; let moved = false;
