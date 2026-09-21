@@ -419,13 +419,16 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 }
 
 .visualization-view { min-height: 0; }
+.visualization-view.visualization-full-height { display:flex; flex-direction:column; min-height:calc(100dvh - 112px); }
 .visualization-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:.65rem; }
 .visualization-heading h2 { margin-bottom:.2rem; }
 .visualization-heading p { min-height:1.2rem; margin:0; font-size:.82rem; }
 .visualization-controls { display:flex; gap:.35rem; }
 .visualization-controls button { min-width:2rem; padding:.32rem .55rem; }
 .visualization-canvas-wrap { position:relative; }
-.visualization-canvas { display:block; width:100%; height:380px; min-height:300px; border:1px solid #303841; border-radius:.5rem; background:#10161c; cursor:grab; touch-action:none; }
+.visualization-canvas { display:block; width:100%; height:clamp(300px,42dvh,420px); min-height:300px; border:1px solid #303841; border-radius:.5rem; background:#10161c; cursor:grab; touch-action:none; }
+.visualization-full-height .visualization-canvas-wrap { display:flex; flex:1 1 auto; min-height:320px; }
+.visualization-full-height .visualization-canvas { flex:1 1 auto; width:100%; height:auto; min-height:320px; }
 .visualization-canvas.dragging { cursor:grabbing; }
 .visualization-select { display:flex; align-items:center; gap:.35rem; color:#aeb9c3; font-size:.82rem; }
 .visualization-select select { min-height:2rem; }
@@ -442,4 +445,4 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 .visualization-local-strip-item span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.7rem; }
 .visualization-cluster-list { display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.6rem; }
 .visualization-cluster-list button { padding:.25rem .45rem; font-size:.75rem; }
-@media(max-width:680px) { .visualization-heading { align-items:start; flex-direction:column; } .visualization-canvas { height:340px; } }
+@media(max-width:680px) { .visualization-heading { align-items:start; flex-direction:column; } .visualization-canvas { height:340px; } .visualization-view.visualization-full-height { min-height:0; } .visualization-full-height .visualization-canvas-wrap { display:block; min-height:0; } .visualization-full-height .visualization-canvas { height:340px; min-height:300px; } }

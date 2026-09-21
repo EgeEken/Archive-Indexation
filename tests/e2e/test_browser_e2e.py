@@ -139,8 +139,15 @@ class BrowserE2ETests(unittest.TestCase):
                 "portrait.jpg": (41.008238, 28.978359),
                 "child.jpg": (40.712776, -74.005974),
             }
+            capture_times = [
+                "2026-01-10T10:00:00",
+                "2026-01-25T10:00:00",
+                "2026-01-25T10:00:00",
+                "2026-02-05T12:00:00",
+                "2026-03-01T09:30:00",
+            ]
             for index, row in enumerate(rows):
-                capture = f"2026-01-01T12:00:{index:02d}"
+                capture = capture_times[index]
                 connection.execute(
                     "UPDATE logical_asset SET capture_time = ?, capture_time_kind = 'exif_local_unknown' WHERE id = ?",
                     (capture, row["logical_asset_id"]),
@@ -424,6 +431,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#geo-canvas").wait_for()
         self.page.wait_for_function("() => Number(document.querySelector('#geo-canvas').dataset.pointCount) === 3")
         self.page.wait_for_function("() => document.querySelector('#geo-canvas').dataset.firstTargetX !== undefined")
+        self.page.wait_for_function("() => Number(document.querySelector('#geo-canvas').getBoundingClientRect().height) > 380")
         self.assertIn("3 geotagged assets · 5 filtered assets", self.page.locator("#geo-status").inner_text())
         canvas = self.page.locator("#geo-canvas")
         canvas.click(position={
@@ -441,11 +449,14 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#timeline-view").wait_for(state="visible")
         self.page.wait_for_function("() => Number(document.querySelector('#timeline-canvas').dataset.pointCount) === 5")
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
+        self.page.wait_for_function("() => Number(document.querySelector('#timeline-canvas').dataset.badgeCount) === 2")
         self.assertIn("5 timed assets · 5 filtered assets", self.page.locator("#timeline-status").inner_text())
         canvas = self.page.locator("#timeline-canvas")
         before = float(canvas.get_attribute("data-view-scale"))
+        width_before = float(canvas.get_attribute("data-first-target-width"))
         self.page.locator("#timeline-zoom-in").click()
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) < before", arg=before)
+        self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.firstTargetWidth) > before", arg=width_before)
         self.page.locator("#timeline-mode-file-created").click()
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
@@ -462,6 +473,8 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#vector-view").wait_for(state="visible")
         self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').dataset.pointCount) === 5")
         self.page.wait_for_function("() => document.querySelector('#vector-canvas').dataset.firstTargetX !== undefined")
+        self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').dataset.badgeCount) > 1")
+        self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').getBoundingClientRect().height) > 380")
         self.assertIn("5 projected assets · 5 filtered assets", self.page.locator("#vector-status").inner_text())
         self.assertFalse(any("openclip" in entry.lower() or "model" in entry.lower() for entry in self.browser_log))
         canvas = self.page.locator("#vector-canvas")

@@ -553,8 +553,12 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn("timelineBucketInterval", visualizations)
         self.assertIn("vectorCellKey", visualizations)
         self.assertIn("drawVectorDensity", visualizations)
+        self.assertIn("visualization-full-height", html)
+        self.assertIn("drawVisualizationBadge", visualizations)
+        self.assertIn("vectorDensityRasterPoint", visualizations)
         self.assertNotIn("Math.floor(screen.x / clusterCellSize", visualizations)
         self.assertNotIn("fillRect(column", visualizations)
+        self.assertNotIn("thumbnailTier", visualizations)
         for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
             self.assertNotIn(remote_map_reference, visualizations)
 
@@ -565,7 +569,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         for start_marker, end_marker in (
             ("function timelineBucketInterval", "function timelineX"),
             ("function vectorCellKey", "function fitVector"),
-            ("function thumbnailTier", "function visualizationThumbnail"),
+            ("function visualizationThumbnailSize", "function visualizationThumbnail(assetId)"),
         ):
             start = visualizations.index(start_marker)
             end = visualizations.index(end_marker, start)
@@ -575,13 +579,65 @@ class CorrectionFrontendTests(unittest.TestCase):
         script = visualizations[intervals_start:intervals_end] + "\n" + "\n".join(snippets) + r'''
         const intervals = [timelineBucketInterval(86400, 900), timelineBucketInterval(86400, 900)];
         const cells = [vectorCellKey(1.2, -3.4, .5, 0, 0), vectorCellKey(1.2, -3.4, .5, 0, 0)];
-        console.log(JSON.stringify({intervals, cells, tiers:[thumbnailTier(30, 1), thumbnailTier(100, 1), thumbnailTier(240, 1)]}));
+        const geoFit=visualizationThumbnailSize({scale:100,baseScale:100},'geo');
+        const geoZoom=visualizationThumbnailSize({scale:200,baseScale:100},'geo');
+        const timelineFit=visualizationThumbnailSize({visibleSpan:1000,fitVisibleSpan:1000},'timeline');
+        const timelineZoom=visualizationThumbnailSize({visibleSpan:500,fitVisibleSpan:1000},'timeline');
+        console.log(JSON.stringify({intervals, cells, sizes:[geoFit,geoZoom,timelineFit,timelineZoom]}));
         '''
         result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
         output = json.loads(result.stdout)
         self.assertEqual(output["intervals"][0], output["intervals"][1])
         self.assertEqual(output["cells"][0], output["cells"][1])
-        self.assertEqual(output["tiers"], [72, 112, 190])
+        self.assertEqual(output["sizes"], [104, 156, 124, 166])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_timeline_cache_keeps_zero_bins_and_actual_representative_time(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function timelineBucketStart")
+        end = visualizations.index("function drawTimelineDensity", start)
+        script = "const TIMELINE_KERNEL=[1,4,6,4,1];\n" + visualizations[start:end] + r'''
+        function representativeVisualizationPoint(points) { return points[0]; }
+        const points=[{asset_id:'a',time:0},{asset_id:'b',time:86400*4}];
+        const view={key:'test',timeMode:'capture',timelineCache:null,centerTime:86400*2,visibleSpan:86400*5,data:{points}};
+        const cache=buildTimelineCache(view,points,86400);
+        const actual=timelineX(view,cache.buckets[0].point.time,1000);
+        const midpoint=timelineX(view,(cache.buckets[0].start+cache.buckets[0].end)/2,1000);
+        console.log(JSON.stringify({counts:cache.buckets.map(bucket=>bucket.count),middle:cache.amplitudes[2],peak:cache.maximum,actual,midpoint}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["counts"], [1, 0, 0, 0, 1])
+        self.assertLess(output["middle"], output["peak"])
+        self.assertNotEqual(output["actual"], output["midpoint"])
+
+    def test_visualization_layout_and_world_alignment_contract(self):
+        root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
+        css = (root / "app.css").read_text(encoding="utf-8")
+        visualizations = (root / "app-visualizations.js").read_text(encoding="utf-8")
+        self.assertIn(".visualization-view.visualization-full-height", css)
+        self.assertNotIn("height:380px", css)
+        self.assertIn("timelineX(view, bucket.point.time", visualizations)
+        self.assertIn("screenPoint(view, representative.x, representative.y", visualizations)
+        self.assertIn("vectorDensityRasterPoint(point, bounds, size)", visualizations)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_vector_density_raster_and_point_share_world_transform(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function vectorDensityRasterPoint")
+        end = visualizations.index("function vectorGridStep", start)
+        script = r'''
+        function screenPoint(view, x, y, width, height) { return {x:(x-view.centerX)*view.scale+width/2,y:(y-view.centerY)*view.scale+height/2}; }
+        ''' + visualizations[start:end] + r'''
+        const bounds={minX:-2,maxX:2,minY:-1,maxY:3}; const point={x:.5,y:2}; const size=512;
+        const pixel=vectorDensityRasterPoint(point,bounds,size);
+        const cell={x:bounds.minX+(pixel.x+.5)/size*(bounds.maxX-bounds.minX),y:bounds.minY+(pixel.y+.5)/size*(bounds.maxY-bounds.minY)};
+        const view={centerX:0,centerY:1,scale:100}; const exact=screenPoint(view,point.x,point.y,800,600); const raster=screenPoint(view,cell.x,cell.y,800,600);
+        console.log(JSON.stringify({distance:Math.hypot(exact.x-raster.x,exact.y-raster.y),cellSize:Math.max((bounds.maxX-bounds.minX)/size,(bounds.maxY-bounds.minY)/size)*view.scale}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertLessEqual(output["distance"], output["cellSize"] * 1.1)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_visualization_cameras_preserve_pointer_anchors(self):
