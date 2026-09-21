@@ -388,6 +388,7 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 #details .dialog-header { margin-bottom:.8rem; }
 #details .dialog-header > div { min-width:0; }
 #details .dialog-header .icon { font-size:1.6rem; line-height:1; }
+#details .dialog-header .icon { position:relative; z-index:3; }
 #details .detail-thumbnail { width:150px; height:150px; margin:0; }
 #details .detail-layout { position:relative; }
 #details .detail-main { width:100%; min-width:0; }
