@@ -58,6 +58,8 @@ def select_provider(provider_id):
             future.cancel()
         _requests.clear()
     release = embedding_runtime.select(provider_id, factory=create_embedding_provider)
+    _text_vectors.clear()
+    _rankings.clear()
     _embedding_matrices.clear()
     if provider_id is None and release is not None:
         return _worker.submit(release.result)
@@ -78,17 +80,24 @@ def request_text(workspace, text, *, allowed_asset_ids):
         return None, "loading"
     loading.result()
     fingerprint = _database_fingerprint(workspace)
-    key = (str(workspace.root), active["active_run_id"], fingerprint, text, frozenset(allowed_asset_ids))
+    key_prefix = (str(workspace.root), active["active_run_id"], fingerprint, provider_id, active["model_version"])
+    key = (*key_prefix, text)
     with _state_lock:
+        for old_key in list(_requests):
+            if old_key[:5] == key_prefix and old_key != key:
+                _requests.pop(old_key).cancel()
         future = _requests.get(key)
         if future is None:
-            future = _worker.submit(search_text, workspace, text, allowed_asset_ids=allowed_asset_ids, top_k=2**31)
+            future = _worker.submit(search_text, workspace, text, allowed_asset_ids=None, top_k=2**31)
             _requests[key] = future
-        while len(_requests) > 16:
+        while len(_requests) > 8:
             _, old = _requests.popitem(last=False)
             old.cancel()
     try:
-        return future.result(timeout=0.04), "complete"
+        results = future.result(timeout=0.04)
+        if allowed_asset_ids is not None:
+            results = [result for result in results if result.asset_id in allowed_asset_ids]
+        return results, "complete"
     except TimeoutError:
         return None, "searching"
 
@@ -143,7 +152,10 @@ def search_text(
         key = (active["active_provider"], active["model_version"], text)
         if provider is not None:
             query = provider.encode_text(text)
-            return search_vector(workspace, query, allowed_asset_ids=allowed_asset_ids, top_k=top_k)
+            results = search_vector(workspace, query, allowed_asset_ids=None, top_k=2**31)
+            if allowed_asset_ids is not None:
+                results = [result for result in results if result.asset_id in allowed_asset_ids]
+            return results[:top_k]
         query = _text_vectors.get(key)
         encode_started = perf_counter()
         if query is None:
@@ -159,16 +171,17 @@ def search_text(
                 _text_vectors.popitem(last=False)
         encode_elapsed = perf_counter() - encode_started
         fingerprint = _database_fingerprint(workspace)
-        rank_key = (str(workspace.root), active["active_run_id"], fingerprint, key,
-                    None if allowed_asset_ids is None else frozenset(allowed_asset_ids))
+        rank_key = (str(workspace.root), active["active_run_id"], fingerprint, key)
         results = _rankings.get(rank_key)
         cached = results is not None
         rank_started = perf_counter()
         if results is None:
-            results = search_vector(workspace, query, allowed_asset_ids=allowed_asset_ids, top_k=2**31)
+            results = search_vector(workspace, query, allowed_asset_ids=None, top_k=2**31)
             _rankings[rank_key] = results
             while len(_rankings) > 16:
                 _rankings.popitem(last=False)
+        if allowed_asset_ids is not None:
+            results = [result for result in results if result.asset_id in allowed_asset_ids]
         logging.getLogger(__name__).info("semantic search %.4fs ranking_cache=%s", perf_counter() - started, cached)
         LAST_SEARCH_TIMINGS.update(encode=encode_elapsed, rank=perf_counter() - rank_started, total=perf_counter() - started, ranking_cached=cached)
         return results[:top_k]

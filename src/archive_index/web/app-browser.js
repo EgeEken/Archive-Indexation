@@ -5,7 +5,7 @@ async function loadWorkspace() {
   $("setup-header-summary").classList.add("hidden");
   $("workspace-view").classList.remove("hidden");
   ["index", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
-  state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.assetRequest++; state.jobsRequest++; state.groupRequest++;
+  state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.searchGeneration++; state.searchPollCount = 0; state.assetRequest++; state.jobsRequest++; state.groupRequest++;
   state.items = []; state.total = 0; state.windowStart = 0; state.windowHasNext = false; state.groupItems = [];
   state.activeJobId = null; state.browserRevision = null; state.viewerItems = []; state.viewerDetail = null; state.viewerTotal = 0; state.viewerFilterKey = null; state.viewDirty = false;
   state.renderKeys = {}; state.galleryRequestInFlight = false; state.galleryLoading = true; state.semanticPending = false; state.folders = null;
@@ -80,6 +80,7 @@ async function prepareSearch() {
 }
 
 async function browserData(params) {
+  const generation = state.searchGeneration;
   state.browserAbort?.abort(); clearTimeout(state.searchPoll);
   const controller = new AbortController(); state.browserAbort = controller;
   if (params.get("q") && params.get("semantic") !== "0") {
@@ -87,15 +88,23 @@ async function browserData(params) {
     showSearchStatus({state:loading ? "loading" : "searching",message:loading ? `Loading ${state.searchProvider || "OpenCLIP"}…` : "Searching…"});
   }
   const data = await api(`/api/browser?${params}`, {signal:controller.signal});
-  if (controller.signal.aborted) throw new DOMException("Search replaced", "AbortError");
+  if (controller.signal.aborted || generation !== state.searchGeneration) throw new DOMException("Search replaced", "AbortError");
   state.searchProvider = data.search.provider;
   showSearchStatus(data.search, data);
   if (["loading","searching"].includes(data.search.state) && params.get("semantic") !== "0") {
-    state.searchPoll = setTimeout(() => {
-      if (!$("workspace-view").classList.contains("hidden")) loadCurrentView();
-    }, 100);
+    scheduleSearchPoll(generation);
   }
   return data;
+}
+
+function scheduleSearchPoll(generation) {
+  clearTimeout(state.searchPoll);
+  const delay = state.searchPollCount < 3 ? 275 : 500;
+  state.searchPollCount++;
+  state.searchPoll = setTimeout(() => {
+    state.searchPoll = null;
+    if (generation === state.searchGeneration && !$("workspace-view").classList.contains("hidden")) loadCurrentView();
+  }, delay);
 }
 
 function renderGalleryWindow(data, offset, columns, height) {

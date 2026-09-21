@@ -433,11 +433,19 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_function("() => document.querySelector('#geo-canvas').dataset.firstTargetX !== undefined")
         self.page.wait_for_function("() => Number(document.querySelector('#geo-canvas').getBoundingClientRect().height) > 380")
         self.assertIn("3 geotagged assets · 5 filtered assets", self.page.locator("#geo-status").inner_text())
+        self.assertTrue(self.page.evaluate("() => document.documentElement.scrollHeight <= window.innerHeight + 2"))
         canvas = self.page.locator("#geo-canvas")
         canvas.click(position={
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
+        panel = self.page.locator("#visualization-selection-panel")
+        panel.wait_for()
+        self.assertIn(".jpg", panel.inner_text())
+        panel.get_by_role("button", name="Details").click()
+        self.page.locator("#details[open]").wait_for(timeout=15000)
+        self.page.locator("#details-close").click()
+        panel.get_by_role("button", name="Open").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
         self.page.locator("#viewer-close").click()
@@ -457,6 +465,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#timeline-zoom-in").click()
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) < before", arg=before)
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.firstTargetWidth) > before", arg=width_before)
+        self.assertTrue(self.page.evaluate("() => document.documentElement.scrollHeight <= window.innerHeight + 2"))
         self.page.locator("#timeline-mode-file-created").click()
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
@@ -464,6 +473,10 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
+        panel = self.page.locator("#visualization-selection-panel")
+        panel.wait_for()
+        self.assertIn(".jpg", panel.inner_text())
+        panel.get_by_role("button", name="Open").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 
@@ -476,12 +489,17 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').dataset.badgeCount) > 1")
         self.page.wait_for_function("() => Number(document.querySelector('#vector-canvas').getBoundingClientRect().height) > 380")
         self.assertIn("5 projected assets · 5 filtered assets", self.page.locator("#vector-status").inner_text())
+        self.assertTrue(self.page.evaluate("() => document.documentElement.scrollHeight <= window.innerHeight + 2"))
         self.assertFalse(any("openclip" in entry.lower() or "model" in entry.lower() for entry in self.browser_log))
         canvas = self.page.locator("#vector-canvas")
         canvas.click(position={
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
+        panel = self.page.locator("#visualization-selection-panel")
+        panel.wait_for()
+        self.assertIn(".jpg", panel.inner_text())
+        panel.get_by_role("button", name="Open").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 

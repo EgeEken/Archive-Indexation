@@ -15,7 +15,7 @@ function renderSemanticControls() {
 }
 
 function refreshBrowser() {
-  state.renderKeys = {}; state.browserAbort?.abort(); clearTimeout(state.searchPoll);
+  state.renderKeys = {}; state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.searchGeneration++; state.searchPollCount = 0;
   state.galleryRequestInFlight = false;
   state.assetRequest++; state.groupRequest++;
   state.groupPage = 1; state.scrollPositions = {}; window.scrollTo(0, 0);
@@ -44,7 +44,11 @@ function setupFilters() {
     }
     $("sort-by").value = state.semanticPending ? "search" : "capture_time"; $("direction").value = "desc";
     refreshBrowser();
-    if (state.semanticPending) debounce = setTimeout(() => { state.semanticPending = false; refreshBrowser(); }, 500);
+    const generation = state.searchGeneration;
+    if (state.semanticPending) debounce = setTimeout(() => { if (generation === state.searchGeneration && $("search").value.trim()) { state.semanticPending = false; refreshBrowser(); } }, 250);
+  });
+  $("search").addEventListener("keydown", event => {
+    if (event.key === "Enter" && state.semanticPending) { clearTimeout(debounce); state.semanticPending = false; refreshBrowser(); }
   });
   $("similarity-threshold").oninput = () => { $("similarity-value").textContent = Number($("similarity-threshold").value).toFixed(2); localStorage.setItem(`archive-threshold-${state.workspace}`, $("similarity-threshold").value); refreshBrowser(); };
   let thresholdSave = Promise.resolve();
@@ -109,9 +113,12 @@ function renderFolderTree() {
 function setViewMode(mode, load = true) {
   const started = performance.now();
   mode = viewModeAvailable(mode) ? mode : "gallery";
+  const previousMode = state.viewMode;
   if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
+  document.body.classList.toggle("visualization-active", ["geo", "timeline", "vector"].includes(state.viewMode));
+  if (!["geo", "timeline", "vector"].includes(state.viewMode) || previousMode !== state.viewMode) $("visualization-selection-panel")?.classList.add("hidden");
   $("gallery").classList.toggle("hidden", mode !== "gallery");
   $("groups-view").classList.toggle("hidden", mode !== "groups");
   $("geo-view").classList.toggle("hidden", mode !== "geo");

@@ -7,7 +7,7 @@ const state = {
   items: [],
   viewerItems: [],
   viewMode: ["groups", "geo", "timeline", "vector"].includes(query.get("view")) ? query.get("view") : "gallery",
-  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, semanticPending: false, semanticEnabled: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [], folderCounts: {},
+  searchState: "available", renderKeys: {}, browserAbort: null, searchPoll: null, searchGeneration: 0, searchPollCount: 0, semanticPending: false, semanticEnabled: false, auto: "all", manual: "all", layout: "", folders: null, folderPaths: [], folderCounts: {},
   scrollPositions: {}, windowStart: 0, windowRows: [], windowColumns: 1, windowHeight: 360, windowHasNext: false,
   collapsed: localStorage.getItem("archive-sidebar-collapsed") === "true",
   selectionFilter: query.get("selection") || "all",
@@ -41,9 +41,9 @@ const state = {
   visualizationRequest: 0,
   visualizationAbort: null,
   visualizations: {
-    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, baseScale: 1, needsFit: true, hitTargets: []},
-    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}, file_created: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}}, centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true, hitTargets: []},
-    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, baseScale: 1, baseCellWorld: 1, worldBounds: null, needsFit: true, hitTargets: [], grid: new Map()},
+    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, baseScale: 1, targetCenterX: .5, targetCenterY: .5, targetScale: 1, needsFit: true, hitTargets: [], lodCaches: new Map(), cameraFrame: 0},
+    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}, file_created: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}}, centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, targetCenterTime: 0, targetVisibleSpan: 86400, needsFit: true, hitTargets: [], timelineCaches: new Map(), cameraFrame: 0},
+    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, targetCenterX: 0, targetCenterY: 0, targetScale: 1, baseScale: 1, baseCellWorld: 1, worldBounds: null, needsFit: true, hitTargets: [], lodCaches: new Map(), grid: new Map(), cameraFrame: 0},
   },
   visualizationCapabilities: {geo: true, timeline: true, vector: true},
 };

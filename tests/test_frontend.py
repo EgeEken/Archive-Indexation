@@ -160,7 +160,8 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual((root / "index.html").read_text(encoding="utf-8").count('id="setup-index-summary"'), 1)
         self.assertIn("display_url || item.original_url", source)
         self.assertIn('aspect-ratio: 1 / 1', (root / "app.css").read_text())
-        self.assertIn('}, 500)', source)
+        self.assertIn("const delay = state.searchPollCount < 3 ? 275 : 500", source)
+        self.assertIn("generation === state.searchGeneration", source)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_recommended_tag_replaces_representative_tag(self):
@@ -537,7 +538,7 @@ class CorrectionFrontendTests(unittest.TestCase):
             self.assertIn(label, html)
         self.assertNotIn("Cloud Map", html)
         self.assertNotIn("Not implemented yet", html)
-        self.assertNotIn("visualization-selection", html)
+        self.assertIn('id="visualization-selection-panel"', html)
         self.assertIn("timeline-mode-capture", html)
         self.assertIn("timeline-mode-file-created", html)
         self.assertIn("visualizationCapabilities", source)
@@ -548,10 +549,14 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn("/api/visualizations/", visualizations)
         self.assertIn('getContext("2d")', visualizations)
         self.assertIn("representativeVisualizationPoint", visualizations)
-        self.assertNotIn("visualization-selection", visualizations)
+        self.assertIn("visualization-selection-panel", visualizations)
         self.assertNotIn("stableLane", visualizations)
         self.assertIn("timelineBucketInterval", visualizations)
+        self.assertIn("timelineLod", visualizations)
+        self.assertIn("buildTimelineCache", visualizations)
+        self.assertIn("scheduleVisualizationRender", visualizations)
         self.assertIn("vectorCellKey", visualizations)
+        self.assertIn("buildVectorLodCache", visualizations)
         self.assertIn("drawVectorDensity", visualizations)
         self.assertIn("visualization-full-height", html)
         self.assertIn("drawVisualizationBadge", visualizations)
@@ -559,6 +564,9 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertNotIn("Math.floor(screen.x / clusterCellSize", visualizations)
         self.assertNotIn("fillRect(column", visualizations)
         self.assertNotIn("thumbnailTier", visualizations)
+        self.assertNotIn("PCA 1", visualizations)
+        self.assertNotIn("PCA 2", visualizations)
+        self.assertIn('id="visualization-selection-panel"', html)
         for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
             self.assertNotIn(remote_map_reference, visualizations)
 
@@ -599,17 +607,19 @@ class CorrectionFrontendTests(unittest.TestCase):
         script = "const TIMELINE_KERNEL=[1,4,6,4,1];\n" + visualizations[start:end] + r'''
         function representativeVisualizationPoint(points) { return points[0]; }
         const points=[{asset_id:'a',time:0},{asset_id:'b',time:86400*4}];
-        const view={key:'test',timeMode:'capture',timelineCache:null,centerTime:86400*2,visibleSpan:86400*5,data:{points}};
+        const view={key:'test',timeMode:'capture',timelineCaches:new Map(),centerTime:86400*2,visibleSpan:86400*5,data:{points}};
         const cache=buildTimelineCache(view,points,86400);
-        const actual=timelineX(view,cache.buckets[0].point.time,1000);
-        const midpoint=timelineX(view,(cache.buckets[0].start+cache.buckets[0].end)/2,1000);
-        console.log(JSON.stringify({counts:cache.buckets.map(bucket=>bucket.count),middle:cache.amplitudes[2],peak:cache.maximum,actual,midpoint}));
+        const bins=timelineVisibleBins(cache,0,86400*5-.001);
+        const actual=timelineX(view,bins[0].point.time,1000);
+        const midpoint=timelineX(view,(bins[0].start+bins[0].end)/2,1000);
+        console.log(JSON.stringify({counts:bins.map(bucket=>bucket.count),middle:timelineDensityAt(cache,86400*2),peak:cache.maximum,actual,midpoint,occupied:cache.occupied.size}));
         '''
         result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
         output = json.loads(result.stdout)
         self.assertEqual(output["counts"], [1, 0, 0, 0, 1])
         self.assertLess(output["middle"], output["peak"])
         self.assertNotEqual(output["actual"], output["midpoint"])
+        self.assertEqual(output["occupied"], 2)
 
     def test_visualization_layout_and_world_alignment_contract(self):
         root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
@@ -617,9 +627,10 @@ class CorrectionFrontendTests(unittest.TestCase):
         visualizations = (root / "app-visualizations.js").read_text(encoding="utf-8")
         self.assertIn(".visualization-view.visualization-full-height", css)
         self.assertNotIn("height:380px", css)
-        self.assertIn("timelineX(view, bucket.point.time", visualizations)
+        self.assertIn("timelineX(view, candidate.point.time", visualizations)
         self.assertIn("screenPoint(view, representative.x, representative.y", visualizations)
         self.assertIn("vectorDensityRasterPoint(point, bounds, size)", visualizations)
+        self.assertNotIn("calc(100dvh - 112px)", css)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_vector_density_raster_and_point_share_world_transform(self):

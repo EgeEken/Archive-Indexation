@@ -13,7 +13,7 @@ from PIL import Image
 from archive_index.embeddings import search as search_module
 from archive_index.embeddings.models import OPENCLIP_PROVIDER, SIGLIP_PROVIDER
 from archive_index.embeddings.providers import EmbeddingProvider
-from archive_index.embeddings.search import _embedding_matrices, clear_search_sessions, prepare_provider, search_similar, search_text, search_vector
+from archive_index.embeddings.search import _embedding_matrices, _rankings, clear_search_sessions, prepare_provider, search_similar, search_text, search_vector
 from archive_index.embeddings.vector import blob_to_vector, exact_top_k, vector_to_blob
 from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.scanner import scan
@@ -58,6 +58,20 @@ class FakeProvider(EmbeddingProvider):
 
 
 class EmbeddingTests(unittest.TestCase):
+    def test_text_ranking_cache_is_independent_of_allowed_filter(self):
+        from types import SimpleNamespace
+
+        workspace = SimpleNamespace(root=Path("ranking-cache"))
+        active = {"active_provider": OPENCLIP_PROVIDER, "active_run_id": "run", "model_version": "v1", "status": "complete"}
+        ranked = [search_module.SearchResult("a", .9), search_module.SearchResult("b", .8)]
+        _rankings.clear()
+        with patch.object(search_module, "active_embedding", return_value=active), patch.object(search_module, "_database_fingerprint", return_value=((1, 2),)), patch.object(search_module.embedding_runtime, "run", return_value=np.array([1, 0], dtype=np.float32)), patch.object(search_module.embedding_runtime, "loaded_provider", return_value=SimpleNamespace(last_timings={})), patch.object(search_module, "search_vector", return_value=ranked) as rank:
+            first = search_text(workspace, "query", allowed_asset_ids={"a"}, top_k=10)
+            second = search_text(workspace, "query", allowed_asset_ids={"b"}, top_k=10)
+        self.assertEqual([result.asset_id for result in first], ["a"])
+        self.assertEqual([result.asset_id for result in second], ["b"])
+        rank.assert_called_once()
+
     def test_search_and_indexing_share_one_provider_instance(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "archive"
