@@ -37,18 +37,19 @@ function setupFilters() {
   $("direction-button").onclick = () => { $("direction").value = $("direction").value === "desc" ? "asc" : "desc"; refreshBrowser(); };
   let debounce;
   $("search").addEventListener("input", () => {
-    clearTimeout(debounce); state.semanticPending = state.semanticEnabled && Boolean($("search").value.trim());
+    clearTimeout(debounce); state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.searchGeneration++; state.searchPollCount = 0;
+    const value = $("search").value.trim(); state.semanticPending = state.semanticEnabled && Boolean(value);
     if (state.semanticPending) {
       const cold = ["available", "loading"].includes(state.searchState);
       showSearchStatus({state:cold ? "loading" : "searching", message:cold ? `Loading ${state.searchProvider || "OpenCLIP"}…` : "Searching…"});
     }
     $("sort-by").value = state.semanticPending ? "search" : "capture_time"; $("direction").value = "desc";
-    refreshBrowser();
-    const generation = state.searchGeneration;
-    if (state.semanticPending) debounce = setTimeout(() => { if (generation === state.searchGeneration && $("search").value.trim()) { state.semanticPending = false; refreshBrowser(); } }, 250);
+    if (!value) { state.semanticPending = false; refreshBrowser(); return; }
+    const generation = state.searchGeneration; syncUrl();
+    debounce = setTimeout(() => { if (generation === state.searchGeneration && $("search").value.trim()) { state.semanticPending = false; refreshBrowser(); } }, 250);
   });
   $("search").addEventListener("keydown", event => {
-    if (event.key === "Enter" && state.semanticPending) { clearTimeout(debounce); state.semanticPending = false; refreshBrowser(); }
+    if (event.key === "Enter" && $("search").value.trim()) { clearTimeout(debounce); state.semanticPending = false; refreshBrowser(); }
   });
   $("similarity-threshold").oninput = () => { $("similarity-value").textContent = Number($("similarity-threshold").value).toFixed(2); localStorage.setItem(`archive-threshold-${state.workspace}`, $("similarity-threshold").value); refreshBrowser(); };
   let thresholdSave = Promise.resolve();

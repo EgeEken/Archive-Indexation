@@ -632,6 +632,46 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn("vectorDensityRasterPoint(point, bounds, size)", visualizations)
         self.assertNotIn("calc(100dvh - 112px)", css)
 
+    def test_search_typing_debounces_and_cancels_stale_work(self):
+        source = javascript_source()
+        self.assertIn("state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.searchGeneration++;", source)
+        self.assertIn("debounce = setTimeout", source)
+        self.assertIn("}, 250);", source)
+        self.assertIn('event.key === "Enter"', source)
+        self.assertIn("generation === state.searchGeneration", source)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_visualization_render_scheduler_coalesces_callbacks(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function scheduleVisualizationRender")
+        end = visualizations.index("async function loadVisualization", start)
+        script = visualizations[start:end] + r'''
+        const callbacks=[]; let calls=0;
+        const state={viewMode:'timeline',visualizations:{timeline:{data:{},renderFrame:0}}};
+        const visualizationView=mode=>state.visualizations[mode]; const renderVisualization=()=>{calls += 1;}; const requestAnimationFrame=callback=>{callbacks.push(callback); return callbacks.length;};
+        scheduleVisualizationRender('timeline'); scheduleVisualizationRender('timeline'); callbacks.shift()(0);
+        console.log(JSON.stringify({queued:callbacks.length,calls}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(result.stdout), {"queued": 0, "calls": 1})
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_timeline_labels_are_hierarchical_and_wall_clock_stable(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function formatTimelineTick")
+        end = visualizations.index("function timelineTicks", start)
+        script = visualizations[start:end] + r'''
+        const values=[timelineTickLabels(Date.UTC(2026,0,1,0,0,0)/1000,60),timelineTickLabels(Date.UTC(2026,0,2,0,0,0)/1000,60),timelineTickLabels(Date.UTC(2026,0,1,0,0,1)/1000,1),timelineTickLabels(Date.UTC(2026,0,1,0,0,0,123)/1000,.001)];
+        console.log(JSON.stringify(values));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        values = json.loads(result.stdout)
+        self.assertEqual(values[0]["context"], "01 Jan")
+        self.assertEqual(values[0]["detail"], "00:00")
+        self.assertEqual(values[1]["context"], "02 Jan")
+        self.assertEqual(values[2]["detail"], "00:00:01")
+        self.assertEqual(values[3]["detail"], "00:00:00.123")
+
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_vector_density_raster_and_point_share_world_transform(self):
         visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")

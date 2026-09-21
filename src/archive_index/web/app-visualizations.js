@@ -284,6 +284,9 @@ function geoWorld(longitude, latitude) {
 }
 
 function geoLod(view) { return Math.max(0, Math.min(24, Math.floor(Math.log2(Math.max(1, view.scale / Math.max(1, view.baseScale || 1)))))); }
+function geoContinuousLod(view) {
+  const zoom = Math.max(0, Math.min(24, Math.log2(Math.max(1, view.scale / Math.max(1, view.baseScale || 1))))); const coarse = Math.floor(zoom); const fine = Math.min(24, coarse + 1); const progress = Math.min(1, Math.max(0, zoom - coarse)); return {coarse, fine, fineBlend: progress * progress * (3 - 2 * progress)};
+}
 function sameGeoLocation(points) {
   if (points.length < 2) return false;
   const latitude = Number(points[0].latitude); const longitude = Number(points[0].longitude);
@@ -336,19 +339,10 @@ function drawGeo(canvas, view, data) {
   if (!view.world) worldFeaturesPromise.then(world => { if (state.viewMode === "geo" && view.data === data && !view.world) { view.world = world; renderVisualization("geo"); } });
   const zoom = Math.max(0, Math.log2(Math.max(1, view.scale / Math.max(1, view.baseScale || 1)))); const localProgress = Math.max(0, Math.min(1, (zoom - 5) / 2)); const localAlpha = localProgress * localProgress * (3 - 2 * localProgress);
   ctx.save(); ctx.globalAlpha = 1 - localAlpha; for (const feature of view.world?.features || []) drawGeoFeature(ctx, feature, view, width, height); ctx.restore(); drawGeoLocalField(ctx, view, width, height, localAlpha);
-  const cache = buildGeoLodCache(view, points, geoLod(view)); const clusters = visibleGeoCells(cache, view, width, height);
+  const lod = geoContinuousLod(view); const coarse = buildGeoLodCache(view, points, lod.coarse); const fine = lod.fine === lod.coarse ? coarse : buildGeoLodCache(view, points, lod.fine);
   view.hitTargets = [];
-  for (const cluster of clusters) {
-    const center = screenPoint(view, cluster.worldX, cluster.worldY, width, height); const x = center.x; const y = center.y;
-    if (x < -220 || x > width + 220 || y < -220 || y > height + 220) continue;
-    const size = visualizationThumbnailSize(view, "geo"); const thumbHeight = Math.max(40, Math.round(size * .72));
-    const representative = representativeVisualizationPoint(cluster.points);
-    drawVisualizationThumbnail(ctx, representative, x - size / 2, y - thumbHeight / 2, size, thumbHeight);
-    drawVisualizationSelection(ctx, x - size / 2, y - thumbHeight / 2, size, thumbHeight, view.selectedId === representative.asset_id);
-    const badgeX = x + size / 2 - 3; const badgeY = y - thumbHeight / 2 + 3;
-    drawVisualizationBadge(ctx, badgeX, badgeY, cluster.points.length);
-    view.hitTargets.push({x, y, badgeX, badgeY, width: size, height: thumbHeight, count: cluster.points.length, hitRadius: Math.max(18, size / 2 + 8), points: cluster.points, sameLocation: sameGeoLocation(cluster.points)});
-  }
+  const drawClusters = (cells, alpha, interactive) => { ctx.save(); ctx.globalAlpha = alpha; for (const cluster of visibleGeoCells(cells, view, width, height)) { const center = screenPoint(view, cluster.worldX, cluster.worldY, width, height); const x = center.x; const y = center.y; if (x < -220 || x > width + 220 || y < -220 || y > height + 220) continue; const size = visualizationThumbnailSize(view, "geo"); const thumbHeight = Math.max(40, Math.round(size * .72)); const representative = representativeVisualizationPoint(cluster.points); drawVisualizationThumbnail(ctx, representative, x - size / 2, y - thumbHeight / 2, size, thumbHeight); drawVisualizationSelection(ctx, x - size / 2, y - thumbHeight / 2, size, thumbHeight, view.selectedId === representative.asset_id); const badgeX = x + size / 2 - 3; const badgeY = y - thumbHeight / 2 + 3; drawVisualizationBadge(ctx, badgeX, badgeY, cluster.points.length); if (interactive) view.hitTargets.push({x, y, badgeX, badgeY, width: size, height: thumbHeight, count: cluster.points.length, hitRadius: Math.max(18, size / 2 + 8), points: cluster.points, sameLocation: sameGeoLocation(cluster.points)}); } ctx.restore(); };
+  const fineAlpha = lod.coarse === lod.fine ? 1 : lod.fineBlend; drawClusters(coarse, 1 - fineAlpha, fineAlpha < .5); if (fineAlpha > 0) drawClusters(fine, fineAlpha, fineAlpha >= .5);
 }
 
 function drawGeoFeature(ctx, feature, view, width, height) {

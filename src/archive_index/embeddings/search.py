@@ -80,11 +80,11 @@ def request_text(workspace, text, *, allowed_asset_ids):
         return None, "loading"
     loading.result()
     fingerprint = _database_fingerprint(workspace)
-    key_prefix = (str(workspace.root), active["active_run_id"], fingerprint, provider_id, active["model_version"])
+    key_prefix = (str(workspace.root), active["active_run_id"], fingerprint, active["browser_generation"], provider_id, active["model_version"])
     key = (*key_prefix, text)
     with _state_lock:
         for old_key in list(_requests):
-            if old_key[:5] == key_prefix and old_key != key:
+            if old_key[:6] == key_prefix and old_key != key:
                 _requests.pop(old_key).cancel()
         future = _requests.get(key)
         if future is None:
@@ -171,7 +171,7 @@ def search_text(
                 _text_vectors.popitem(last=False)
         encode_elapsed = perf_counter() - encode_started
         fingerprint = _database_fingerprint(workspace)
-        rank_key = (str(workspace.root), active["active_run_id"], fingerprint, key)
+        rank_key = (str(workspace.root), active["active_run_id"], fingerprint, active["browser_generation"], key)
         results = _rankings.get(rank_key)
         cached = results is not None
         rank_started = perf_counter()

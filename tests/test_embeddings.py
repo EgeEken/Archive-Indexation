@@ -13,7 +13,7 @@ from PIL import Image
 from archive_index.embeddings import search as search_module
 from archive_index.embeddings.models import OPENCLIP_PROVIDER, SIGLIP_PROVIDER
 from archive_index.embeddings.providers import EmbeddingProvider
-from archive_index.embeddings.search import _embedding_matrices, _rankings, clear_search_sessions, prepare_provider, search_similar, search_text, search_vector
+from archive_index.embeddings.search import _embedding_matrices, _rankings, _requests, clear_search_sessions, prepare_provider, request_text, search_similar, search_text, search_vector
 from archive_index.embeddings.vector import blob_to_vector, exact_top_k, vector_to_blob
 from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.scanner import scan
@@ -62,7 +62,7 @@ class EmbeddingTests(unittest.TestCase):
         from types import SimpleNamespace
 
         workspace = SimpleNamespace(root=Path("ranking-cache"))
-        active = {"active_provider": OPENCLIP_PROVIDER, "active_run_id": "run", "model_version": "v1", "status": "complete"}
+        active = {"active_provider": OPENCLIP_PROVIDER, "active_run_id": "run", "model_version": "v1", "browser_generation": 1, "status": "complete"}
         ranked = [search_module.SearchResult("a", .9), search_module.SearchResult("b", .8)]
         _rankings.clear()
         with patch.object(search_module, "active_embedding", return_value=active), patch.object(search_module, "_database_fingerprint", return_value=((1, 2),)), patch.object(search_module.embedding_runtime, "run", return_value=np.array([1, 0], dtype=np.float32)), patch.object(search_module.embedding_runtime, "loaded_provider", return_value=SimpleNamespace(last_timings={})), patch.object(search_module, "search_vector", return_value=ranked) as rank:
@@ -71,6 +71,33 @@ class EmbeddingTests(unittest.TestCase):
         self.assertEqual([result.asset_id for result in first], ["a"])
         self.assertEqual([result.asset_id for result in second], ["b"])
         rank.assert_called_once()
+
+    def test_new_text_request_removes_queued_stale_request(self):
+        from types import SimpleNamespace
+
+        class LoadingFuture:
+            def done(self): return True
+            def result(self): return None
+
+        class SearchFuture:
+            def __init__(self): self.cancelled = False
+            def cancel(self): self.cancelled = True; return True
+            def result(self, timeout=None): raise search_module.TimeoutError()
+
+        class Worker:
+            def __init__(self): self.futures = []
+            def submit(self, *args, **kwargs):
+                future = SearchFuture(); self.futures.append(future); return future
+
+        worker = Worker(); workspace = SimpleNamespace(root=Path("stale-request")); active = {"active_provider": OPENCLIP_PROVIDER, "active_run_id": "run", "model_version": "v1", "browser_generation": 1, "status": "complete"}
+        _requests.clear()
+        with patch.object(search_module, "active_embedding", return_value=active), patch.object(search_module, "prepare_provider", return_value=LoadingFuture()), patch.object(search_module, "_database_fingerprint", return_value=((1, 2),)), patch.object(search_module, "_worker", worker):
+            request_text(workspace, "old", allowed_asset_ids={"a"})
+            request_text(workspace, "new", allowed_asset_ids={"a"})
+        self.assertTrue(worker.futures[0].cancelled)
+        self.assertEqual(len(_requests), 1)
+        self.assertEqual(next(iter(_requests))[-1], "new")
+        _requests.clear()
 
     def test_search_and_indexing_share_one_provider_instance(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
