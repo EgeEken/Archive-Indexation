@@ -503,7 +503,9 @@ class MediaPipelineTests(unittest.TestCase):
                     "INSERT INTO component_state(physical_file_id, component, status, algorithm, version) VALUES (?, 'thumbnail', 'complete', 'old', '1')",
                     (file_id,),
                 )
-            server = WorkspaceHTTPServer(("127.0.0.1", 0), workspace)
+            server = WorkspaceHTTPServer(
+                ("127.0.0.1", 0), workspace, registry_path=Path(temporary_directory) / "registry.json"
+            )
             try:
                 self.assertEqual(store.get(job_id)["status"], "interrupted")
                 with closing(workspace.connect()) as connection:

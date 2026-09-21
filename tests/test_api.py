@@ -46,7 +46,9 @@ class ApiTests(unittest.TestCase):
         self.workspace.set_quality_provider("lar-iqa")
         scan(self.workspace)
         index_workspace(self.workspace, components=("metadata", "thumbnail", "quality"))
-        self.server = WorkspaceHTTPServer(("127.0.0.1", 0), self.workspace)
+        self.server = WorkspaceHTTPServer(
+            ("127.0.0.1", 0), self.workspace, registry_path=Path(self.temporary_directory.name) / "registry.json"
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"

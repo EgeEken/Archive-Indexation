@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 
 from .workspace import Workspace, WorkspaceError
@@ -26,17 +28,37 @@ class WorkspaceRegistry:
         handle = workspace_id(workspace)
         entries = [entry for entry in self.entries() if entry.get("id") != handle]
         entries.insert(0, {"id": handle, "path": str(workspace.root)})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(entries[:30], ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_entries(entries)
 
     def remove(self, handle: str) -> bool:
         entries = self.entries()
         remaining = [entry for entry in entries if entry.get("id") != handle]
         if len(remaining) == len(entries):
             return False
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_entries(remaining)
         return True
+
+    def _write_entries(self, entries: list[dict[str, object]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(entries, temporary, ensure_ascii=False, indent=2)
+                temporary.write("\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            temporary_path.replace(self.path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def open(self, handle: str) -> Workspace:
         for entry in self.entries():
