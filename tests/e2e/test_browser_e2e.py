@@ -398,6 +398,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator(".group-row").first.wait_for()
         group = self.page.locator(".group-row").filter(has_text="2 members").first
         self.assertEqual(group.count(), 1)
+        self.assertIn("Group 1", group.inner_text())
         group.locator(".group-photo").first.click()
         self.page.locator("#viewer[open]").wait_for()
         self.page.locator("#viewer-grouping").wait_for(state="visible")
@@ -429,12 +430,6 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        self.page.locator("#visualization-selection").wait_for(state="visible", timeout=15000)
-        self.page.locator("#visualization-selection [data-visualization-details]").click()
-        self.page.locator("#details[open]").wait_for(timeout=15000)
-        self.page.locator("#details").evaluate("dialog => dialog.close()")
-        self.page.locator("#details").wait_for(state="hidden", timeout=15000)
-        self.page.locator("#visualization-selection [data-visualization-open]").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
         self.page.locator("#viewer-close").click()
@@ -450,7 +445,7 @@ class BrowserE2ETests(unittest.TestCase):
         canvas = self.page.locator("#timeline-canvas")
         before = float(canvas.get_attribute("data-view-scale"))
         self.page.locator("#timeline-zoom-in").click()
-        self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) > before", arg=before)
+        self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) < before", arg=before)
         self.page.locator("#timeline-mode-file-created").click()
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.firstTargetX !== undefined")
@@ -458,8 +453,6 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        self.page.locator("#visualization-selection").wait_for(state="visible", timeout=15000)
-        self.page.locator("#visualization-selection [data-visualization-open]").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 
@@ -476,8 +469,6 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        self.page.locator("#visualization-selection").wait_for(state="visible", timeout=15000)
-        self.page.locator("#visualization-selection [data-visualization-open]").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
 

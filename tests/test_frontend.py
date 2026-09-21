@@ -537,7 +537,7 @@ class CorrectionFrontendTests(unittest.TestCase):
             self.assertIn(label, html)
         self.assertNotIn("Cloud Map", html)
         self.assertNotIn("Not implemented yet", html)
-        self.assertIn("visualization-selection", html)
+        self.assertNotIn("visualization-selection", html)
         self.assertIn("timeline-mode-capture", html)
         self.assertIn("timeline-mode-file-created", html)
         self.assertIn("visualizationCapabilities", source)
@@ -548,7 +548,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn("/api/visualizations/", visualizations)
         self.assertIn('getContext("2d")', visualizations)
         self.assertIn("representativeVisualizationPoint", visualizations)
-        self.assertIn("visualization-selection", visualizations)
+        self.assertNotIn("visualization-selection", visualizations)
         self.assertNotIn("stableLane", visualizations)
         self.assertIn("timelineBucketInterval", visualizations)
         self.assertIn("vectorCellKey", visualizations)
@@ -581,7 +581,35 @@ class CorrectionFrontendTests(unittest.TestCase):
         output = json.loads(result.stdout)
         self.assertEqual(output["intervals"][0], output["intervals"][1])
         self.assertEqual(output["cells"][0], output["cells"][1])
-        self.assertEqual(output["tiers"], [36, 64, 112])
+        self.assertEqual(output["tiers"], [72, 112, 190])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_visualization_cameras_preserve_pointer_anchors(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        self.assertNotIn("panX", visualizations)
+        self.assertNotIn("panY", visualizations)
+        self.assertIn("centerTime", visualizations)
+        self.assertIn("densityCache", visualizations)
+        self.assertIn("Math.exp(-distance", visualizations)
+        start = visualizations.index("function screenPoint")
+        end = visualizations.index("function visualizationMaximum", start)
+        script = visualizations[start:end] + r'''
+        const worldView={centerX:.2,centerY:.4,scale:300};
+        const cursor={x:120,y:80}; const before=worldPoint(worldView,cursor.x,cursor.y,800,380);
+        worldView.scale*=1.35;
+        worldView.centerX=before.x-(cursor.x-400)/worldView.scale;
+        worldView.centerY=before.y-(cursor.y-190)/worldView.scale;
+        const after=screenPoint(worldView,before.x,before.y,800,380);
+        const timeline={centerTime:100,visibleSpan:80}; const time=timeline.centerTime+(120-400)/800*timeline.visibleSpan;
+        timeline.visibleSpan/=1.12; timeline.centerTime=time-(120-400)/800*timeline.visibleSpan;
+        const timeAfter=timeline.centerTime+(120-400)/800*timeline.visibleSpan;
+        console.log(JSON.stringify({world:[after.x,after.y],time:timeAfter}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertAlmostEqual(output["world"][0], 120, places=8)
+        self.assertAlmostEqual(output["world"][1], 80, places=8)
+        self.assertAlmostEqual(output["time"], 72, places=8)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_stale_job_bootstrap_cannot_replace_rendered_gallery(self):

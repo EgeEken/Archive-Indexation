@@ -105,6 +105,8 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
             base.update(available=False, empty_reason=reason)
             return base | {"points": []}
         points = projection_points(workspace, projection["id"], [item["asset_id"] for item in items])
+        quality_by_asset = {item["asset_id"]: item.get("quality_score") for item in items}
+        points = [{**point, "quality_score": quality_by_asset.get(point["asset_id"])} for point in points]
         base.update(
             points=points,
             represented_point_count=len(points),
@@ -120,6 +122,7 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
 
 def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, object]]:
     asset_ids = [item["asset_id"] for item in items]
+    quality_by_asset = {item["asset_id"]: item.get("quality_score") for item in items}
     if not asset_ids:
         return []
     by_asset: dict[str, list] = {asset_id: [] for asset_id in asset_ids}
@@ -146,7 +149,7 @@ def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, obj
     for asset_id in asset_ids:
         location = asset_location(by_asset[asset_id])
         if location is not None:
-            points.append({"asset_id": asset_id, **location})
+            points.append({"asset_id": asset_id, "quality_score": quality_by_asset.get(asset_id), **location})
     return points
 
 
@@ -189,6 +192,7 @@ def _timeline_points(workspace, items, time_mode: str = "capture") -> list[dict[
                 "capture_time_kind": item.get("capture_time_kind"),
                 "file_created_time": chosen["file_created_time"] if chosen else None,
                 "media_type": item.get("media_type"),
+                "quality_score": item.get("quality_score"),
             }
         )
     points.sort(key=lambda point: (point["time"], point["asset_id"]))

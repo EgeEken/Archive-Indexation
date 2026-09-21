@@ -1275,10 +1275,12 @@ def _browser_assets(workspace, query, handle):
               "workspace_total": workspace_total, "query_active": bool(text), "search": status,
               "filename_matches": sum(bool(i.get("filename_match")) for i in items)}
     if _first(query, "view", "gallery") == "groups":
+        group_numbers = _browser_group_numbers(workspace)
         groups = {}
         for item in items:
             group_id = item["current_group_id"] or item["asset_id"]
-            group = groups.setdefault(group_id, {"group_id": group_id, "label": "Video" if item["media_type"] == "video" else "Group", "members": [], "first_capture_time": item["capture_time"]})
+            label = "Video" if item["media_type"] == "video" else f"Group {group_numbers.get(group_id, 0) or 1}"
+            group = groups.setdefault(group_id, {"group_id": group_id, "label": label, "members": [], "first_capture_time": item["capture_time"]})
             group["members"].append(item)
             group["member_count"] = len(group["members"])
         values = [group for group in groups.values() if group["member_count"] >= 2]
@@ -1287,6 +1289,27 @@ def _browser_assets(workspace, query, handle):
         result.update(items=items[offset:offset + limit], has_next=offset + limit < len(items))
     result["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 2)
     return result
+
+
+def _browser_group_numbers(workspace: Workspace) -> dict[str, int]:
+    connection = workspace.connect()
+    try:
+        active = connection.execute("SELECT active_run_id FROM workspace_grouping WHERE id = 1").fetchone()
+        if not active or not active["active_run_id"]:
+            return {}
+        rows = connection.execute(
+            """
+            SELECT group_id
+            FROM strict_group
+            WHERE run_id = ? AND member_count >= 2
+            ORDER BY CASE WHEN first_capture_time IS NULL THEN 1 ELSE 0 END,
+                     first_capture_time, group_id
+            """,
+            (active["active_run_id"],),
+        ).fetchall()
+        return {row["group_id"]: index for index, row in enumerate(rows, start=1)}
+    finally:
+        connection.close()
 
 def _semantic_search(workspace: Workspace, query: Mapping[str, list[str]], handle: str) -> dict[str, object]:
     return semantic_search_service(

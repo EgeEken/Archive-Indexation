@@ -178,6 +178,15 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(data["total"], 0)
         self.assertEqual(data["groups"], [])
 
+    def test_group_labels_include_stable_ordinals(self):
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE logical_asset SET capture_time = '2026-09-03T12:00:00', capture_time_kind = 'exif_local_unknown'")
+        extract_visual_features(self.workspace)
+        build_groups(self.workspace)
+        groups = self.browser(view="groups")['groups']
+        self.assertTrue(groups)
+        self.assertTrue(all(group["label"].startswith("Group ") for group in groups))
+
     def test_query_vector_and_ranking_reuse(self):
         config = self.workspace.configuration(); config["semantic_search_enabled"] = True
         self.workspace.apply_configuration(config)
