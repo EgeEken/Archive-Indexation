@@ -917,7 +917,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         end = source.index("async function loadProblemsBadge", start)
         script = source[start:end] + r'''
         const gallery={innerHTML:"<article class='photo-card'>card</article>"};
-        const nodes={search:{value:""},"workspace-view":{classList:{contains:()=>false}},"job-banner":{classList:{add(){},remove(){}}},"job-copy":{},"job-progress":{},"cancel-job":{}};
+        const nodes={search:{value:""},"workspace-view":{classList:{contains:()=>false}},"job-banner":{classList:{add(){},remove(){}}},"job-runtime-copy":{},"job-copy":{},"job-progress":{},"cancel-job":{}};
         const $=id=>id==="gallery"?gallery:nodes[id];const showSearchStatus=()=>{};const loadGroups=async()=>{};const loadProblemsBadge=async()=>{};
         const state={jobsRequest:0,browserRevision:null,renderKeys:{},activeJobId:"job-1",viewMode:"gallery"};let jobCalls=0;
         const api=async path=>{if(path.startsWith("/api/jobs")) return jobCalls++ ? {revision:"new",jobs:[{id:"job-1",status:"running",total_items:1,completed_items:1}]} : {revision:"old",jobs:[]};if(path==="/api/search-status") return {state:"ready"};if(path==="/api/workspace"){await new Promise(resolve=>setTimeout(resolve,10));return {}};throw new Error(path)};
