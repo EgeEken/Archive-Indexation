@@ -106,8 +106,18 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
             base.update(available=False, empty_reason=reason)
             return base | {"points": []}
         points = projection_points(workspace, projection["id"], [item["asset_id"] for item in items])
-        quality_by_asset = {item["asset_id"]: item.get("quality_score") for item in items}
-        points = [{**point, "quality_score": quality_by_asset.get(point["asset_id"])} for point in points]
+        item_by_asset = {item["asset_id"]: item for item in items}
+        points = [
+            {
+                **point,
+                "capture_time": item_by_asset[point["asset_id"]].get("capture_time"),
+                "capture_time_kind": item_by_asset[point["asset_id"]].get("capture_time_kind"),
+                "height": item_by_asset[point["asset_id"]].get("height"),
+                "quality_score": item_by_asset[point["asset_id"]].get("quality_score"),
+                "width": item_by_asset[point["asset_id"]].get("width"),
+            }
+            for point in points
+        ]
         base.update(
             points=points,
             represented_point_count=len(points),
@@ -123,7 +133,7 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
 
 def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, object]]:
     asset_ids = [item["asset_id"] for item in items]
-    quality_by_asset = {item["asset_id"]: item.get("quality_score") for item in items}
+    item_by_asset = {item["asset_id"]: item for item in items}
     if not asset_ids:
         return []
     by_asset: dict[str, list] = {asset_id: [] for asset_id in asset_ids}
@@ -150,7 +160,19 @@ def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, obj
     for asset_id in asset_ids:
         location = asset_location(by_asset[asset_id])
         if location is not None:
-            points.append({"asset_id": asset_id, "quality_score": quality_by_asset.get(asset_id), **location})
+            item = item_by_asset[asset_id]
+            points.append(
+                {
+                    "asset_id": asset_id,
+                    "capture_time": item.get("capture_time"),
+                    "capture_time_kind": item.get("capture_time_kind"),
+                    "height": item.get("height"),
+                    "media_type": item.get("media_type"),
+                    "quality_score": item.get("quality_score"),
+                    "width": item.get("width"),
+                    **location,
+                }
+            )
     return points
 
 

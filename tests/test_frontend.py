@@ -719,6 +719,62 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertEqual(output["picked"], "C")
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_vector_display_groups_use_overlap_consolidation_and_are_pan_invariant(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function representativeVisualizationPoint")
+        end = visualizations.index("function vectorDensityRasterPoint", start)
+        script = "const visualizationThumbnailCache=new Map();\n" + visualizations[start:end] + r'''
+        const points=[
+          {asset_id:'a',x:.49,y:0,quality_score:.3,width:160,height:100},
+          {asset_id:'b',x:.9,y:0,quality_score:.2,width:160,height:100},
+          {asset_id:'c',x:1.4,y:0,quality_score:.1,width:160,height:100}
+        ];
+        const makeView=(scale,centerX=0,centerY=0)=>({key:'test',data:{browser_revision:'1'},vectorDisplayCaches:new Map(),lodCaches:new Map(),baseCellWorld:1,gridOriginX:0,gridOriginY:0,scale,baseScale:100,centerX,centerY});
+        const base=makeView(100); const baseLevel=vectorCandidateLevel(base,0); const first=buildVectorDisplayCache(base,points,baseLevel,visualizationThumbnailSize(base,'vector'));
+        const repeat=buildVectorDisplayCache(base,points,baseLevel,visualizationThumbnailSize(base,'vector'));
+        const panned=makeView(100,20,-4); const moved=buildVectorDisplayCache(panned,points,vectorCandidateLevel(panned,0),visualizationThumbnailSize(panned,'vector'));
+        const zoomed=makeView(200); const deeper=buildVectorDisplayCache(zoomed,points,vectorCandidateLevel(zoomed,1),visualizationThumbnailSize(zoomed,'vector'));
+        const summarize=cache=>cache.groups.map(group=>[group.id,group.point.asset_id,group.count]);
+        console.log(JSON.stringify({base:summarize(first),repeat:summarize(repeat),panned:summarize(moved),deeper:summarize(deeper),threshold:VECTOR_COLLISION_OVERLAP}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["threshold"], .55)
+        self.assertEqual(output["base"], [["0:0", "a", 2], ["2:0", "c", 1]])
+        self.assertEqual(output["repeat"], output["base"])
+        self.assertEqual(output["panned"], output["base"])
+        self.assertEqual(output["deeper"], [["1:0", "a", 1], ["3:0", "b", 1], ["5:0", "c", 1]])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_geo_metric_reference_stays_fixed_during_diagonal_pan(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function geoLatitude")
+        end = visualizations.index("function geoMetricLabel", start)
+        script = "function screenPoint(view,x,y,width,height){return {x:(x-view.centerX)*view.scale+width/2,y:(y-view.centerY)*view.scale+height/2};}\n" + visualizations[start:end] + r'''
+        const view={centerX:.5,centerY:.5,scale:500,localMetricReferenceLatitude:48};
+        const world={x:.53,y:.47}; const before=geoMetricGrid(view,1000,600); const p0=screenPoint(view,world.x,world.y,1000,600);
+        view.centerX-=120/view.scale; view.centerY-=(-80)/view.scale;
+        const after=geoMetricGrid(view,1000,600); const p1=screenPoint(view,world.x,world.y,1000,600);
+        console.log(JSON.stringify({step:[before.worldStepX,after.worldStepX,before.worldStepY,after.worldStepY],meters:[before.metersPerCell,after.metersPerCell],pixel:[before.pixelStep,after.pixelStep],delta:[p1.x-p0.x,p1.y-p0.y]}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["step"][0], output["step"][1])
+        self.assertEqual(output["step"][2], output["step"][3])
+        self.assertEqual(output["meters"][0], output["meters"][1])
+        self.assertEqual(output["pixel"][0], output["pixel"][1])
+        self.assertAlmostEqual(output["delta"][0], 120, places=8)
+        self.assertAlmostEqual(output["delta"][1], -80, places=8)
+
+    def test_same_location_geo_groups_use_viewer_sequence_without_strip(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        self.assertIn("orderedGeoVisualizationPoints", visualizations)
+        self.assertIn("openVisualizationAsset(representativeVisualizationPoint(ordered), view, ordered.map(point => point.asset_id))", visualizations)
+        self.assertNotIn("showGeoLocalStrip", visualizations)
+        self.assertNotIn("geo-local-strip", (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "index.html").read_text(encoding="utf-8"))
+        self.assertNotIn("visualization-local-strip", (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app.css").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_geo_metric_grid_covers_both_sides_of_view(self):
         visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
         start = visualizations.index("function geoMetricGridRange")

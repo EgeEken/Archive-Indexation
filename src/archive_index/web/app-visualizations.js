@@ -164,6 +164,7 @@ async function loadVisualization(mode) {
       view.timelineCache = null;
       view.timelineCaches = new Map();
       view.lodCaches = new Map();
+      view.vectorDisplayCaches = new Map();
       view.densityCache = null;
     }
     state.searchProvider = data.search?.provider || state.searchProvider;
@@ -205,6 +206,7 @@ function markVisualizationCanvas(mode, canvas, view, data) {
   canvas.dataset.pointCount = String(data.available ? data.represented_point_count || 0 : 0);
   canvas.dataset.viewScale = String(mode === "timeline" ? view.visibleSpan : view.scale);
   if (mode === "timeline") { canvas.dataset.timeMode = view.timeMode || "capture"; canvas.dataset.centerTime = String(view.centerTime); canvas.dataset.visibleSpan = String(view.visibleSpan); }
+  if (mode === "vector") canvas.dataset.displayGroups = (view.displayGroups || []).map(group => `${group.id}:${group.point?.asset_id || ""}:${group.count}`).join("|");
   const target = view.hitTargets?.[0];
   const badgeTarget = view.hitTargets?.find(candidate => Number(candidate.count) > 1);
   canvas.dataset.badgeCount = String(badgeTarget?.count || 0);
@@ -384,7 +386,7 @@ function niceScaleValue(value) {
 }
 
 function geoMetricGrid(view, width, height) {
-  const latitude = Math.max(-85, Math.min(85, geoLatitude(view.centerY))); const metersPerWorld = 40075017 * Math.max(.1, Math.cos(latitude * Math.PI / 180)); const targetMeters = 100 / Math.max(.001, view.scale) * metersPerWorld; const metersPerCell = niceScaleValue(targetMeters); const worldStepX = metersPerCell / metersPerWorld; const worldStepY = worldStepX; const pixelStep = worldStepX * view.scale; return {metersPerCell, pixelStep, worldStepX, worldStepY, originX: Math.floor(view.centerX / worldStepX) * worldStepX, originY: Math.floor(view.centerY / worldStepY) * worldStepY, latitude, width, height};
+  const latitude = Math.max(-85, Math.min(85, Number.isFinite(Number(view.localMetricReferenceLatitude)) ? Number(view.localMetricReferenceLatitude) : geoLatitude(view.centerY))); const metersPerWorld = 40075017 * Math.max(.1, Math.cos(latitude * Math.PI / 180)); const targetMeters = 100 / Math.max(.001, view.scale) * metersPerWorld; const metersPerCell = niceScaleValue(targetMeters); const worldStepX = metersPerCell / metersPerWorld; const worldStepY = worldStepX; const pixelStep = worldStepX * view.scale; return {metersPerCell, pixelStep, worldStepX, worldStepY, originX: Math.floor(view.centerX / worldStepX) * worldStepX, originY: Math.floor(view.centerY / worldStepY) * worldStepY, latitude, width, height};
 }
 
 function geoMetricGridRange(grid, left, right, top, bottom) {
@@ -435,9 +437,10 @@ function drawGeoFeature(ctx, feature, view, width, height) {
 
 function fitGeo(view, points, width, height) {
   const values = points.map(point => geoWorld(point.longitude, point.latitude));
-  if (!values.length) { view.centerX = .5; view.centerY = .5; view.scale = Math.min(width, height) * .86; view.baseScale = view.scale; view.baseCellWorld = 1 / 8; view.targetCenterX = view.centerX; view.targetCenterY = view.centerY; view.targetScale = view.scale; view.settledLod = 0; view.interactionPhase = "settled"; view.needsFit = false; return; }
+  if (!values.length) { view.centerX = .5; view.centerY = .5; view.localMetricReferenceLatitude = geoLatitude(view.centerY); view.scale = Math.min(width, height) * .86; view.baseScale = view.scale; view.baseCellWorld = 1 / 8; view.targetCenterX = view.centerX; view.targetCenterY = view.centerY; view.targetScale = view.scale; view.settledLod = 0; view.interactionPhase = "settled"; view.needsFit = false; return; }
   const bounds = boundsOf(values, .04);
   view.centerX = (bounds.minX + bounds.maxX) / 2; view.centerY = (bounds.minY + bounds.maxY) / 2;
+  view.localMetricReferenceLatitude = Math.max(-85, Math.min(85, geoLatitude(view.centerY)));
   view.scale = Math.max(1, Math.min(width / (bounds.maxX - bounds.minX), height / (bounds.maxY - bounds.minY))); view.baseScale = view.scale;
   view.baseCellWorld = Math.max((bounds.maxX - bounds.minX), (bounds.maxY - bounds.minY)) / 8; view.targetCenterX = view.centerX; view.targetCenterY = view.centerY; view.targetScale = view.scale; const settled = geoContinuousLod(view); view.settledLod = settled.fineBlend >= .5 ? settled.fine : settled.coarse; view.interactionPhase = "settled"; view.needsFit = false;
 }
@@ -654,13 +657,25 @@ function visualizationThumbnail(assetId) {
   return entry;
 }
 
-function visualizationThumbnailRect(point, centerX, centerY, longEdge) {
-  const entry = visualizationThumbnail(point.asset_id);
-  const ratio = Number.isFinite(entry.aspectRatio) && entry.aspectRatio > .05 && entry.aspectRatio < 20 ? entry.aspectRatio : 1.5;
+function visualizationThumbnailAspectRatio(point, entry = null) {
+  const measured = Number(entry?.aspectRatio);
+  if (Number.isFinite(measured) && measured > .05 && measured < 20 && (entry?.image || entry?.loading !== true)) return measured;
+  const width = Number(point?.width); const height = Number(point?.height);
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) return Math.max(.05, Math.min(20, width / height));
+  return Number.isFinite(measured) && measured > .05 && measured < 20 ? measured : 1.5;
+}
+
+function visualizationThumbnailRectForAspect(centerX, centerY, longEdge, ratio) {
   const edge = Math.max(1, Number(longEdge) || 1);
   const width = ratio >= 1 ? edge : edge * ratio;
   const height = ratio >= 1 ? edge / ratio : edge;
   return {left: centerX - width / 2, top: centerY - height / 2, width, height, right: centerX + width / 2, bottom: centerY + height / 2, centerX, centerY, longEdge: edge};
+}
+
+function visualizationThumbnailRect(point, centerX, centerY, longEdge) {
+  const entry = visualizationThumbnail(point.asset_id); const measured = Number(entry?.aspectRatio); const width = Number(point?.width); const height = Number(point?.height);
+  const ratio = Number.isFinite(measured) && measured > .05 && measured < 20 && (entry?.image || entry?.loading !== true) ? measured : Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0 ? Math.max(.05, Math.min(20, width / height)) : Number.isFinite(measured) && measured > .05 && measured < 20 ? measured : 1.5;
+  return visualizationThumbnailRectForAspect(centerX, centerY, longEdge, ratio);
 }
 
 function drawVisualizationThumbnail(ctx, point, rect) {
@@ -702,6 +717,62 @@ function buildVectorLodCache(view, points, level) {
   }
   const cache = {key, level, cellWorld, cells}; view.lodCaches.set(key, cache);
   while (view.lodCaches.size > 5) view.lodCaches.delete(view.lodCaches.keys().next().value);
+  return cache;
+}
+
+const VECTOR_COLLISION_OVERLAP = .55;
+
+function vectorCandidateLevel(view, displayLevel) {
+  const targetCellPx = Math.max(1, visualizationThumbnailSize(view, "vector") * .75);
+  const baseCellPx = Math.max(1, Number(view.baseCellWorld) * Math.max(.001, Number(view.scale) || 1));
+  const targetLevel = Math.max(0, Math.min(20, Math.round(Math.log2(baseCellPx / targetCellPx))));
+  return Math.max(displayLevel >= 20 ? 20 : displayLevel + 1, targetLevel);
+}
+
+function vectorDisplayScaleBand(view) {
+  return Math.round(Math.log2(Math.max(.001, Number(view.scale) || 1) / Math.max(.001, Number(view.baseScale) || 1)) * 8) / 8;
+}
+
+function vectorRectOverlapRatio(left, right) {
+  const width = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+  const height = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+  const intersection = width * height;
+  const smaller = Math.min(left.width * left.height, right.width * right.height);
+  return smaller > 0 ? intersection / smaller : 0;
+}
+
+function vectorRectHashKeys(rect, cellSize) {
+  const firstX = Math.floor(rect.left / cellSize); const lastX = Math.floor(rect.right / cellSize);
+  const firstY = Math.floor(rect.top / cellSize); const lastY = Math.floor(rect.bottom / cellSize); const keys = [];
+  for (let x = firstX; x <= lastX; x += 1) for (let y = firstY; y <= lastY; y += 1) keys.push(`${x}:${y}`);
+  return keys;
+}
+
+function buildVectorDisplayCache(view, points, level, longEdge) {
+  if (!view.vectorDisplayCaches) view.vectorDisplayCaches = new Map();
+  const edge = Math.max(1, Number(longEdge) || 1); const key = `${view.key}|${view.data?.browser_revision || ""}|${level}|${vectorDisplayScaleBand(view)}|${Math.round(edge)}`;
+  if (view.vectorDisplayCaches.has(key)) return view.vectorDisplayCaches.get(key);
+  const source = buildVectorLodCache(view, points, level); const hashCellSize = Math.max(1, edge * .75); const buckets = new Map(); const groups = [];
+  const cells = [...source.cells.values()].sort((left, right) => String(left.key).localeCompare(String(right.key)) || compareVisualizationPoints(left.point, right.point));
+  for (const cell of cells) {
+    const ratio = visualizationThumbnailAspectRatio(cell.point, visualizationThumbnailCache.get(cell.point.asset_id));
+    const rect = visualizationThumbnailRectForAspect(cell.point.x * view.scale, cell.point.y * view.scale, edge, ratio);
+    let matched = null; let matchedOverlap = VECTOR_COLLISION_OVERLAP;
+    for (const hashKey of vectorRectHashKeys(rect, hashCellSize)) {
+      for (const groupIndex of buckets.get(hashKey) || []) {
+        const group = groups[groupIndex]; const overlap = vectorRectOverlapRatio(rect, group.anchorRect);
+        if (overlap >= VECTOR_COLLISION_OVERLAP && (matched === null || overlap > matchedOverlap || overlap === matchedOverlap && groupIndex < matched)) { matched = groupIndex; matchedOverlap = overlap; }
+      }
+    }
+    if (matched === null) {
+      matched = groups.length; groups.push({id: cell.key, anchorRect: rect, count: cell.count, point: cell.point});
+    } else {
+      const group = groups[matched]; group.count += cell.count; if (compareVisualizationPoints(cell.point, group.point) > 0) group.point = cell.point;
+    }
+    for (const hashKey of vectorRectHashKeys(rect, hashCellSize)) { const entries = buckets.get(hashKey) || []; entries.push(matched); buckets.set(hashKey, entries); }
+  }
+  const cache = {key, level, cellWorld: source.cellWorld, groups}; view.vectorDisplayCaches.set(key, cache);
+  while (view.vectorDisplayCaches.size > 5) view.vectorDisplayCaches.delete(view.vectorDisplayCaches.keys().next().value);
   return cache;
 }
 
@@ -759,18 +830,19 @@ function drawVector(canvas, view, data) {
   const surface = canvasSurface(canvas); const {context: ctx, width, height} = surface;
   ctx.fillStyle = "#10161c"; ctx.fillRect(0, 0, width, height);
   const points = (data.points || []).filter(point => Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y))).map(point => ({...point, x: Number(point.x), y: Number(point.y)}));
-  if (!data.available || !points.length) { view.hitTargets = []; view.grid = new Map(); drawCanvasMessage(ctx, width, height, data.empty_reason || "No projected semantic vectors."); return; }
+  if (!data.available || !points.length) { view.hitTargets = []; view.grid = new Map(); view.displayGroups = []; drawCanvasMessage(ctx, width, height, data.empty_reason || "No projected semantic vectors."); return; }
   if (view.needsFit || !view.worldBounds) { view.densityCache = null; fitVector(view, points, width, height); }
   drawVectorDensity(ctx, points, view, width, height); drawVectorGrid(ctx, view, width, height);
-  const lod = visualizationLod("vector", view); const coarse = buildVectorLodCache(view, points, lod.coarse); const fine = buildVectorLodCache(view, points, lod.fine); const coarseCells = visibleVectorCells(coarse, view, width, height); const fineCells = visibleVectorCells(fine, view, width, height); view.grid = fine.cells;
-  const candidates = new Map(); const collect = (cells, alpha, sizeMultiplier) => { if (alpha <= .001) return; for (const cell of cells) { const existing = candidates.get(cell.point.asset_id); const candidate = {cell, alpha, sizeMultiplier}; if (!existing || candidate.alpha >= existing.alpha) candidates.set(cell.point.asset_id, candidate); } };
-  collect(coarseCells, 1 - lod.fineBlend, 1 - .1 * lod.fineBlend); if (lod.fineBlend > 0) collect(fineCells, lod.fineBlend, .78 + .22 * lod.fineBlend);
+  const lod = visualizationLod("vector", view); const coarse = buildVectorLodCache(view, points, lod.coarse); const fine = buildVectorLodCache(view, points, lod.fine); view.grid = fine.cells;
+  const candidates = new Map(); const collect = (level, alpha, sizeMultiplier) => { if (alpha <= .001) return; const cache = buildVectorDisplayCache(view, points, vectorCandidateLevel(view, level), visualizationThumbnailSize(view, "vector")); for (const group of cache.groups) { const existing = candidates.get(group.id); const candidate = {group, alpha, sizeMultiplier}; if (!existing || candidate.alpha >= existing.alpha) candidates.set(group.id, candidate); } };
+  collect(lod.coarse, 1 - lod.fineBlend, 1 - .1 * lod.fineBlend); if (lod.fineBlend > 0) collect(lod.fine, lod.fineBlend, .78 + .22 * lod.fineBlend);
+  view.displayGroups = [...candidates.values()].sort((left, right) => String(left.group.id).localeCompare(String(right.group.id))).map(candidate => candidate.group);
   view.hitTargets = [];
-  for (const candidate of [...candidates.values()].sort((left, right) => compareVisualizationPoints(left.cell.point, right.cell.point))) {
-    const cell = candidate.cell; const representative = cell.point; const center = screenPoint(view, representative.x, representative.y, width, height); if (center.x < -220 || center.x > width + 220 || center.y < -220 || center.y > height + 220) continue;
+  for (const candidate of [...candidates.values()].sort((left, right) => compareVisualizationPoints(left.group.point, right.group.point))) {
+    const group = candidate.group; const representative = group.point; const center = screenPoint(view, representative.x, representative.y, width, height); if (center.x < -260 || center.x > width + 260 || center.y < -260 || center.y > height + 260) continue;
     const rect = visualizationThumbnailRect(representative, center.x, center.y, visualizationThumbnailSize(view, "vector") * candidate.sizeMultiplier);
-    ctx.save(); ctx.globalAlpha = candidate.alpha; drawVisualizationThumbnail(ctx, representative, rect); drawVisualizationBadge(ctx, rect.right - 3, rect.top + 3, cell.count); ctx.restore();
-    view.hitTargets.push(visualizationTarget(representative, rect, cell.count));
+    ctx.save(); ctx.globalAlpha = candidate.alpha; drawVisualizationThumbnail(ctx, representative, rect); drawVisualizationBadge(ctx, rect.right - 3, rect.top + 3, group.count); ctx.restore();
+    view.hitTargets.push(visualizationTarget(representative, rect, group.count));
   }
   drawVisualizationHover(ctx, view);
 }
@@ -801,9 +873,10 @@ function hitVisualization(mode, event) {
   const nearest = picked.target;
   if (picked.type === "badge") {
     if (mode === "timeline" && nearest.bucket) { focusTimelineRange(nearest.bucket.start, nearest.bucket.end); return; }
-    if (mode === "geo" && nearest.points?.length > 1) { if (nearest.sameLocation) showGeoLocalStrip(nearest.points); else zoomVisualization("geo", 2.5, {x: nearest.x, y: nearest.y}); return; }
+    if (mode === "geo" && nearest.points?.length > 1) { if (nearest.sameLocation) { const ordered = orderedGeoVisualizationPoints(nearest.points); openVisualizationAsset(representativeVisualizationPoint(ordered), view, ordered.map(point => point.asset_id)); } else zoomVisualization("geo", 2.5, {x: nearest.x, y: nearest.y}); return; }
     if (mode === "vector" && nearest.count > 1) { zoomVisualization("vector", 2.5, {x: nearest.x, y: nearest.y}); return; }
   }
+  if (mode === "geo" && nearest.sameLocation && nearest.points?.length > 1) { const ordered = orderedGeoVisualizationPoints(nearest.points); openVisualizationAsset(representativeVisualizationPoint(ordered), view, ordered.map(point => point.asset_id)); return; }
   openVisualizationAsset(nearest.point || nearest.points?.[0], view, mode === "timeline" ? nearest.assetIds : [nearest.point?.asset_id || nearest.points?.[0]?.asset_id]);
 }
 
@@ -811,10 +884,14 @@ function focusTimelineRange(start, end) {
   const view = visualizationView("timeline"); const canvas = visualizationCanvas("timeline"); const width = Math.max(1, canvas.getBoundingClientRect().width || 800); const range = Math.max(.000001, end - start); markVisualizationInteraction("timeline"); commitVisualizationCamera("timeline"); const clamped = clampTimelineValues(view, (start + end) / 2, Math.max(.000001, range * 1.25), width); view.targetCenterTime = clamped.centerTime; view.targetVisibleSpan = clamped.visibleSpan; animateVisualizationCamera("timeline");
 }
 
-function showGeoLocalStrip(points) {
-  const strip = $("geo-local-strip"); if (!strip) return;
-  strip.classList.remove("hidden"); strip.innerHTML = `<div class="visualization-local-strip-header"><strong>${points.length.toLocaleString()} assets at this position</strong><button type="button" class="icon" data-geo-strip-close aria-label="Close asset list">×</button></div><div class="visualization-local-strip-items">${points.slice(0, 24).map(point => `<button type="button" class="visualization-local-strip-item" data-geo-strip-asset="${escapeHtml(point.asset_id)}"><img src="${escapeHtml(apiPath(`/api/assets/${encodeURIComponent(point.asset_id)}/thumbnail`))}" alt="" onerror="this.remove()"><span>${escapeHtml(point.asset_id.slice(0, 12))}</span></button>`).join("")}</div>${points.length > 24 ? `<div class="muted">Showing 24 of ${points.length.toLocaleString()}</div>` : ""}`;
-  strip.querySelector("[data-geo-strip-close]").onclick = () => strip.classList.add("hidden"); strip.querySelectorAll("[data-geo-strip-asset]").forEach(button => button.onclick = () => openVisualizationAsset(points.find(point => point.asset_id === button.dataset.geoStripAsset), visualizationView("geo"), [button.dataset.geoStripAsset]));
+function orderedGeoVisualizationPoints(points) {
+  return [...points].sort((left, right) => {
+    const leftTime = Date.parse(String(left?.capture_time || "")); const rightTime = Date.parse(String(right?.capture_time || ""));
+    const leftUsable = Number.isFinite(leftTime); const rightUsable = Number.isFinite(rightTime);
+    if (leftUsable !== rightUsable) return leftUsable ? -1 : 1;
+    if (leftUsable && leftTime !== rightTime) return leftTime - rightTime;
+    return String(left?.asset_id).localeCompare(String(right?.asset_id));
+  });
 }
 
 async function openVisualizationAsset(point, view, assetIds = [point?.asset_id]) {

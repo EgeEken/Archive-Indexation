@@ -67,7 +67,10 @@ class VisualizationDataTests(unittest.TestCase):
         points = {point["asset_id"]: point for point in data["points"]}
         self.assertEqual(points[self.gps_id]["latitude"], 48.792146)
         self.assertEqual(points[self.fallback_id]["latitude"], 41.0082)
-        self.assertEqual(set(points[self.gps_id]), {"asset_id", "latitude", "longitude", "quality_score"})
+        self.assertEqual(
+            set(points[self.gps_id]),
+            {"asset_id", "capture_time", "capture_time_kind", "height", "latitude", "longitude", "media_type", "quality_score", "width"},
+        )
         filtered = visualization_data(
             self.workspace,
             {"folders": [json.dumps([""])], "media_type": ["image"]},
