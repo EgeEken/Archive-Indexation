@@ -34,9 +34,10 @@ class VisualizationBenchmarkTests(unittest.TestCase):
         vector_end = source.index("function vectorDensityRasterPoint", vector_start)
         geo_start = source.index("function geoWorld")
         geo_end = source.index("function drawGeo(canvas", geo_start)
-        script = f'''const TIMELINE_INTERVALS=[0.001,0.01,0.1,1,5,10,30,60,300,900,1800,3600,10800,21600,43200,86400,604800,2592000,7776000,31536000];
+        script = f'''const TIMELINE_INTERVALS=[0.000001,0.00001,0.0001,0.001,0.01,0.1,1,5,10,30,60,300,900,1800,3600,10800,21600,43200,86400,604800,2592000,7776000,31536000];
 const TIMELINE_KERNEL=[1,4,6,4,1];
 function representativeVisualizationPoint(points) {{ return points[0]; }}
+function timelinePointTime(point) {{ return Number.isFinite(Number(point?.time_us)) ? Number(point.time_us) / 1e6 : Number(point?.time); }}
 function worldPoint(view,x,y,width,height) {{ return {{x:(x-width/2)/view.scale+view.centerX,y:(y-height/2)/view.scale+view.centerY}}; }}
 {source[timeline_start:timeline_end]}
 {source[vector_start:vector_end]}
