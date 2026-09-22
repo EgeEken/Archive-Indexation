@@ -137,7 +137,7 @@ class BrowserE2ETests(unittest.TestCase):
             gps = {
                 "alpha.jpg": (48.792146, 2.369163),
                 "portrait.jpg": (41.008238, 28.978359),
-                "child.jpg": (40.712776, -74.005974),
+                "child.jpg": (41.008238, 28.978359),
             }
             capture_times = [
                 "2026-01-10T10:00:00",
@@ -441,11 +441,34 @@ class BrowserE2ETests(unittest.TestCase):
         })
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
+        self.assertIn(self.page.locator("#viewer-count").inner_text(), {"1 of 1", "1 of 2", "2 of 2"})
+        if self.page.locator("#viewer-count").inner_text() == "1 of 2":
+            self.page.locator("#viewer-next").click()
+            self.page.wait_for_function("() => document.querySelector('#viewer-count').textContent === '2 of 2'")
+            self.page.locator("#viewer-previous").click()
+        elif self.page.locator("#viewer-count").inner_text() == "2 of 2":
+            self.page.locator("#viewer-previous").click()
+            self.page.wait_for_function("() => document.querySelector('#viewer-count').textContent === '1 of 2'")
+            self.page.locator("#viewer-next").click()
         self.assertEqual(self.page.locator("#visualization-selection-panel").count(), 0)
         self.page.locator("#viewer-info").click()
         self.page.locator("#viewer-details").wait_for(state="visible")
         self.page.locator("#viewer-close").click()
         self.page.locator("#viewer").wait_for(state="hidden")
+        self.assertEqual(self.page.locator("#geo-canvas").get_attribute("data-badge-count"), "2")
+        canvas.click(position={
+            "x": float(canvas.get_attribute("data-badge-x")),
+            "y": float(canvas.get_attribute("data-badge-y")),
+        })
+        self.page.locator("#viewer[open]").wait_for(timeout=15000)
+        self.assertIn(self.page.locator("#viewer-count").inner_text(), {"1 of 2", "2 of 2"})
+        if self.page.locator("#viewer-count").inner_text() == "1 of 2":
+            self.page.locator("#viewer-next").click()
+            self.page.wait_for_function("() => document.querySelector('#viewer-count').textContent === '2 of 2'")
+        else:
+            self.page.locator("#viewer-previous").click()
+            self.page.wait_for_function("() => document.querySelector('#viewer-count').textContent === '1 of 2'")
+        self.page.locator("#viewer-close").click()
 
     def test_timeline_renders_and_zoom_changes_range(self) -> None:
         self._open_main()
