@@ -446,12 +446,6 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 .visualization-local-strip-item span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.7rem; }
 .visualization-cluster-list { display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.6rem; }
 .visualization-cluster-list button { padding:.25rem .45rem; font-size:.75rem; }
-.visualization-selection-panel { position:absolute; right:.8rem; bottom:.8rem; z-index:2; width:min(22rem,calc(100% - 1.6rem)); padding:.65rem; border:1px solid #536a7d; border-radius:.45rem; background:rgba(20,29,37,.96); box-shadow:0 .45rem 1.4rem rgba(0,0,0,.35); }
-.visualization-selection-content { display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:.55rem; align-items:start; }
-.visualization-selection-thumb { width:4.5rem; height:4.5rem; object-fit:cover; border-radius:.25rem; background:#10161c; }
-.visualization-selection-meta { min-width:0; display:grid; gap:.18rem; }
-.visualization-selection-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
-.visualization-selection-actions { display:flex; gap:.35rem; margin-top:.55rem; }
 @media(min-width:851px) {
   body.visualization-active { height:100dvh; overflow:hidden; display:flex; flex-direction:column; }
   body.visualization-active .app-header { position:static; flex:0 0 auto; }

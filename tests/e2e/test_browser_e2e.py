@@ -439,16 +439,11 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        panel = self.page.locator("#visualization-selection-panel")
-        panel.wait_for()
-        self.page.wait_for_function("() => !document.querySelector('#visualization-selection-panel').innerText.includes('Loading')", timeout=15000)
-        self.assertIn(".jpg", panel.inner_text())
-        panel.get_by_role("button", name="Details").click()
-        self.page.locator("#details[open]").wait_for(timeout=15000)
-        self.page.locator("#details-close").click(force=True)
-        panel.get_by_role("button", name="Open").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
+        self.assertEqual(self.page.locator("#visualization-selection-panel").count(), 0)
+        self.page.locator("#viewer-info").click()
+        self.page.locator("#viewer-details").wait_for(state="visible")
         self.page.locator("#viewer-close").click()
         self.page.locator("#viewer").wait_for(state="hidden")
 
@@ -461,11 +456,25 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_function("() => Number(document.querySelector('#timeline-canvas').dataset.badgeCount) === 2")
         self.assertIn("5 timed assets · 5 filtered assets", self.page.locator("#timeline-status").inner_text())
         canvas = self.page.locator("#timeline-canvas")
+        badge_x = float(canvas.get_attribute("data-badge-x"))
+        badge_y = float(canvas.get_attribute("data-badge-y"))
+        grouped_before = float(canvas.get_attribute("data-view-scale"))
+        canvas.click(position={"x": badge_x, "y": badge_y})
+        self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) < before", arg=grouped_before)
+        self.page.wait_for_timeout(900)
+        canvas.click(position={
+            "x": float(canvas.get_attribute("data-first-target-x")),
+            "y": float(canvas.get_attribute("data-first-target-y")),
+        })
+        self.page.locator("#viewer[open]").wait_for(timeout=15000)
+        self.assertEqual(self.page.locator("#viewer-count").inner_text(), "1 of 2")
+        self.page.locator("#viewer-next").click()
+        self.page.wait_for_function("() => document.querySelector('#viewer-count').textContent === '2 of 2'")
+        self.page.locator("#viewer-close").click()
+        self.page.locator("#viewer").wait_for(state="hidden")
         before = float(canvas.get_attribute("data-view-scale"))
-        width_before = float(canvas.get_attribute("data-first-target-width"))
         self.page.locator("#timeline-zoom-in").click()
         self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.viewScale) < before", arg=before)
-        self.page.wait_for_function("before => Number(document.querySelector('#timeline-canvas').dataset.firstTargetWidth) > before", arg=width_before)
         self.assertTrue(self.page.evaluate("() => document.documentElement.scrollHeight <= window.innerHeight + 2"))
         self.page.locator("#timeline-mode-file-created").click()
         self.page.wait_for_function("() => document.querySelector('#timeline-canvas').dataset.timeMode === 'file_created'")
@@ -474,13 +483,12 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        panel = self.page.locator("#visualization-selection-panel")
-        panel.wait_for()
-        self.page.wait_for_function("() => !document.querySelector('#visualization-selection-panel').innerText.includes('Loading')", timeout=15000)
-        self.assertIn(".jpg", panel.inner_text())
-        panel.get_by_role("button", name="Open").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
+        self.assertEqual(self.page.locator("#visualization-selection-panel").count(), 0)
+        self.page.locator("#viewer-info").click()
+        self.page.locator("#viewer-details").wait_for(state="visible")
+        self.page.locator("#viewer-close").click()
 
     def test_vector_cloud_uses_stored_projection_and_selects_asset(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.main_handle}&view=vector", wait_until="domcontentloaded")
@@ -498,13 +506,12 @@ class BrowserE2ETests(unittest.TestCase):
             "x": float(canvas.get_attribute("data-first-target-x")),
             "y": float(canvas.get_attribute("data-first-target-y")),
         })
-        panel = self.page.locator("#visualization-selection-panel")
-        panel.wait_for()
-        self.page.wait_for_function("() => !document.querySelector('#visualization-selection-panel').innerText.includes('Loading')", timeout=15000)
-        self.assertIn(".jpg", panel.inner_text())
-        panel.get_by_role("button", name="Open").click()
         self.page.locator("#viewer[open]").wait_for(timeout=15000)
         self.assertIn(".jpg", self.page.locator("#viewer-title").inner_text())
+        self.assertEqual(self.page.locator("#visualization-selection-panel").count(), 0)
+        self.page.locator("#viewer-info").click()
+        self.page.locator("#viewer-details").wait_for(state="visible")
+        self.page.locator("#viewer-close").click()
 
     def test_reindex_add_remove_offline_cleanup_preserves_fixture_boundary(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}", wait_until="domcontentloaded")

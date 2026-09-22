@@ -119,7 +119,6 @@ function setViewMode(mode, load = true) {
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
   document.body.classList.toggle("visualization-active", ["geo", "timeline", "vector"].includes(state.viewMode));
-  if (!["geo", "timeline", "vector"].includes(state.viewMode) || previousMode !== state.viewMode) $("visualization-selection-panel")?.classList.add("hidden");
   $("gallery").classList.toggle("hidden", mode !== "gallery");
   $("groups-view").classList.toggle("hidden", mode !== "groups");
   $("geo-view").classList.toggle("hidden", mode !== "geo");

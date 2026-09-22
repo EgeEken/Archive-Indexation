@@ -1,12 +1,20 @@
 function assetToViewerItem(asset) {
-  const first = asset.physical_files?.[0] || {};
+  const files = asset.physical_files || [];
+  const first = files.find(file => file.is_preferred)
+    || files.find(file => file.is_online && file.in_scope !== false)
+    || files[0]
+    || {};
   return {
     asset_id: asset.asset_id,
     media_type: asset.media_type,
     filename: first.filename || "Asset",
-    thumbnail_url: first.thumbnail_url,
-    original_url: first.original_url,
+    thumbnail_url: asset.thumbnail_url || first.thumbnail_url,
+    original_url: asset.original_url || first.original_url,
     display_url: asset.display_url || first.display_url || first.original_url,
+    preferred_physical_id: first.id || asset.preferred_physical_id || null,
+    codec: first.codec || asset.codec,
+    quality_score: first.quality_score ?? asset.quality_score,
+    issues: asset.issues || [],
     current_group_id: asset.current_group_id,
     strict_group_member_count: asset.strict_group_member_count,
     user_decision: asset.user_decision,

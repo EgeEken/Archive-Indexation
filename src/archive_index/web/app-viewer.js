@@ -9,7 +9,18 @@ function visibleStrictGroupId(item) {
 }
 
 function showViewer(index, items = state.items, context = { mode: "gallery" }) {
-  state.viewerItems = [...items];
+  if (context.mode === "visualization") {
+    state.viewerSequenceIds = [...new Set(context.assetIds || items.map(item => item.asset_id))];
+    state.viewerItems = Array(state.viewerSequenceIds.length).fill(null);
+    for (const item of items) {
+      if (!item) continue;
+      const itemIndex = state.viewerSequenceIds.indexOf(item.asset_id);
+      if (itemIndex >= 0) state.viewerItems[itemIndex] = item;
+    }
+  } else {
+    state.viewerSequenceIds = [];
+    state.viewerItems = [...items];
+  }
   if (!state.viewerItems[index]) return;
   state.viewerIndex = index;
   state.viewerContext = context.mode || "gallery";
@@ -33,7 +44,7 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
 function renderViewer() {
   const item = state.viewerItems[state.viewerIndex];
   if (!item) return;
-  const total = state.viewerContext === "gallery" ? state.viewerTotal : state.viewerItems.length;
+  const total = state.viewerContext === "gallery" ? state.viewerTotal : state.viewerContext === "visualization" ? state.viewerSequenceIds.length : state.viewerItems.length;
   const absoluteIndex = state.viewerStart + state.viewerIndex;
   $("viewer-title").innerHTML = filenameMarkup(item.filename);
   $("viewer-count").textContent = (absoluteIndex + 1) + " of " + total;
@@ -74,6 +85,17 @@ function renderViewer() {
   requestAnimationFrame(() => applyViewerTransform($("viewer-media").querySelector("img.viewer-media")));
 }
 
+async function loadVisualizationViewerItem(index) {
+  const assetId = state.viewerSequenceIds[index];
+  if (!assetId) throw new Error("The requested asset is no longer available.");
+  if (state.viewerItems[index]) return state.viewerItems[index];
+  const asset = await api(`/api/assets/${encodeURIComponent(assetId)}`);
+  const item = assetToViewerItem(asset);
+  if (state.viewerSequenceIds[index] !== assetId) throw new Error("The viewer sequence changed.");
+  state.viewerItems[index] = item;
+  return item;
+}
+
 function applyViewerTransform(media) {
   if (!media || media.tagName !== "IMG") return;
   clampViewerPan(media);
@@ -105,6 +127,16 @@ async function moveViewer(delta) {
     } else {
       state.viewerIndex = target - state.viewerStart;
     }
+  } else if (state.viewerContext === "visualization") {
+    const next = state.viewerIndex + delta;
+    if (next < 0 || next >= state.viewerSequenceIds.length) return;
+    try {
+      await loadVisualizationViewerItem(next);
+    } catch (error) {
+      showToast(`Viewer navigation failed: ${error.message}`);
+      return;
+    }
+    state.viewerIndex = next;
   } else {
     let next = state.viewerIndex + delta;
     if (state.viewerContext === "similar" && delta > 0 && next >= state.viewerItems.length && state.similar?.autoLoad && state.similar.hasNext) {
@@ -384,7 +416,7 @@ async function loadSimilarPage() {
 async function showSimilar(assetId) {
   const section = $("similar-gallery");
   const source = state.viewerItems[state.viewerIndex];
-  state.similarSource = {items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart}};
+  state.similarSource = {items: state.viewerItems, index: state.viewerIndex, context: {mode:state.viewerContext, groupId:state.viewerGroupId, start:state.viewerStart, assetIds: state.viewerContext === "visualization" ? state.viewerSequenceIds : undefined, total: state.viewerContext === "visualization" ? state.viewerSequenceIds.length : undefined}};
   state.similar = {assetId, source, items: [], offset: 0, total: 0, strongCount: 0, hasNext: true, initial: true, loading: false, autoLoad: false, error: null};
   section.classList.remove("hidden");
   section.textContent = "";

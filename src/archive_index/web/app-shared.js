@@ -26,6 +26,7 @@ const state = {
   viewerSmooth: true,
   viewerInfoOpen: false,
   viewerContext: "gallery",
+  viewerSequenceIds: [],
   viewerGroupId: null,
   viewerDetail: null,
   activeJobId: null,
@@ -41,9 +42,9 @@ const state = {
   visualizationRequest: 0,
   visualizationAbort: null,
   visualizations: {
-    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, baseScale: 1, targetCenterX: .5, targetCenterY: .5, targetScale: 1, needsFit: true, hitTargets: [], lodCaches: new Map(), cameraFrame: 0},
-    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}, file_created: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}}, centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, targetCenterTime: 0, targetVisibleSpan: 86400, needsFit: true, hitTargets: [], timelineCaches: new Map(), cameraFrame: 0},
-    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, targetCenterX: 0, targetCenterY: 0, targetScale: 1, baseScale: 1, baseCellWorld: 1, worldBounds: null, needsFit: true, hitTargets: [], lodCaches: new Map(), grid: new Map(), cameraFrame: 0},
+    geo: {key: null, data: null, centerX: .5, centerY: .5, scale: 1, baseScale: 1, targetCenterX: .5, targetCenterY: .5, targetScale: 1, needsFit: true, hitTargets: [], lodCaches: new Map(), cameraFrame: 0, interactionPhase: "settled", settledLod: 0, lodSettleTimer: 0, lodSettleFrame: 0},
+    timeline: {key: null, data: null, timeMode: "capture", modes: {capture: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}, file_created: {centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, needsFit: true}}, centerTime: 0, visibleSpan: 86400, fitVisibleSpan: 86400, targetCenterTime: 0, targetVisibleSpan: 86400, needsFit: true, hitTargets: [], timelineCaches: new Map(), cameraFrame: 0, interactionPhase: "settled", settledLod: null, lodSettleTimer: 0, lodSettleFrame: 0},
+    vector: {key: null, data: null, centerX: 0, centerY: 0, scale: 1, targetCenterX: 0, targetCenterY: 0, targetScale: 1, baseScale: 1, baseCellWorld: 1, worldBounds: null, needsFit: true, hitTargets: [], lodCaches: new Map(), grid: new Map(), cameraFrame: 0, interactionPhase: "settled", settledLod: 0, lodSettleTimer: 0, lodSettleFrame: 0},
   },
   visualizationCapabilities: {geo: true, timeline: true, vector: true},
 };

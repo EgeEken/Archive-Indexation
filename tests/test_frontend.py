@@ -538,7 +538,7 @@ class CorrectionFrontendTests(unittest.TestCase):
             self.assertIn(label, html)
         self.assertNotIn("Cloud Map", html)
         self.assertNotIn("Not implemented yet", html)
-        self.assertIn('id="visualization-selection-panel"', html)
+        self.assertNotIn('id="visualization-selection-panel"', html)
         self.assertIn("timeline-mode-capture", html)
         self.assertIn("timeline-mode-file-created", html)
         self.assertIn("visualizationCapabilities", source)
@@ -549,7 +549,9 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertIn("/api/visualizations/", visualizations)
         self.assertIn('getContext("2d")', visualizations)
         self.assertIn("representativeVisualizationPoint", visualizations)
-        self.assertIn("visualization-selection-panel", visualizations)
+        self.assertIn("openVisualizationAsset", visualizations)
+        self.assertIn('mode: "visualization"', visualizations)
+        self.assertIn("assetIds", visualizations)
         self.assertNotIn("stableLane", visualizations)
         self.assertIn("timelineBucketInterval", visualizations)
         self.assertIn("timelineLod", visualizations)
@@ -566,7 +568,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertNotIn("thumbnailTier", visualizations)
         self.assertNotIn("PCA 1", visualizations)
         self.assertNotIn("PCA 2", visualizations)
-        self.assertIn('id="visualization-selection-panel"', html)
+        self.assertNotIn('id="visualization-selection-panel"', html)
         for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
             self.assertNotIn(remote_map_reference, visualizations)
 
@@ -604,7 +606,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
         start = visualizations.index("function timelineBucketStart")
         end = visualizations.index("function drawTimelineDensity", start)
-        script = "const TIMELINE_KERNEL=[1,4,6,4,1];\n" + visualizations[start:end] + r'''
+        script = "const TIMELINE_KERNEL=[1,4,6,4,1];\nconst timelinePointTime=point => Number(point.time);\n" + visualizations[start:end] + r'''
         function representativeVisualizationPoint(points) { return points[0]; }
         const points=[{asset_id:'a',time:0},{asset_id:'b',time:86400*4}];
         const view={key:'test',timeMode:'capture',timelineCaches:new Map(),centerTime:86400*2,visibleSpan:86400*5,data:{points}};
@@ -621,13 +623,83 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertNotEqual(output["actual"], output["midpoint"])
         self.assertEqual(output["occupied"], 2)
 
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_timeline_precision_separates_distinct_times_but_groups_equal_times(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function timelineBucketStart")
+        end = visualizations.index("function drawTimelineDensity", start)
+        script = "const TIMELINE_KERNEL=[1,4,6,4,1];\nconst timelinePointTime=point => Number(point.time_us) / 1e6;\n" + visualizations[start:end] + r'''
+        function representativeVisualizationPoint(points) { return points[0]; }
+        const base=Date.UTC(2026,8,10,15,10,59)*1000000;
+        const distinct=[0,123000,456789].map((offset,index)=>({asset_id:String(index),time_us:base+offset,time:(base+offset)/1000000}));
+        const equal=[0,0,0].map((offset,index)=>({asset_id:String(index),time_us:base+offset,time:(base+offset)/1000000}));
+        const distinctCache=buildTimelineCache({key:'distinct',timeMode:'capture',timelineCaches:new Map()},distinct,.000001);
+        const equalCache=buildTimelineCache({key:'equal',timeMode:'capture',timelineCaches:new Map()},equal,.000001);
+        console.log(JSON.stringify({distinct:distinctCache.occupied.size,equal:equalCache.occupied.size,order:[...distinctCache.occupied.values()][1].members.map(point=>point.asset_id)}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(result.stdout), {"distinct": 3, "equal": 1, "order": ["1"]})
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_asset_to_viewer_item_uses_canonical_preferred_physical_identity(self):
+        source = javascript_source()
+        start = source.index("function assetToViewerItem")
+        end = source.index("function renderDetails", start)
+        script = source[start:end] + r'''
+        const asset={asset_id:'asset',media_type:'image',thumbnail_url:'/asset-thumb',physical_files:[
+          {id:'raw',filename:'asset.ARW',is_preferred:false,is_online:false,in_scope:true,original_url:null},
+          {id:'jpeg',filename:'asset.JPG',is_preferred:true,is_online:true,in_scope:true,original_url:'/jpeg'}
+        ]};
+        console.log(JSON.stringify(assetToViewerItem(asset)));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        item = json.loads(result.stdout)
+        self.assertEqual(item["preferred_physical_id"], "jpeg")
+        self.assertEqual(item["filename"], "asset.JPG")
+        self.assertEqual(item["thumbnail_url"], "/asset-thumb")
+
+    def test_visualization_thumbnail_direct_fullscreen_and_lazy_sequence_contract(self):
+        # visualization thumbnail click opens fullscreen directly
+        source = javascript_source()
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        self.assertIn("openVisualizationAsset", visualizations)
+        self.assertIn("loadVisualizationViewerItem", source)
+        self.assertIn("state.viewerSequenceIds", source)
+        self.assertNotIn("visualization-selection-panel", source + visualizations)
+        self.assertNotIn("data-visualization-open", source + visualizations)
+        self.assertNotIn("data-visualization-details", source + visualizations)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_visualization_lod_settles_to_one_integer_level_after_crossfade(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function visualizationLod")
+        end = visualizations.index("function markVisualizationInteraction", start)
+        script = r'''
+        let now=0;
+        const rawVisualizationLod=()=>({coarse:1,fine:2,fineBlend:.4});
+        const Date={now:()=>now};
+        ''' + visualizations[start:end] + r'''
+        const view={interactionPhase:'settling',settledLod:2,settleFrom:{fineBlend:.4},lodSettleStartedAt:0};
+        const startBlend=visualizationLod('vector',view).fineBlend;
+        now=120; const middleBlend=visualizationLod('vector',view).fineBlend;
+        now=240; const endBlend=visualizationLod('vector',view).fineBlend;
+        view.interactionPhase='settled'; const settled=visualizationLod('vector',view);
+        console.log(JSON.stringify({startBlend,middleBlend,endBlend,settled}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["startBlend"], .4)
+        self.assertGreater(output["middleBlend"], .4)
+        self.assertEqual(output["endBlend"], 1)
+        self.assertEqual(output["settled"], {"coarse": 2, "fine": 2, "fineBlend": 1})
+
     def test_visualization_layout_and_world_alignment_contract(self):
         root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
         css = (root / "app.css").read_text(encoding="utf-8")
         visualizations = (root / "app-visualizations.js").read_text(encoding="utf-8")
         self.assertIn(".visualization-view.visualization-full-height", css)
         self.assertNotIn("height:380px", css)
-        self.assertIn("timelineX(view, candidate.point.time", visualizations)
+        self.assertIn("timelineX(view, timelinePointTime(candidate.point)", visualizations)
         self.assertIn("screenPoint(view, representative.x, representative.y", visualizations)
         self.assertIn("vectorDensityRasterPoint(point, bounds, size)", visualizations)
         self.assertNotIn("calc(100dvh - 112px)", css)

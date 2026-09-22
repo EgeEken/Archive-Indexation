@@ -15,7 +15,7 @@ $("vector-view-toggle").addEventListener("click", () => setViewMode("vector"));
 $("viewer-similar").onclick = () => state.similar ? closeSimilar() : showSimilar(state.viewerItems[state.viewerIndex].asset_id);
 $("viewer-open-normal").onclick = openSimilarNormally;
 $("workspace-explorer").onclick = () => revealFile();
-$("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex].preferred_physical_id);
+$("viewer-explorer").onclick = () => revealFile(state.viewerItems[state.viewerIndex]?.preferred_physical_id, {asset: true});
 $("groups-view-toggle").addEventListener("click", () => setViewMode("groups"));
 $("export-selected").addEventListener("click", () => { window.location.href = apiPath("/api/exports/selected.zip"); });
 
@@ -87,7 +87,8 @@ if (state.workspace) {
   loadWorkspace().then(() => setInterval(() => { loadJobs(); loadProblemsBadge(); }, 1500)).catch((error) => showToast(`Workspace request failed: ${error.message}`));
 } else { loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 
-async function revealFile(file_id) {
+async function revealFile(file_id, options = {}) {
+  if (options.asset && !file_id) { showToast("This asset has no revealable physical file."); return; }
   try { await api("/api/reveal", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({file_id})}); }
   catch(error) { showToast(`Explorer request failed: ${error.message}`); }
 }
