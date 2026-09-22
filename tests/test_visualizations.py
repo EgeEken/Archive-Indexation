@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from archive_index.api.server import _browser_filtered_assets
-from archive_index.api.visualizations import visualization_capabilities, visualization_data, wall_clock_coordinate
+from archive_index.api.visualizations import visualization_capabilities, visualization_data, wall_clock_coordinate, wall_clock_coordinate_us
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.quality_provider import OffQualityProvider
@@ -88,7 +88,7 @@ class VisualizationDataTests(unittest.TestCase):
         self.assertEqual(timeline["points"][0]["capture_time"], "2026-09-19T12:34:56")
         self.assertEqual(
             set(timeline["points"][0]),
-            {"asset_id", "time", "time_kind", "capture_time", "capture_time_kind", "file_created_time", "media_type", "quality_score"},
+            {"asset_id", "time", "time_us", "time_precision_us", "time_kind", "capture_time", "capture_time_kind", "file_created_time", "media_type", "quality_score"},
         )
 
     def test_wall_clock_coordinate_ignores_timezone_suffix(self):
@@ -128,7 +128,39 @@ class VisualizationDataTests(unittest.TestCase):
         self.assertEqual(points[self.gps_id]["time_kind"], "file_created")
         self.assertEqual(points[self.fallback_id]["file_created_time"], "2024-01-03T04:05:06+03:00")
         self.assertEqual(points[self.fallback_id]["time"], wall_clock_coordinate("2024-01-03T04:05:06+03:00"))
-        self.assertEqual(set(points[self.gps_id]), {"asset_id", "time", "time_kind", "capture_time", "capture_time_kind", "file_created_time", "media_type", "quality_score"})
+        self.assertEqual(set(points[self.gps_id]), {"asset_id", "time", "time_us", "time_precision_us", "time_kind", "capture_time", "capture_time_kind", "file_created_time", "media_type", "quality_score"})
+
+    def test_timeline_recovers_subsecond_metadata_without_mutating_logical_time(self):
+        with self.workspace.transaction() as connection:
+            ids = [
+                connection.execute("SELECT logical_asset_id FROM physical_file WHERE relative_path = ?", (name,)).fetchone()[0]
+                for name in ("gps.jpg", "fallback.jpg", "plain.jpg")
+            ]
+            for asset_id, fraction in zip(ids, ("123", "456789", None)):
+                metadata = {"exif": {"DateTimeOriginal": "2026:09:10 15:10:59"}}
+                if fraction is not None:
+                    metadata["exif"]["SubSecTimeOriginal"] = fraction
+                connection.execute(
+                    "UPDATE physical_file SET metadata_json = ? WHERE logical_asset_id = ?",
+                    (json.dumps(metadata), asset_id),
+                )
+                connection.execute(
+                    "UPDATE logical_asset SET capture_time = '2026-09-10T15:10:59', capture_time_kind = 'exif_local_unknown' WHERE id = ?",
+                    (asset_id,),
+                )
+        data = visualization_data(self.workspace, {}, self.handle, filter_assets=_browser_filtered_assets, kind="timeline")
+        points = {point["asset_id"]: point for point in data["points"]}
+        self.assertEqual(points[self.gps_id]["time_us"], wall_clock_coordinate_us("2026-09-10T15:10:59.123000"))
+        self.assertEqual(points[self.gps_id]["time_precision_us"], 1_000)
+        self.assertEqual(points[self.fallback_id]["time_us"], wall_clock_coordinate_us("2026-09-10T15:10:59.456789"))
+        self.assertEqual(points[self.fallback_id]["time_precision_us"], 1)
+        self.assertEqual(points[self.gps_id]["capture_time"], "2026-09-10T15:10:59")
+
+    def test_wall_clock_microseconds_remain_distinct_and_equal_values_remain_equal(self):
+        values = ["2026-09-10T15:10:59.000000", "2026-09-10T15:10:59.123000", "2026-09-10T15:10:59.456789"]
+        coordinates = [wall_clock_coordinate_us(value) for value in values]
+        self.assertEqual(len(set(coordinates)), 3)
+        self.assertEqual(wall_clock_coordinate_us(values[0]), wall_clock_coordinate_us("2026-09-10T15:10:59"))
 
     def test_workspace_visualization_capabilities_use_workspace_state(self):
         capabilities = visualization_capabilities(self.workspace)

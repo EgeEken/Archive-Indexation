@@ -9,6 +9,7 @@ from math import isfinite
 
 from ..api.browser import asset_location
 from ..indexing.representations import preferred_physical
+from ..media.metadata import _parse_exif_datetime
 
 _ID_CHUNK_SIZE = 500
 _CAPTURE_PREFIX = re.compile(
@@ -154,8 +155,8 @@ def _geo_points(workspace, items: list[dict[str, object]]) -> list[dict[str, obj
 
 
 def _timeline_points(workspace, items, time_mode: str = "capture") -> list[dict[str, object]]:
-    created_by_asset = {}
-    if time_mode == "file_created" and items:
+    physical_by_asset = {}
+    if items:
         asset_ids = [item["asset_id"] for item in items]
         connection = workspace.connect()
         try:
@@ -164,29 +165,40 @@ def _timeline_points(workspace, items, time_mode: str = "capture") -> list[dict[
                 placeholders = ",".join("?" for _ in chunk)
                 rows = connection.execute(
                     f"""
-                    SELECT * FROM physical_file
+                    SELECT id, logical_asset_id, relative_path, filename, extension,
+                           media_type, role, is_online, in_scope, metadata_json,
+                           file_created_time
+                    FROM physical_file
                     WHERE logical_asset_id IN ({placeholders}) AND in_scope = 1
                     ORDER BY logical_asset_id, is_online DESC, relative_path
                     """,
                     chunk,
                 ).fetchall()
                 for row in rows:
-                    created_by_asset.setdefault(row["logical_asset_id"], []).append(row)
+                    physical_by_asset.setdefault(row["logical_asset_id"], []).append(row)
         finally:
             connection.close()
     points = []
     for item in items:
-        physical = created_by_asset.get(item["asset_id"], [])
+        physical = physical_by_asset.get(item["asset_id"], [])
         chosen = preferred_physical(physical)
         value = item.get("capture_time") if time_mode == "capture" else (chosen["file_created_time"] if chosen else None)
         kind = item.get("capture_time_kind") if time_mode == "capture" else "file_created"
+        precision_us = timestamp_precision_us(value)
+        if time_mode == "capture":
+            metadata_value, metadata_kind, metadata_precision = _metadata_capture_time(physical)
+            if metadata_value is not None and metadata_precision < precision_us:
+                value, kind, precision_us = metadata_value, metadata_kind, metadata_precision
         coordinate = wall_clock_coordinate(value, kind)
-        if coordinate is None:
+        coordinate_us = wall_clock_coordinate_us(value, kind)
+        if coordinate is None or coordinate_us is None:
             continue
         points.append(
             {
                 "asset_id": item["asset_id"],
                 "time": coordinate,
+                "time_us": coordinate_us,
+                "time_precision_us": precision_us,
                 "time_kind": time_mode,
                 "capture_time": item.get("capture_time"),
                 "capture_time_kind": item.get("capture_time_kind"),
@@ -195,8 +207,43 @@ def _timeline_points(workspace, items, time_mode: str = "capture") -> list[dict[
                 "quality_score": item.get("quality_score"),
             }
         )
-    points.sort(key=lambda point: (point["time"], point["asset_id"]))
+    points.sort(key=lambda point: (point["time_us"], point["asset_id"]))
     return points
+
+
+def _metadata_capture_time(physical) -> tuple[str | None, str | None, int]:
+    best: tuple[str, str, int] | None = None
+    for row in physical:
+        metadata = _json_or_none(row["metadata_json"]) or {}
+        exif = metadata.get("exif") or {}
+        for key in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
+            value = exif.get(key)
+            if value is None:
+                continue
+            suffix = key.removeprefix("DateTime")
+            offset = exif.get(f"OffsetTime{suffix}") or exif.get("OffsetTimeOriginal")
+            subsecond = exif.get(f"SubSecTime{suffix}") or exif.get(f"SubsecTime{suffix}")
+            parsed, kind = _parse_exif_datetime(str(value), offset, subsecond)
+            precision = subsecond_precision_us(subsecond)
+            candidate = (parsed, kind, precision)
+            if best is None or precision < best[2]:
+                best = candidate
+            break
+    return best if best is not None else (None, None, 1_000_000)
+
+
+def timestamp_precision_us(value: str | None) -> int:
+    if not value:
+        return 1_000_000
+    match = _CAPTURE_PREFIX.match(str(value))
+    fraction = match.group("fraction") if match else None
+    digits = min(6, len(fraction or ""))
+    return 1_000_000 // 10**digits
+
+
+def subsecond_precision_us(value) -> int:
+    digits = min(6, len("".join(character for character in str(value) if character.isdigit()))) if value is not None else 0
+    return 1_000_000 // 10**digits if digits else 1_000_000
 
 
 def wall_clock_coordinate(value: str | None, kind: str | None = None) -> float | None:
@@ -208,6 +255,11 @@ def wall_clock_coordinate(value: str | None, kind: str | None = None) -> float |
     photo on the Timeline.
     """
 
+    coordinate_us = wall_clock_coordinate_us(value, kind)
+    return coordinate_us / 1_000_000 if coordinate_us is not None else None
+
+
+def wall_clock_coordinate_us(value: str | None, kind: str | None = None) -> int | None:
     if not value:
         return None
     match = _CAPTURE_PREFIX.match(str(value))
@@ -225,7 +277,14 @@ def wall_clock_coordinate(value: str | None, kind: str | None = None) -> float |
             int(fraction or 0),
             tzinfo=timezone.utc,
         )
-        coordinate = date.timestamp()
+        coordinate = int(date.timestamp()) * 1_000_000 + date.microsecond
     except (TypeError, ValueError, OverflowError):
         return None
     return coordinate if isfinite(coordinate) else None
+
+
+def _json_or_none(value):
+    try:
+        return json.loads(value) if value else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
