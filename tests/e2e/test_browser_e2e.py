@@ -218,24 +218,24 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#workspace-view").wait_for(state="visible")
         self.page.locator(".photo-card").first.wait_for(timeout=15000)
 
-    def _wait_index_idle(self) -> None:
+    def _wait_index_idle(self, known_job_ids: set[str]) -> None:
         deadline = time.monotonic() + 90
-        observed_active = False
+        observed_run = False
         idle_since = None
         while time.monotonic() < deadline:
             response = self.page.request.get(f"{self.base_url}/api/jobs?workspace={self.offline_handle}&limit=10")
             self.assertEqual(response.status, 200)
             jobs = response.json()["jobs"]
+            observed_run |= any(job["id"] not in known_job_ids for job in jobs)
             active = any(job["status"] in {"pending", "running"} for job in jobs)
-            observed_active |= active
             if active:
                 idle_since = None
-            elif observed_active:
+            elif observed_run:
                 idle_since = idle_since or time.monotonic()
                 if time.monotonic() - idle_since >= 2:
                     break
             self.page.wait_for_timeout(250)
-        self.assertTrue(observed_active, "indexing job did not become active")
+        self.assertTrue(observed_run, "indexing job was not created")
         self.assertFalse(active, "indexing job did not become idle")
         self.page.locator(".photo-card").first.wait_for(timeout=15000)
 
@@ -555,14 +555,16 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator(".photo-card", has_text="initial.jpg").first.wait_for()
         added = self.offline_root / "added.jpg"
         self._create_image(added, (90, 90), (180, 70, 160))
+        known_job_ids = {job["id"] for job in self.page.request.get(f"{self.base_url}/api/jobs?workspace={self.offline_handle}&limit=10").json()["jobs"]}
         self.page.locator("#index").click()
-        self._wait_index_idle()
+        self._wait_index_idle(known_job_ids)
         self.page.locator(".photo-card", has_text="added.jpg").first.wait_for()
 
         initial = self.offline_root / "initial.jpg"
         initial.unlink()
+        known_job_ids = {job["id"] for job in self.page.request.get(f"{self.base_url}/api/jobs?workspace={self.offline_handle}&limit=10").json()["jobs"]}
         self.page.locator("#index").click()
-        self._wait_index_idle()
+        self._wait_index_idle(known_job_ids)
         offline_card = self.page.locator(".photo-card", has_text="initial.jpg").first
         offline_card.get_by_text("Offline", exact=True).wait_for(timeout=15000)
         self.assertFalse(initial.exists())
