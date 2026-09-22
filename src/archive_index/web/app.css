@@ -456,7 +456,7 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
   body.visualization-active.sidebar-collapsed #browser-content { margin-left:24px; }
   body.visualization-active #browser-content > .visualization-view:not(.hidden) { min-height:0; }
   body.visualization-active #browser-content > .visualization-view.visualization-full-height:not(.hidden) { flex:1 1 auto; }
-  body.visualization-active #timeline-view:not(.hidden) { flex:0 0 clamp(340px,48dvh,430px); display:flex; flex-direction:column; }
+  body.visualization-active #timeline-view:not(.hidden) { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
   body.visualization-active #timeline-view .visualization-canvas { flex:1 1 auto; height:auto; min-height:0; }
   body.visualization-active .visualization-canvas-wrap { min-height:0; }
 }

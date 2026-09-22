@@ -693,6 +693,70 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertEqual(output["endBlend"], 1)
         self.assertEqual(output["settled"], {"coarse": 2, "fine": 2, "fineBlend": 1})
 
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_visualization_thumbnail_rect_uses_natural_aspect_and_exact_overlap_order(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function visualizationThumbnailRect")
+        end = visualizations.index("function vectorLod", start)
+        hit_start = visualizations.index("function pickVisualizationTarget")
+        hit_end = visualizations.index("function updateVisualizationHover", hit_start)
+        script = "const visualizationThumbnail=assetId=>({aspectRatio:assetId==='portrait'?.5:2});\n" + visualizations[start:end] + visualizations[hit_start:hit_end] + r'''
+        const landscape=visualizationThumbnailRect({asset_id:'landscape'},100,80,120);
+        const portrait=visualizationThumbnailRect({asset_id:'portrait'},100,80,120);
+        const targets=[
+          {point:{asset_id:'A'},rect:{left:20,top:20,right:100,bottom:100},count:1},
+          {point:{asset_id:'B'},rect:{left:40,top:40,right:120,bottom:120},count:1},
+          {point:{asset_id:'C'},rect:{left:60,top:60,right:140,bottom:140},count:1}
+        ];
+        const state={hitTargets:targets}; const visualizationView=()=>state;
+        const picked=pickVisualizationTarget('vector',80,80);
+        console.log(JSON.stringify({landscape,portrait,picked:picked.target.point.asset_id}));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual((output["landscape"]["width"], output["landscape"]["height"]), (120, 60))
+        self.assertEqual((output["portrait"]["width"], output["portrait"]["height"]), (60, 120))
+        self.assertEqual(output["picked"], "C")
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_geo_metric_grid_covers_both_sides_of_view(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function geoMetricGridRange")
+        end = visualizations.index("function geoMetricLabel", start)
+        script = visualizations[start:end] + r'''
+        const range=geoMetricGridRange({worldStepX:.1,worldStepY:.2},-.04,.24,-.18,.31);
+        console.log(JSON.stringify(range));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(result.stdout), {"firstX": -2, "lastX": 4, "firstY": -2, "lastY": 3})
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_timeline_tick_labels_follow_subsecond_step_precision(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        start = visualizations.index("function formatTimelineTick")
+        end = visualizations.index("function timelineTicks", start)
+        script = visualizations[start:end] + r'''
+        const base=Date.UTC(2026,0,1,0,0,0)/1000;
+        const values=[
+          timelineTickLabels(base,1),
+          timelineTickLabels(base+.1,.1,null,100000),
+          timelineTickLabels(base+.12,.01,null,10000),
+          timelineTickLabels(base+.123,.001,null,1000),
+          timelineTickLabels(base+.1234,.0001,null,100)
+        ];
+        console.log(JSON.stringify(values.map(value=>value.detail)));
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(result.stdout), ["00:00:00", "00:00:00.1", "00:00:00.12", "00:00:00.123", "00:00:00.1234"])
+
+    def test_visualization_interaction_contracts_are_stable(self):
+        visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")
+        self.assertIn("lastZoomInteractionAt", visualizations)
+        self.assertIn("targetCellPx", visualizations)
+        self.assertIn("drawVisualizationHover(ctx, view)", visualizations)
+        self.assertNotIn("scheduleVisualizationLodSettle(mode); } }));", visualizations)
+        self.assertIn("canvas.style.cursor = picked ? \"pointer\" : \"grab\"", visualizations)
+
     def test_visualization_layout_and_world_alignment_contract(self):
         root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
         css = (root / "app.css").read_text(encoding="utf-8")
