@@ -6,10 +6,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 from archive_index.api import server
+from archive_index.api.jobs import IndexingRunContext, _indexing_mode, _planner_stage_estimates, indexing_runtime_status
 from archive_index.embeddings import search
 from archive_index.indexing.embeddings import index_embeddings
 from archive_index.indexing.reconciliation import reconcile_workspace
@@ -55,6 +57,60 @@ class CorrectionTests(unittest.TestCase):
         plan = server._embedding_plan(configuration, filesystem_plan={"selected_categories": {"jpeg": 4, "video": 2}})
         self.assertEqual(plan["embedding_video_sample_count"], 0)
         self.assertEqual(plan["embedding_unknown_videos"], 0)
+
+    def test_indexing_runtime_mode_and_planner_stage_mapping(self):
+        self.assertEqual(_indexing_mode(self.workspace), "reindexing")
+        empty_root = Path(self.temp.name) / "empty-runtime-workspace"
+        empty_root.mkdir()
+        self.assertEqual(_indexing_mode(server.Workspace.create(empty_root)), "indexing")
+        estimates = _planner_stage_estimates({
+            "eta_seconds_by_feature": {
+                "scan": 2, "hashing": 3, "metadata": 4, "semantic_search": 5,
+                "image_embeddings": 6, "video_embeddings": 7, "grouping": 8,
+            },
+        })
+        self.assertEqual(estimates["scan"], 5)
+        self.assertEqual(estimates["embeddings"], 18)
+        self.assertEqual(estimates["visual_features"], 8)
+
+    def test_indexing_runtime_prefers_live_eta_and_preserves_elapsed_floor(self):
+        context = IndexingRunContext(
+            mode="reindexing",
+            started_at="2026-09-22T10:00:00+00:00",
+            started_monotonic=100,
+            planner_estimates={"scan": 10, "media_index": 20, "recommendations": 5},
+            job_ids=["scan"],
+            current_job_id="scan",
+            stage_started_monotonic=100,
+        )
+        host = SimpleNamespace(_active_lock=threading.Lock(), _indexing_runs={"test": context})
+        jobs = [{
+            "id": "scan", "kind": "scan", "status": "running", "total_items": 10,
+            "completed_items": 2, "eta_seconds": 12, "substage": {"eta": 3},
+        }]
+        with patch("archive_index.api.jobs.monotonic", return_value=110):
+            status = indexing_runtime_status(host, "test", jobs)
+        self.assertEqual(status["remaining_source"], "substage")
+        self.assertEqual(status["current_remaining_seconds"], 3)
+        self.assertGreaterEqual(status["projected_total_seconds"], status["elapsed_seconds"])
+        self.assertEqual(status["initial_estimated_seconds"], 35)
+
+    def test_indexing_runtime_uses_planner_before_progress_rate_and_cleans_on_direct_run(self):
+        context = IndexingRunContext(
+            mode="indexing", started_at="2026-09-22T10:00:00+00:00", started_monotonic=100,
+            planner_estimates={"scan": 10, "media_index": 20}, job_ids=["scan"],
+            current_job_id="scan", stage_started_monotonic=100,
+        )
+        host = SimpleNamespace(_active_lock=threading.Lock(), _indexing_runs={"test": context}, _cancel_events={}, _active_threads={})
+        jobs = [{
+            "id": "scan", "kind": "scan", "status": "running", "total_items": 10,
+            "completed_items": 0, "eta_seconds": None, "substage": None,
+        }]
+        with patch("archive_index.api.jobs.monotonic", return_value=105):
+            status = indexing_runtime_status(host, "test", jobs)
+        self.assertEqual(status["remaining_source"], "planner_progress")
+        self.assertEqual(status["current_remaining_seconds"], 10)
+        self.assertEqual(status["projected_total_seconds"], 35)
 
     def test_plan_endpoint_populates_embedding_counts(self):
         provider = self.enable_embeddings()

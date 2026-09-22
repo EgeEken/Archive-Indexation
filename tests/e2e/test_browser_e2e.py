@@ -428,6 +428,7 @@ class BrowserE2ETests(unittest.TestCase):
         self._open_main()
         self.page.get_by_role("tab", name="Geo Map").click()
         self.page.locator("#geo-view").wait_for(state="visible")
+        self.assertLessEqual(abs(self.page.locator("#filters").bounding_box()["x"]), 0.5)
         self.page.locator("#geo-canvas").wait_for()
         self.page.wait_for_function("() => Number(document.querySelector('#geo-canvas').dataset.pointCount) === 3")
         self.page.wait_for_function("() => document.querySelector('#geo-canvas').dataset.firstTargetX !== undefined")

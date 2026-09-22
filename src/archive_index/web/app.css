@@ -48,6 +48,7 @@
     .checkbox-filter { display: flex; align-items: center; gap: .4rem; min-height: 2.15rem; }
     .checkbox-filter input { width: auto; }
     .job-banner { display: grid; grid-template-columns: 1fr auto; gap: .35rem .8rem; align-items: center; margin: .8rem 0; padding: .65rem .8rem; border-left: 3px solid #9bb8d2; background: #20272e; }
+    .job-runtime-copy { grid-column: 1 / -1; font-size: .86rem; color: #d9e0e6; }
     .job-copy { font-size: .83rem; }
     progress { width: 100%; height: 1rem; grid-column: 1 / -1; accent-color: #9bb8d2; }
     .status { min-height: 1.25rem; margin: .7rem 0; color: #e1aa76; font-size: .85rem; }
@@ -443,7 +444,7 @@ main { width: calc(100% - 2rem); max-width: none; margin: 80px auto 2rem; }
 @media(min-width:851px) {
   body.visualization-active { height:100dvh; overflow:hidden; display:flex; flex-direction:column; }
   body.visualization-active .app-header { position:static; flex:0 0 auto; }
-  body.visualization-active main { flex:1 1 auto; min-height:0; width:calc(100% - 2rem); margin:0 auto; display:flex; flex-direction:column; }
+  body.visualization-active main { flex:1 1 auto; min-height:0; width:100%; margin:0; display:flex; flex-direction:column; }
   body.visualization-active #workspace-view { position:relative; flex:1 1 auto; min-height:0; display:flex; }
   body.visualization-active #filters { position:absolute; inset:0 auto 0 0; width:280px; height:auto; }
   body.visualization-active #browser-content { flex:1 1 auto; min-width:0; min-height:0; margin-left:284px; display:flex; flex-direction:column; }

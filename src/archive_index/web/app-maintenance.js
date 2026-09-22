@@ -14,6 +14,7 @@ async function loadJobs() {
     const active = data.jobs.find((job) => ["pending", "running"].includes(job.status));
     if (!active) {
       $("job-banner").classList.add("hidden");
+      $("job-runtime-copy").textContent = "";
       if (state.activeJobId) {
         state.activeJobId = null;
         await api("/api/workspace");
@@ -27,6 +28,15 @@ async function loadJobs() {
       return;
     }
     state.activeJobId = active.id;
+    const runtime = data.indexing;
+    if (runtime) {
+      const elapsed = formatRuntime(runtime.elapsed_seconds);
+      const projected = formatRuntime(Math.max(runtime.projected_total_seconds, runtime.elapsed_seconds));
+      const label = runtime.mode === "reindexing" ? "Re-indexing" : "Indexing";
+      $("job-runtime-copy").textContent = `${label} · elapsed ${elapsed} · projected total ${projected}`;
+    } else {
+      $("job-runtime-copy").textContent = "";
+    }
     const percent = active.total_items ? (100 * active.completed_items / active.total_items).toFixed(1) : "0.0";
     const elapsed = active.started_at ? Math.max((Date.now() - Date.parse(active.started_at)) / 1000, .001) : .001;
     const rate = (active.completed_items / elapsed).toFixed(1);
@@ -48,6 +58,11 @@ async function loadJobs() {
   } catch (error) {
     showToast(`Job status request failed: ${error.message}`);
   }
+}
+
+function formatRuntime(seconds) {
+  const value = Number.isFinite(Number(seconds)) ? Math.max(0, Math.floor(Number(seconds))) : 0;
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 }
 
 async function loadProblemsBadge() {

@@ -187,6 +187,26 @@ class BrowserTests(unittest.TestCase):
         self.assertTrue(groups)
         self.assertTrue(all(group["label"].startswith("Group ") for group in groups))
 
+    def test_group_auto_review_qualifies_full_strict_groups(self):
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE logical_asset SET capture_time = '2026-09-03T12:00:00', capture_time_kind = 'exif_local_unknown'")
+            connection.execute("UPDATE physical_file SET quality_score = 0.8")
+        extract_visual_features(self.workspace)
+        build_groups(self.workspace)
+        build_recommendations(self.workspace)
+
+        representative_groups = self.browser(view="groups", auto="representatives")["groups"]
+        recommended_groups = self.browser(view="groups", auto="recommended")["groups"]
+        self.assertTrue(representative_groups)
+        self.assertTrue(recommended_groups)
+        for groups in (representative_groups, recommended_groups):
+            self.assertTrue(all(len(group["members"]) == group["member_count"] >= 2 for group in groups))
+            self.assertTrue(all(any(member["is_representative"] for member in group["members"]) for group in groups))
+        self.assertEqual(
+            {group["group_id"] for group in representative_groups},
+            {group["group_id"] for group in recommended_groups},
+        )
+
     def test_query_vector_and_ranking_reuse(self):
         config = self.workspace.configuration(); config["semantic_search_enabled"] = True
         self.workspace.apply_configuration(config)

@@ -97,6 +97,7 @@ from .jobs import (
     start_indexing as start_indexing_service,
     start_recommendation_rebuild as start_recommendation_rebuild_service,
     start_reconciliation as start_reconciliation_service,
+    indexing_runtime_status,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -131,6 +132,7 @@ class WorkspaceHTTPServer(ThreadingHTTPServer):
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, threading.Thread] = {}
         self._cancel_events: dict[tuple[str, str], threading.Event] = {}
+        self._indexing_runs = {}
         self._recovered_workspaces: set[str] = set()
         if workspace is not None:
             self.default_handle = self._register_workspace(workspace)
@@ -337,7 +339,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             elif request.path == "/api/search":
                 self._send_json(200, _semantic_search(workspace, query, handle))
             elif request.path == "/api/jobs":
-                self._send_json(200, {"jobs": _jobs(workspace, query), "revision": _browser_revision(workspace)})
+                jobs = _jobs(workspace, query)
+                payload = {"jobs": jobs, "revision": _browser_revision(workspace)}
+                runtime = indexing_runtime_status(self.server, handle, jobs)
+                if runtime is not None:
+                    payload["indexing"] = runtime
+                self._send_json(200, payload)
             elif request.path == "/api/problems":
                 self._send_json(200, {"problems": _problems(workspace, query)})
             elif request.path == "/api/offline-media":
@@ -1275,6 +1282,28 @@ def _browser_assets(workspace, query, handle):
               "workspace_total": workspace_total, "query_active": bool(text), "search": status,
               "filename_matches": sum(bool(i.get("filename_match")) for i in items)}
     if _first(query, "view", "gallery") == "groups":
+        auto = _first(query, "auto", "all")
+        if auto in {"representatives", "recommended"}:
+            base_query = {**query, "auto": ["all"]}
+            qualifying_items, status, catalog_revision, workspace_total = _browser_filtered_assets(workspace, base_query, handle)
+            with _browser_lock:
+                catalog = list(_browser_catalogs.get((str(workspace.root), handle, catalog_revision), []))
+            recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
+            qualifying_groups = {
+                item["current_group_id"]
+                for item in qualifying_items
+                if item.get("current_group_id")
+                and int(item.get("strict_group_member_count") or 0) >= 2
+                and (item["is_representative"] if auto == "representatives" else item.get("asset_id") in recommendation_ids)
+            }
+            items = [
+                {**item, "auto_recommended": item.get("asset_id") in recommendation_ids,
+                 "recommendation_run_id": recommendation_run_id}
+                for item in catalog if item.get("current_group_id") in qualifying_groups
+            ]
+            media_shown = len(items)
+            result.update(media_shown=media_shown, media_total=media_shown, search=status,
+                          filename_matches=sum(bool(i.get("filename_match")) for i in items))
         group_numbers = _browser_group_numbers(workspace)
         groups = {}
         for item in items:
