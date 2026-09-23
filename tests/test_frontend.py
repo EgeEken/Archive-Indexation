@@ -572,6 +572,22 @@ class CorrectionFrontendTests(unittest.TestCase):
         for remote_map_reference in ("tile.openstreetmap", "mapbox", "google.com/maps"):
             self.assertNotIn(remote_map_reference, visualizations)
 
+    def test_phase10a_representation_and_planning_contract(self):
+        root = Path(__file__).parents[1] / "src" / "archive_index" / "web"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        details = (root / "app-details.js").read_text(encoding="utf-8")
+        management = (root / "app-file-management.js").read_text(encoding="utf-8")
+        self.assertIn('id="representation-comparison"', html)
+        self.assertIn('id="file-management-dialog"', html)
+        self.assertIn('id="file-management-preset-form"', html)
+        self.assertIn('app-file-management.js', html)
+        for marker in ("data-representation-open", "data-representation-compare", "display_preview_url", "showViewer"):
+            self.assertIn(marker, details)
+        for marker in ("/api/file-management/profiles", "/api/file-management/rulesets", "/api/file-management/presets", "/api/file-management/plan"):
+            self.assertIn(marker, management)
+        self.assertIn("Phase 10A does not change source files", html)
+        self.assertNotIn("unlink", management)
+
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_visualization_lod_keys_are_world_or_time_anchored(self):
         visualizations = (Path(__file__).parents[1] / "src" / "archive_index" / "web" / "app-visualizations.js").read_text(encoding="utf-8")

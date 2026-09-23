@@ -1,9 +1,10 @@
 let fileManagementRulesetId = null;
 
 async function refreshFileManagementEditor() {
-  const [profiles, rulesets] = await Promise.all([
+  const [profiles, rulesets, presets] = await Promise.all([
     api("/api/file-management/profiles"),
     api("/api/file-management/rulesets"),
+    api("/api/file-management/presets"),
   ]);
   const profile = profiles.profiles[0];
   if (profile) {
@@ -17,6 +18,12 @@ async function refreshFileManagementEditor() {
     fileManagementRulesetId = ruleset.id;
     $("file-management-ruleset-name").value = ruleset.name;
     $("file-management-rules").value = JSON.stringify(ruleset.rules || [], null, 2);
+  }
+  $("file-management-preset-ruleset").innerHTML = rulesets.rulesets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("");
+  const preset = presets.presets[0];
+  if (preset) {
+    $("file-management-preset-name").value = preset.name;
+    $("file-management-preset-ruleset").value = preset.ruleset_id;
   }
 }
 
@@ -63,6 +70,22 @@ $("file-management-ruleset-form").addEventListener("submit", async event => {
     showToast("Ruleset saved.");
   } catch (error) {
     showToast(`Ruleset save failed: ${error.message}`);
+  }
+});
+$("file-management-preset-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    await api("/api/file-management/presets", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        name: $("file-management-preset-name").value,
+        ruleset_id: $("file-management-preset-ruleset").value,
+      }),
+    });
+    showToast("Preset saved.");
+  } catch (error) {
+    showToast(`Preset save failed: ${error.message}`);
   }
 });
 $("file-management-plan").addEventListener("click", async () => {
