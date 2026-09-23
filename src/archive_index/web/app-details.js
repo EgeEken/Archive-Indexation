@@ -45,9 +45,17 @@ function openRepresentationInspection(asset, fileId) {
   const target = defaultComparisonTarget(asset, fileId);
   const dialog = $("representation-comparison");
   const relationship = file.relationships?.includes("External JPEG XL representation") ? "External JPEG XL representation · Lineage unknown" : file.representation_label || file.role || "Physical file";
-  dialog.innerHTML = `<div class="dialog-inner representation-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(relationship)}</p></div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div><div class="representation-preview-wrap"><img src="${escapeHtml(representationPreviewUrl(file.id))}" alt="${escapeHtml(file.filename)}"></div><dl class="kv"><dt>Format</dt><dd>${escapeHtml(file.extension?.replace(".", "").toUpperCase() || "Unavailable")}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(file.size_bytes))}</dd><dt>Dimensions</dt><dd>${file.width && file.height ? `${file.width} × ${file.height}` : "Unavailable"}</dd><dt>Role</dt><dd>${escapeHtml(relationship)}</dd></dl>${target ? `<div class="comparison-toolbar"><label>Compare with <select data-comparison-target>${compatibleRepresentations(asset, fileId).map(candidate => `<option value="${escapeHtml(candidate.id)}"${candidate.id === target.id ? " selected" : ""}>${escapeHtml(candidate.filename)}</option>`).join("")}</select></label><button class="secondary" type="button" data-compare-mode="side">Side by side</button><button class="secondary" type="button" data-compare-mode="slider">Slider</button></div><div data-comparison-result></div>` : ""}</div>`;
+  dialog.innerHTML = `<div class="dialog-inner representation-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(relationship)}</p></div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div><div class="representation-preview-wrap"><img src="${escapeHtml(representationPreviewUrl(file.id))}" alt="${escapeHtml(file.filename)}"></div><dl class="kv"><dt>Format</dt><dd>${escapeHtml(file.extension?.replace(".", "").toUpperCase() || "Unavailable")}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(file.size_bytes))}</dd><dt>Dimensions</dt><dd>${file.width && file.height ? `${file.width} × ${file.height}` : "Unavailable"}</dd><dt>Role</dt><dd>${escapeHtml(relationship)}</dd></dl><div class="representation-inspection-actions"><button class="secondary" type="button" data-representation-open-viewer>Open</button><button class="secondary" type="button" data-representation-details>Details</button></div>${target ? `<div class="comparison-toolbar"><label>Compare with <select data-comparison-target>${compatibleRepresentations(asset, fileId).map(candidate => `<option value="${escapeHtml(candidate.id)}"${candidate.id === target.id ? " selected" : ""}>${escapeHtml(candidate.filename)}</option>`).join("")}</select></label><button class="secondary" type="button" data-compare-mode="side">Side by side</button><button class="secondary" type="button" data-compare-mode="slider">Slider</button></div><div data-comparison-result></div>` : ""}</div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
+  dialog.querySelector("[data-representation-open-viewer]").onclick = () => {
+    dialog.close();
+    showViewer(0, [showViewerForRepresentation(asset, file)], {mode: "visualization", assetIds: [asset.asset_id], total: 1});
+  };
+  dialog.querySelector("[data-representation-details]").onclick = () => {
+    dialog.close();
+    showDetails(asset.asset_id, {mode: "visualization", items: [asset], index: 0, total: 1});
+  };
   dialog.querySelectorAll("[data-compare-mode]").forEach(button => button.addEventListener("click", () => renderRepresentationComparison(asset, fileId, dialog.querySelector("[data-comparison-target]").value, button.dataset.compareMode)));
 }
 
@@ -64,7 +72,22 @@ async function renderRepresentationComparison(asset, leftId, rightId, mode = "si
     result.innerHTML = `${stage}<div class="muted comparison-labels">${escapeHtml(data.left.filename)} · ${escapeHtml(data.right.filename)} · ${escapeHtml(metricText)}</div>${data.metrics_note ? `<p class="muted">${escapeHtml(data.metrics_note)}</p>` : ""}`;
     const slider = result.querySelector("input[type=range]");
     slider?.addEventListener("input", event => result.querySelector("[data-slider-image]").style.clipPath = `inset(0 ${100 - Number(event.target.value)}% 0 0)`);
+    bindComparisonTransform(result);
   } catch (error) { result.innerHTML = `<p class="error">Comparison unavailable: ${escapeHtml(error.message)}</p>`; }
+}
+
+function bindComparisonTransform(container) {
+  let scale = 1;
+  let offsetX = 0;
+  let offsetY = 0;
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  const apply = () => container.querySelectorAll(".comparison-pane img, .comparison-slider img").forEach(image => { image.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`; });
+  container.addEventListener("wheel", event => { event.preventDefault(); scale = Math.max(1, Math.min(8, scale * (event.deltaY < 0 ? 1.1 : .9))); apply(); }, {passive: false});
+  container.addEventListener("pointerdown", event => { if (event.target.tagName === "INPUT") return; dragging = true; startX = event.clientX - offsetX; startY = event.clientY - offsetY; container.setPointerCapture(event.pointerId); });
+  container.addEventListener("pointermove", event => { if (!dragging) return; offsetX = event.clientX - startX; offsetY = event.clientY - startY; apply(); });
+  container.addEventListener("pointerup", () => { dragging = false; });
 }
 
 function renderDetails(asset, options = {}) {

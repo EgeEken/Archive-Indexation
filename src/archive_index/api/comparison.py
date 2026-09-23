@@ -80,12 +80,16 @@ def _decode(workspace: Workspace, row):
 
 
 def _mse(left: Image.Image, right: Image.Image) -> float:
-    difference = ImageChops.difference(left.convert("RGB"), right.convert("RGB"))
+    left_rgb = left.convert("RGB")
+    right_rgb = right.convert("RGB")
+    difference = ImageChops.difference(left_rgb, right_rgb)
     try:
         values = ImageStat.Stat(difference).mean
         return sum(value * value for value in values) / 3
     finally:
         difference.close()
+        left_rgb.close()
+        right_rgb.close()
 
 
 def _representation(row, handle: str) -> dict[str, object]:

@@ -433,9 +433,13 @@ def _rendered_jxl_evidence(workspace, jxl_asset, rendered_asset, jxl_files, rend
 def _visual_identity_metrics(left_path, right_path):
     left = load_reduced_image(left_path, (32, 32))
     right = load_reduced_image(right_path, (32, 32))
+    left_rgb = None
+    right_rgb = None
     try:
-        left_pixels = list(left.convert("RGB").getdata())
-        right_pixels = list(right.convert("RGB").getdata())
+        left_rgb = left.convert("RGB")
+        right_rgb = right.convert("RGB")
+        left_pixels = list(left_rgb.get_flattened_data()) if hasattr(left_rgb, "get_flattened_data") else list(left_rgb.getdata())
+        right_pixels = list(right_rgb.get_flattened_data()) if hasattr(right_rgb, "get_flattened_data") else list(right_rgb.getdata())
         count = max(1, len(left_pixels))
         rmse = (
             sum((a[channel] - b[channel]) ** 2 for a, b in zip(left_pixels, right_pixels) for channel in range(3))
@@ -458,6 +462,10 @@ def _visual_identity_metrics(left_path, right_path):
         histogram_distance /= 3
         return {"rmse": rmse, "dhash_distance": dhash_distance, "histogram_distance": histogram_distance}
     finally:
+        if left_rgb is not None:
+            left_rgb.close()
+        if right_rgb is not None:
+            right_rgb.close()
         left.close()
         right.close()
 

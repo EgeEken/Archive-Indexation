@@ -425,10 +425,16 @@ def _plan_summary(workspace, rows, operations, conflicts):
         connection.close()
     for asset in assets:
         members = [row for row in files if row["logical_asset_id"] == asset["id"]]
-        if members and not any(
-            operation["logical_asset_id"] == asset["id"]
-            and (operation["operation"] == "delete" or (operation["operation"] == "compress" and operation["source_disposition"] == "replace"))
-            for operation in operations
+        if not members:
+            continue
+        member_operations = {
+            row["id"]: [operation for operation in operations if operation["physical_file_id"] == row["id"]]
+            for row in members
+        }
+        if any(
+            not any(operation["operation"] == "delete" for operation in member_operations[row["id"]])
+            or any(operation["operation"] in {"copy", "move", "compress"} for operation in member_operations[row["id"]])
+            for row in members
         ):
             surviving += 1
     net_freed = groups["delete"]["bytes"] + groups["compress"]["estimated_bytes_saved"] - groups["copy"]["bytes_added"]
@@ -492,7 +498,19 @@ def _empty_plan(reason: str):
         "ruleset_id": None,
         "operations": [],
         "conflicts": [],
-        "summary": {"candidate_count": 0, "conflict_count": 0, "safe_count": 0},
+        "summary": {
+            "candidate_count": 0,
+            "conflict_count": 0,
+            "safe_count": 0,
+            "delete": {"file_count": 0, "bytes": 0},
+            "copy": {"file_count": 0, "bytes_added": 0},
+            "move": {"file_count": 0, "bytes_moved": 0},
+            "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0},
+            "estimated_net_bytes_freed": 0,
+            "peak_temporary_bytes": 0,
+            "available_space_bytes": None,
+            "assets_with_no_surviving_representation": 0,
+        },
         "empty_reason": reason,
         "executor": {"available": False, "message": "Phase 10A is planning-only; no files will be changed."},
     }

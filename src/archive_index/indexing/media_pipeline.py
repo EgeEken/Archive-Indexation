@@ -1446,6 +1446,8 @@ def _display_preview_current(workspace, row, fingerprint: str) -> bool:
         source_fingerprint = row["current_display_preview_fingerprint"]
     except (IndexError, KeyError):
         return False
+    if not path:
+        return False
     try:
         exists = workspace.index_path(path).is_file()
     except (OSError, ValueError):
