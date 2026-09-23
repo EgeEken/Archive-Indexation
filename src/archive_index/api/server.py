@@ -41,6 +41,7 @@ from ..planning import _historical_rate, analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
 from ..file_management import (
     build_dry_run_plan,
+    delete_ruleset,
     list_profiles,
     list_presets,
     list_rulesets,
@@ -51,6 +52,7 @@ from ..file_management import (
 )
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
+from .comparison import comparison_data, comparison_preview
 from .exports import selected_zip
 from .workspaces import (
     _active_job,
@@ -547,6 +549,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 set_active_ruleset(workspace, value)
                 self._send_json(200, {"active_ruleset_id": value})
                 return
+            if request.path == "/api/file-management/rulesets/delete":
+                ruleset_id = self._json_body().get("id")
+                if not isinstance(ruleset_id, str):
+                    raise InvalidRequest("id is required")
+                delete_ruleset(workspace, ruleset_id)
+                self._send_json(200, {"deleted": True})
+                return
             if request.path == "/api/offline-media/forget":
                 self._send_json(200, self.server.forget_offline_media(handle))
                 return
@@ -664,6 +673,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "preview":
             self._serve_raw_preview(workspace, parts[2])
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison-preview":
+            self._send_bytes(200, comparison_preview(workspace, parts[2]), "image/png")
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison":
+            other_id = _first(query, "with_id", "")
+            if not other_id:
+                raise InvalidRequest("with_id is required")
+            self._send_json(200, comparison_data(workspace, parts[2], other_id, handle))
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "thumbnail":
             self._serve_thumbnail(workspace, parts[2])
