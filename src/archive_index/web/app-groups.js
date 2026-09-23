@@ -115,7 +115,7 @@ function setViewMode(mode, load = true) {
   const started = performance.now();
   mode = viewModeAvailable(mode) ? mode : "gallery";
   const previousMode = state.viewMode;
-  if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
+  if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","file-management-button","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
   document.body.classList.toggle("visualization-active", ["geo", "timeline", "vector"].includes(state.viewMode));

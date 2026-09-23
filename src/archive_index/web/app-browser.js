@@ -4,7 +4,7 @@ async function loadWorkspace() {
   $("setup-view").classList.add("hidden");
   $("setup-header-summary").classList.add("hidden");
   $("workspace-view").classList.remove("hidden");
-  ["index", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
+  ["index", "file-management-button", "configure-workspace", "workspace-crumb", "workspace-explorer", "workspace-tabs"].forEach(id => $(id).classList.remove("hidden"));
   state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.searchGeneration++; state.searchPollCount = 0; state.assetRequest++; state.jobsRequest++; state.groupRequest++;
   state.items = []; state.total = 0; state.windowStart = 0; state.windowHasNext = false; state.groupItems = [];
   state.activeJobId = null; state.browserRevision = null; state.viewerItems = []; state.viewerDetail = null; state.viewerTotal = 0; state.viewerFilterKey = null; state.viewDirty = false;

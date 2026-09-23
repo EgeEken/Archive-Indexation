@@ -5,6 +5,7 @@ async function loadHome() {
   $("setup-view").classList.add("hidden");
   $("setup-header-summary").classList.add("hidden");
   $("configure-workspace").classList.add("hidden");
+  $("file-management-button").classList.add("hidden");
   $("index").classList.add("hidden");
   $("problems-button").classList.add("hidden");
   $("workspace-crumb").classList.add("hidden");
@@ -191,6 +192,7 @@ function showSetup(payload) {
   $("setup-header-summary").classList.remove("hidden");
   $("index").classList.remove("hidden");
   $("configure-workspace").classList.add("hidden");
+  $("file-management-button").classList.add("hidden");
   $("workspace-crumb").classList.add("hidden");
   $("setup-title").textContent = "Workspace Setup";
   $("index").textContent = payload.indexed ? "Re-index" : "Index";
@@ -275,7 +277,7 @@ async function applySetup() {
 }
 
 function cancelSetup() {
-  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("setup-header-summary").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","configure-workspace","workspace-crumb","workspace-tabs"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); loadCurrentView(); }
+  if (state.setup?.workspace) { $("setup-view").classList.add("hidden"); $("setup-header-summary").classList.add("hidden"); $("workspace-view").classList.remove("hidden"); ["index","file-management-button","configure-workspace","workspace-crumb","workspace-tabs"].forEach(id=>$(id).classList.remove("hidden")); window.scrollTo(0,state.setupScroll || 0); loadCurrentView(); }
   else { state.setup = null; loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 }
 
