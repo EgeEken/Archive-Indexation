@@ -53,6 +53,7 @@ from ..file_management import (
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
 from .comparison import comparison_data, comparison_preview
+from .raw_development import raw_development_preview
 from .exports import selected_zip
 from .workspaces import (
     _active_job,
@@ -676,6 +677,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison-preview":
             self._send_bytes(200, comparison_preview(workspace, parts[2]), "image/png")
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "raw-development-preview":
+            try:
+                exposure = float(_first(query, "exposure_ev", "0"))
+                output = raw_development_preview(workspace, parts[2], exposure)
+            except (InvalidRequest, ResourceNotFound):
+                raise
+            except (OSError, ValueError, WorkspaceError) as error:
+                raise ResourceNotFound("RAW development is unavailable for this file") from error
+            self._send_bytes(200, output, "image/png")
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison":
             other_id = _first(query, "with_id", "")

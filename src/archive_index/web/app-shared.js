@@ -70,9 +70,10 @@ function showToast(message) {
 }
 
 class SharedImageCamera {
-  constructor({viewport, getImages, maxZoom = MAX_VIEWER_ZOOM, onChange = () => {}}) {
+  constructor({viewport, getImages, getFrames, maxZoom = MAX_VIEWER_ZOOM, onChange = () => {}}) {
     this.viewport = viewport;
     this.getImages = getImages;
+    this.getFrames = getFrames;
     this.maxZoom = maxZoom;
     this.onChange = onChange;
     this.zoom = 1;
@@ -81,39 +82,63 @@ class SharedImageCamera {
     this.dragging = false;
     this.dragStart = null;
     this.panStart = null;
-    viewport.addEventListener("wheel", event => this.wheel(event), {passive: false});
-    viewport.addEventListener("pointerdown", event => this.pointerDown(event));
-    viewport.addEventListener("pointermove", event => this.pointerMove(event));
-    ["pointerup", "pointercancel"].forEach(name => viewport.addEventListener(name, event => this.pointerUp(event)));
+    this.boundWheel = event => this.wheel(event);
+    this.boundPointerDown = event => this.pointerDown(event);
+    this.boundPointerMove = event => this.pointerMove(event);
+    this.boundPointerUp = event => this.pointerUp(event);
+    viewport.addEventListener("wheel", this.boundWheel, {passive: false});
+    viewport.addEventListener("pointerdown", this.boundPointerDown);
+    viewport.addEventListener("pointermove", this.boundPointerMove);
+    ["pointerup", "pointercancel"].forEach(name => viewport.addEventListener(name, this.boundPointerUp));
+  }
+  destroy() {
+    this.viewport.removeEventListener("wheel", this.boundWheel);
+    this.viewport.removeEventListener("pointerdown", this.boundPointerDown);
+    this.viewport.removeEventListener("pointermove", this.boundPointerMove);
+    ["pointerup", "pointercancel"].forEach(name => this.viewport.removeEventListener(name, this.boundPointerUp));
+    this.dragging = false;
+    this.dragStart = null;
+    this.panStart = null;
   }
   reset() { this.zoom = 1; this.panX = 0; this.panY = 0; this.apply(); }
+  frameEntries() {
+    const values = this.getFrames ? this.getFrames() : (this.getImages?.() || []).map(image => ({image, frame: this.viewport}));
+    return (values || []).map(value => {
+      const image = value?.image || value;
+      return {image, frame: value?.frame || this.viewport};
+    }).filter(value => value.image);
+  }
   setImages(images) { this.images = images || []; this.apply(); }
+  frameForEvent(event) {
+    const entries = this.frameEntries();
+    const targetImage = event.target.closest?.("img") || null;
+    const direct = entries.find(entry => entry.image === targetImage);
+    if (direct) return direct;
+    return entries.find(entry => {
+      const rect = entry.frame.getBoundingClientRect();
+      return event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    }) || null;
+  }
   wheel(event) {
-    const image = event.target.closest?.("img") || null;
-    if (!image || !this.viewport.contains(image)) return;
+    const entry = this.frameForEvent(event);
+    if (!entry) return;
     event.preventDefault();
     const oldZoom = this.zoom;
     const next = Math.max(1, Math.min(this.maxZoom, oldZoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2)));
     if (next === oldZoom) return;
-    const rect = this.viewport.getBoundingClientRect();
+    const rect = entry.frame.getBoundingClientRect();
     const pointX = event.clientX - (rect.left + rect.width / 2);
     const pointY = event.clientY - (rect.top + rect.height / 2);
-    if (next > oldZoom) {
-      const contentX = (pointX - this.panX) / oldZoom;
-      const contentY = (pointY - this.panY) / oldZoom;
-      this.panX = pointX - contentX * next;
-      this.panY = pointY - contentY * next;
-    } else {
-      const progress = oldZoom > 1 ? (next - 1) / (oldZoom - 1) : 0;
-      this.panX *= progress;
-      this.panY *= progress;
-      if (next === 1) { this.panX = 0; this.panY = 0; }
-    }
+    const contentX = (pointX - this.panX) / oldZoom;
+    const contentY = (pointY - this.panY) / oldZoom;
+    this.panX = pointX - contentX * next;
+    this.panY = pointY - contentY * next;
+    if (next === 1) { this.panX = 0; this.panY = 0; }
     this.zoom = next;
     this.apply();
   }
   pointerDown(event) {
-    if (event.button !== 0 || this.zoom <= 1 || !event.target.closest?.("img")) return;
+    if (event.button !== 0 || this.zoom <= 1 || event.target.closest?.("[data-wipe-handle]") || !this.frameForEvent(event)) return;
     event.preventDefault();
     this.dragging = true;
     this.dragStart = {x: event.clientX, y: event.clientY};
@@ -136,18 +161,22 @@ class SharedImageCamera {
     this.apply();
   }
   apply() {
-    const images = this.getImages?.() || [];
-    for (const image of images) {
-      if (!image) continue;
-      const rect = this.viewport.getBoundingClientRect();
-      const baseWidth = image.offsetWidth || image.getBoundingClientRect().width / Math.max(this.zoom, 1);
-      const baseHeight = image.offsetHeight || image.getBoundingClientRect().height / Math.max(this.zoom, 1);
-      const maxX = Math.max(0, (baseWidth * this.zoom - rect.width) / 2);
-      const maxY = Math.max(0, (baseHeight * this.zoom - rect.height) / 2);
-      if (maxX === 0) this.panX = 0;
-      if (maxY === 0) this.panY = 0;
-      this.panX = Math.max(-maxX, Math.min(maxX, this.panX));
-      this.panY = Math.max(-maxY, Math.min(maxY, this.panY));
+    const entries = this.frameEntries();
+    let maxX = Infinity;
+    let maxY = Infinity;
+    for (const {image, frame} of entries) {
+      const rect = frame.getBoundingClientRect();
+      const imageRect = image.getBoundingClientRect();
+      const baseWidth = image.offsetWidth || imageRect.width / Math.max(this.zoom, 1);
+      const baseHeight = image.offsetHeight || imageRect.height / Math.max(this.zoom, 1);
+      maxX = Math.min(maxX, Math.max(0, (baseWidth * this.zoom - rect.width) / 2));
+      maxY = Math.min(maxY, Math.max(0, (baseHeight * this.zoom - rect.height) / 2));
+    }
+    maxX = Number.isFinite(maxX) ? maxX : 0;
+    maxY = Number.isFinite(maxY) ? maxY : 0;
+    this.panX = Math.max(-maxX, Math.min(maxX, this.panX));
+    this.panY = Math.max(-maxY, Math.min(maxY, this.panY));
+    for (const {image} of entries) {
       image.style.transform = `translate3d(${this.panX}px, ${this.panY}px, 0) scale(${this.zoom})`;
       image.style.userSelect = "none";
       image.draggable = false;

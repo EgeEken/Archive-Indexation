@@ -4,7 +4,7 @@ function ensureViewerCamera() {
   if (viewerCamera) return viewerCamera;
   viewerCamera = new SharedImageCamera({
     viewport: $("viewer-media-pane"),
-    getImages: () => [$("viewer-media")?.querySelector("img.viewer-media")],
+    getFrames: () => { const image = $("viewer-media")?.querySelector("img.viewer-media"); return image ? [{image, frame: $("viewer-media-pane")}] : []; },
     onChange: change => {
       if (change.zoom != null) state.viewerZoom = change.zoom;
       if (change.panX != null) state.viewerPanX = change.panX;

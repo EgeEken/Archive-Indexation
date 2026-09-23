@@ -26,7 +26,9 @@ function bindRepresentationActions(container, asset) {
   container.querySelectorAll("[data-representation-view]").forEach(button => button.addEventListener("click", () => {
     const file = asset.physical_files?.find(candidate => candidate.id === button.dataset.representationView);
     if (!file) return;
-    if (file.is_preferred && asset._context) {
+    if (isRawRepresentation(file)) {
+      openRawInspection(asset, file.id);
+    } else if (file.is_preferred && asset._context) {
       const context = asset._context;
       const items = context.items?.length ? context.items.map(item => item.display_url || item.original_url ? item : assetToViewerItem(item)) : [assetToViewerItem(asset)];
       const index = Math.max(0, Math.min(Number(context.index) || 0, items.length - 1));
@@ -38,78 +40,212 @@ function bindRepresentationActions(container, asset) {
   }));
 }
 
+const RAW_EXTENSIONS = new Set([".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"]);
+function isRawRepresentation(file) { return RAW_EXTENSIONS.has(file.extension?.toLowerCase()); }
 function compatibleRepresentations(asset, fileId) {
-  return (asset.physical_files || []).filter(file => file.id !== fileId && file.media_type === "image" && file.is_online && ![".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(file.extension));
+  return (asset.physical_files || []).filter(file => file.id !== fileId && file.media_type === "image" && file.is_online && !isRawRepresentation(file));
 }
-
 function defaultComparisonTarget(asset, fileId) {
-  const compatible = compatibleRepresentations(asset, fileId);
-  const conventional = file => [".jpg", ".jpeg", ".png"].includes(file.extension?.toLowerCase());
-  return compatible.find(file => file.is_preferred && conventional(file)) || compatible.find(conventional) || compatible.find(file => file.is_preferred) || compatible[0] || null;
+  return compatibleRepresentations(asset, fileId).find(file => file.is_preferred) || null;
 }
-
 function representationPreviewUrl(fileId) { return apiPath(`/api/files/${encodeURIComponent(fileId)}/comparison-preview`); }
 const displayPreviewUrl = file => file.display_preview_url || file.thumbnail_url || file.original_url;
 const showViewerForRepresentation = (asset, file) => ({...assetToViewerItem(asset), filename: file.filename, preferred_physical_id: file.id, display_url: displayPreviewUrl(file)});
 
+function comparisonMseColor(value) {
+  const stops = [[0, [121, 216, 155]], [50, [226, 199, 85]], [100, [232, 110, 110]]];
+  const mse = Math.max(0, Number(value));
+  const upper = stops.findIndex(stop => mse <= stop[0]);
+  if (upper <= 0) return `rgb(${stops[0][1].join(",")})`;
+  const lower = stops[upper - 1] || stops.at(-1);
+  const high = stops[upper] || stops.at(-1);
+  const ratio = Math.max(0, Math.min(1, (mse - lower[0]) / (high[0] - lower[0] || 1)));
+  const rgb = lower[1].map((channel, index) => Math.round(channel + (high[1][index] - channel) * ratio));
+  return `rgb(${rgb.join(",")})`;
+}
+
+function disposeRepresentationDialog(dialog) {
+  dialog._comparisonCamera?.destroy();
+  dialog._rawCamera?.destroy();
+  dialog._comparisonCamera = null;
+  dialog._rawCamera = null;
+  dialog._comparisonData = null;
+  dialog._comparisonDataKey = null;
+  dialog._comparisonPairKey = null;
+  dialog._rawGeneration = (dialog._rawGeneration || 0) + 1;
+  dialog._rawAbort?.abort();
+  dialog._rawAbort = null;
+}
+
+function ensureRepresentationDialogLifecycle(dialog) {
+  if (dialog._lifecycleBound) return;
+  dialog._lifecycleBound = true;
+  dialog.addEventListener("close", () => disposeRepresentationDialog(dialog));
+}
+
 function openRepresentationInspection(asset, fileId) {
   const file = asset.physical_files?.find(candidate => candidate.id === fileId);
   if (!file) return;
+  if (isRawRepresentation(file)) return openRawInspection(asset, fileId);
   const target = defaultComparisonTarget(asset, fileId);
   const dialog = $("representation-comparison");
+  ensureRepresentationDialogLifecycle(dialog);
+  disposeRepresentationDialog(dialog);
   const relationship = file.relationships?.includes("External JPEG XL representation") ? "External JPEG XL representation · Lineage unknown" : file.representation_label || file.role || "Physical file";
-  dialog.innerHTML = `<div class="dialog-inner representation-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(relationship)}</p></div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div><div class="representation-preview-wrap"><img src="${escapeHtml(representationPreviewUrl(file.id))}" alt="${escapeHtml(file.filename)}"></div><p class="muted representation-file-size">${escapeHtml(formatBytes(file.size_bytes))}</p><div class="representation-inspection-actions"><button class="secondary" type="button" data-representation-open-viewer>Open</button><button class="secondary" type="button" data-representation-details>Details</button></div>${target ? `<div class="comparison-toolbar"><label>Compare with <select data-comparison-target>${compatibleRepresentations(asset, fileId).map(candidate => `<option value="${escapeHtml(candidate.id)}"${candidate.id === target.id ? " selected" : ""}>${escapeHtml(candidate.filename)}</option>`).join("")}</select></label><div class="comparison-mode" role="group" aria-label="Comparison mode"><button class="secondary active" type="button" data-compare-mode="side">Side by side</button><button class="secondary" type="button" data-compare-mode="slider">Slider</button></div></div><div data-comparison-result></div>` : ""}</div>`;
+  const comparisonOnly = !file.is_preferred && Boolean(target);
+  const controls = target ? `<div class="comparison-toolbar"><div class="comparison-mode" role="group" aria-label="Comparison mode"><button class="secondary active" type="button" data-compare-mode="slider">Slider</button><button class="secondary" type="button" data-compare-mode="side">Side by side</button></div></div><div data-comparison-result></div>` : `<p class="muted comparison-unavailable">Preferred representation is unavailable for comparison.</p>`;
+  const standalone = `<div class="representation-preview-wrap"><img src="${escapeHtml(representationPreviewUrl(file.id))}" alt="${escapeHtml(file.filename)}"></div><p class="muted representation-file-size">${escapeHtml(formatBytes(file.size_bytes))}</p><div class="representation-inspection-actions"><button class="secondary" type="button" data-representation-open-viewer>Open</button><button class="secondary" type="button" data-representation-details>Details</button></div>`;
+  dialog.innerHTML = `<div class="dialog-inner representation-inspection${comparisonOnly ? " comparison-only" : ""}"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(relationship)}</p>${comparisonOnly ? `<div class="comparison-header-metrics" data-comparison-metrics>Calculating comparison…</div>` : ""}</div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div>${comparisonOnly ? controls : standalone + (target ? controls : "")}</div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
-  dialog.querySelector("[data-representation-open-viewer]").onclick = () => {
+  const openButton = dialog.querySelector("[data-representation-open-viewer]");
+  if (openButton) openButton.onclick = () => {
     dialog.close();
     const context = asset._context || {mode: "visualization", assetIds: [asset.asset_id], total: 1};
     showViewer(0, [showViewerForRepresentation(asset, file)], {...context, assetIds: [asset.asset_id], total: 1});
   };
-  dialog.querySelector("[data-representation-details]").onclick = () => {
+  const detailsButton = dialog.querySelector("[data-representation-details]");
+  if (detailsButton) detailsButton.onclick = () => {
     dialog.close();
     showDetails(asset.asset_id, {mode: "visualization", items: [asset], index: 0, total: 1});
   };
   dialog.querySelectorAll("[data-compare-mode]").forEach(button => button.addEventListener("click", () => {
     dialog.querySelectorAll("[data-compare-mode]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
-    renderRepresentationComparison(asset, fileId, dialog.querySelector("[data-comparison-target]").value, button.dataset.compareMode);
+    renderRepresentationComparison(asset, fileId, target.id, button.dataset.compareMode);
   }));
+  if (comparisonOnly) renderRepresentationComparison(asset, fileId, target.id, "slider");
 }
 
-async function renderRepresentationComparison(asset, leftId, rightId, mode = "side") {
+function comparisonMetricsMarkup(metrics) {
+  const ratio = metrics.compression_ratio == null ? "Unavailable" : `${metrics.compression_ratio}× smaller`;
+  const percent = metrics.compressed_percent == null ? "Unavailable" : `${metrics.compressed_percent}% of reference`;
+  const mse = metrics.mse == null ? `<span class="comparison-metric-mse">MSE Unavailable</span>` : `<span class="comparison-metric-mse" style="color:${escapeHtml(comparisonMseColor(metrics.mse))}">MSE ${escapeHtml(metrics.mse)}</span>`;
+  return `<span class="comparison-metric-reference">Reference ${escapeHtml(formatBytes(metrics.reference_bytes))} → Compressed ${escapeHtml(formatBytes(metrics.compressed_bytes))}</span><span class="comparison-metric-ratio">${escapeHtml(ratio)}</span><span class="comparison-metric-percent">${escapeHtml(percent)}</span>${mse}`;
+}
+
+function comparisonLabel(file) { return `${escapeHtml(file.filename)} · ${escapeHtml(formatBytes(file.size_bytes))}`; }
+
+async function renderRepresentationComparison(asset, compressedId, referenceId, mode = "slider") {
   const dialog = $("representation-comparison");
   const result = dialog.querySelector("[data-comparison-result]");
   if (!result) return;
-  const previousCamera = dialog._comparisonCamera;
+  const pairKey = `${referenceId}:${compressedId}`;
+  const samePair = dialog._comparisonPairKey === pairKey;
+  const previousCamera = samePair ? dialog._comparisonCamera : null;
   const cameraState = previousCamera ? {zoom: previousCamera.zoom, panX: previousCamera.panX, panY: previousCamera.panY} : null;
+  const requestToken = (dialog._comparisonRequestToken || 0) + 1;
+  dialog._comparisonRequestToken = requestToken;
   try {
-    const data = dialog._comparisonData || await api(`/api/files/${encodeURIComponent(leftId)}/comparison?with_id=${encodeURIComponent(rightId)}`);
+    const dataKey = `${compressedId}:${referenceId}`;
+    const data = dialog._comparisonDataKey === dataKey ? dialog._comparisonData : await api(`/api/files/${encodeURIComponent(compressedId)}/comparison?with_id=${encodeURIComponent(referenceId)}`);
+    if (dialog._comparisonRequestToken !== requestToken) return;
     dialog._comparisonData = data;
+    dialog._comparisonDataKey = dataKey;
+    dialog._comparisonPairKey = pairKey;
     const metrics = data.metrics || {};
     const reference = data.reference || data.left;
     const compressed = data.compressed || data.right;
-    const ratio = metrics.compression_ratio == null ? "Unavailable" : `${metrics.compression_ratio}× smaller`;
-    const percent = metrics.compressed_percent == null ? "Unavailable" : `${metrics.compressed_percent}% of reference`;
-    const metricText = `Reference ${formatBytes(metrics.reference_bytes)} → compressed ${formatBytes(metrics.compressed_bytes)} · ${ratio} · ${percent}`;
-    const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"><div class="comparison-wipe-top" data-wipe-top><img src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button><span class="comparison-wipe-label comparison-wipe-label-left">${escapeHtml(compressed.filename)}</span><span class="comparison-wipe-label comparison-wipe-label-right">${escapeHtml(reference.filename)}</span></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><img src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><img src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
-    result.innerHTML = `${stage}<div class="comparison-metrics"><span>${escapeHtml(metricText)}</span>${metrics.mse == null ? "" : `<span>MSE ${metrics.mse} · PSNR ${metrics.psnr == null ? "Lossless" : `${metrics.psnr} dB`}</span>`}</div>${data.metrics_note ? `<p class="muted">${escapeHtml(data.metrics_note)}</p>` : ""}`;
-    if (!dialog._comparisonCamera || dialog._comparisonCamera.viewport !== result.querySelector("[data-comparison-viewport]")) {
-      dialog._comparisonCamera = new SharedImageCamera({viewport: result.querySelector("[data-comparison-viewport]"), getImages: () => [...result.querySelectorAll("[data-comparison-viewport] img") ]});
-      if (cameraState) Object.assign(dialog._comparisonCamera, cameraState);
-    }
-    dialog._comparisonCamera.setImages([...result.querySelectorAll("[data-comparison-viewport] img")]);
+    const headerMetrics = dialog.querySelector("[data-comparison-metrics]");
+    if (headerMetrics) headerMetrics.innerHTML = comparisonMetricsMarkup(metrics);
+    const referenceLabel = comparisonLabel(reference);
+    const compressedLabel = comparisonLabel(compressed);
+    const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-base"><img class="comparison-compressed" src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
+    dialog._comparisonCamera?.destroy();
+    dialog._comparisonCamera = null;
+    result.innerHTML = stage;
+    const viewport = result.querySelector("[data-comparison-viewport]");
+    const camera = new SharedImageCamera({
+      viewport,
+      getFrames: () => mode === "slider"
+        ? [...result.querySelectorAll("[data-comparison-viewport] img")].map(image => ({image, frame: viewport}))
+        : [...result.querySelectorAll(".comparison-pane")].map(frame => ({image: frame.querySelector("img"), frame})),
+      onChange: change => result.querySelectorAll("img").forEach(image => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }),
+    });
+    dialog._comparisonCamera = camera;
+    if (cameraState) Object.assign(camera, cameraState);
+    camera.setImages([...result.querySelectorAll("img")]);
+    result.querySelectorAll("img").forEach(image => image.addEventListener("load", () => camera.apply(), {once: true}));
     const wipe = result.querySelector("[data-wipe-top]");
     const handle = result.querySelector("[data-wipe-handle]");
     if (wipe && handle) {
-      const setWipe = value => { const position = Math.max(0, Math.min(100, Number(value))); wipe.style.width = `${position}%`; handle.style.left = `${position}%`; handle.setAttribute("aria-valuenow", String(Math.round(position))); };
-      setWipe(50);
+      const setWipe = value => {
+        const position = Math.max(0, Math.min(100, Number(value)));
+        dialog._comparisonWipePosition = position;
+        wipe.style.clipPath = `inset(0 ${100 - position}% 0 0)`;
+        handle.style.left = `${position}%`;
+        handle.setAttribute("aria-valuenow", String(Math.round(position)));
+      };
+      setWipe(samePair && dialog._comparisonWipePosition != null ? dialog._comparisonWipePosition : 50);
       let wiping = false;
       handle.addEventListener("pointerdown", event => { wiping = true; handle.setPointerCapture(event.pointerId); event.preventDefault(); });
-      handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = result.querySelector("[data-comparison-viewport]").getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
+      handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = viewport.getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
       ["pointerup", "pointercancel"].forEach(name => handle.addEventListener(name, () => { wiping = false; }));
       handle.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); setWipe(Number(handle.getAttribute("aria-valuenow")) + (event.key === "ArrowRight" ? 5 : -5)); });
     }
-  } catch (error) { result.innerHTML = `<p class="error">Comparison unavailable: ${escapeHtml(error.message)}</p>`; }
+  } catch (error) {
+    if (dialog._comparisonRequestToken !== requestToken) return;
+    const headerMetrics = dialog.querySelector("[data-comparison-metrics]");
+    if (headerMetrics) headerMetrics.textContent = "Comparison unavailable";
+    result.innerHTML = `<p class="error">Comparison unavailable: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function rawExposureLabel(value) { return `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)} EV`; }
+
+function openRawInspection(asset, fileId) {
+  const file = asset.physical_files?.find(candidate => candidate.id === fileId);
+  if (!file) return;
+  const dialog = $("representation-comparison");
+  ensureRepresentationDialogLifecycle(dialog);
+  disposeRepresentationDialog(dialog);
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p><p class="muted raw-loading hidden" data-raw-loading>Loading preview…</p></div><label class="raw-exposure-control">Exposure <output data-raw-exposure-label>+0.00 EV</output><input data-raw-exposure type="range" min="-2" max="3" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
+  dialog.showModal();
+  dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
+  const stage = dialog.querySelector("[data-raw-stage]");
+  const image = dialog.querySelector("[data-raw-image]");
+  const loading = dialog.querySelector("[data-raw-loading]");
+  const errorNode = dialog.querySelector("[data-raw-error]");
+  const label = dialog.querySelector("[data-raw-exposure-label]");
+  const input = dialog.querySelector("[data-raw-exposure]");
+  const camera = new SharedImageCamera({viewport: stage, getFrames: () => [{image, frame: stage}], onChange: change => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }});
+  dialog._rawCamera = camera;
+  camera.setImages([image]);
+  let timer = null;
+  const load = async exposure => {
+    const generation = (dialog._rawGeneration || 0) + 1;
+    dialog._rawGeneration = generation;
+    dialog._rawAbort?.abort();
+    const controller = new AbortController();
+    dialog._rawAbort = controller;
+    loading.classList.remove("hidden");
+    errorNode.classList.add("hidden");
+    try {
+      const response = await fetch(apiPath(`/api/files/${encodeURIComponent(file.id)}/raw-development-preview?exposure_ev=${encodeURIComponent(exposure)}`), {signal: controller.signal});
+      if (!response.ok) throw new Error("RAW development is unavailable for this file.");
+      const blob = await response.blob();
+      if (generation !== dialog._rawGeneration || controller.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      const previous = image.dataset.objectUrl;
+      image.dataset.objectUrl = url;
+      image.onload = () => { camera.apply(); if (previous) URL.revokeObjectURL(previous); };
+      image.src = url;
+      image.classList.remove("hidden");
+    } catch (error) {
+      if (error.name === "AbortError" || generation !== dialog._rawGeneration) return;
+      image.removeAttribute("src");
+      image.classList.add("hidden");
+      errorNode.textContent = error.message || "RAW development is unavailable for this file.";
+      errorNode.classList.remove("hidden");
+    } finally {
+      if (generation === dialog._rawGeneration) loading.classList.add("hidden");
+    }
+  };
+  input.addEventListener("input", () => {
+    label.textContent = rawExposureLabel(input.value);
+    clearTimeout(timer);
+    timer = setTimeout(() => load(Number(input.value)), 150);
+  });
+  load(0);
 }
 
 function renderDetails(asset, options = {}) {
