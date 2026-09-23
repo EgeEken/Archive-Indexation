@@ -110,6 +110,30 @@ class RawDevelopmentTests(unittest.TestCase):
             self.assertEqual(round(_FakeRaw.calls[1]["exp_shift"], 3), 8)
             self.assertEqual(round(_FakeRaw.calls[1]["bright"], 3), 4)
 
+    def test_extended_exposure_mapping_is_monotonic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "camera.arw"
+            source.write_bytes(b"raw source")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                physical_id = connection.execute("SELECT id FROM physical_file WHERE extension = '.arw'").fetchone()[0]
+            finally:
+                connection.close()
+            fake_rawpy = SimpleNamespace(
+                ColorSpace=SimpleNamespace(sRGB="sRGB"),
+                imread=lambda _: _FakeRaw(),
+            )
+            _FakeRaw.calls = []
+            exposures = [-5, -3, -2, 0, 3, 5]
+            with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
+                for exposure in exposures:
+                    raw_development_preview(workspace, physical_id, exposure)
+            effective_shifts = [call["exp_shift"] * call["bright"] for call in _FakeRaw.calls]
+            self.assertEqual(effective_shifts, sorted(effective_shifts))
+
     def test_offline_raw_is_rejected_before_decode_and_cache_is_keyed_by_ev(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
