@@ -13,17 +13,23 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from threading import Event
 
+from PIL import Image
+
 from ..jobs.engine import JobProgress, JobRunResult, JobStore
+from ..media.image_decode import load_reduced_image
 from ..media_types import is_raw_extension, is_rendered_image_extension
 from ..workspace import Workspace
 
-RECONCILIATION_ALGORITHM = "exact-sha-and-conservative-raw-jpeg"
-RECONCILIATION_VERSION = "3"
+RECONCILIATION_ALGORITHM = "exact-sha-and-conservative-rendered-peer"
+RECONCILIATION_VERSION = "4"
 RAW_JPEG_ALGORITHM = "same-stem-with-corroboration"
 RAW_JPEG_VERSION = "1"
 EXACT_DUPLICATE_ALGORITHM = "sha256-bytes"
 EXACT_DUPLICATE_VERSION = "1"
 RAW_JPEG_TIME_TOLERANCE_SECONDS = 5.0
+RENDERED_PEER_RMSE_MAX = 0.08
+RENDERED_PEER_DHASH_MAX = 10
+RENDERED_PEER_HISTOGRAM_MAX = 0.12
 RECONCILIATION_SETTINGS = {
     "exact_duplicate": "sha256_bytes",
     "raw_jpeg": {
@@ -32,6 +38,16 @@ RECONCILIATION_SETTINGS = {
         "mixed_local_absolute_time": "allowed only with matching camera evidence and matching wall-clock time",
         "unique_fallback": True,
         "preview_hash": False,
+    },
+    "external_rendered_peer": {
+        "candidate": "casefolded_filename_stem+jxl_vs_non_raw_rendered",
+        "dimensions": "must_match_when_both_available",
+        "capture_time_tolerance_seconds": RAW_JPEG_TIME_TOLERANCE_SECONDS,
+        "rmse_max_normalized": RENDERED_PEER_RMSE_MAX,
+        "dhash_max_bits": RENDERED_PEER_DHASH_MAX,
+        "histogram_l1_max": RENDERED_PEER_HISTOGRAM_MAX,
+        "ambiguity": "only_one_qualifying_asset_pair",
+        "lineage": "unknown",
     },
     "survivor": "explicit_decision_then_created_at_then_id",
 }
@@ -116,11 +132,35 @@ def reconcile_workspace(
             paired_assets.append((left, right, evidence, raw_files, rendered_files))
 
         canonical = _canonical_map(union_find, assets, blocked_assets)
+        rendered_pairs, rendered_ambiguities = _rendered_jxl_candidates(workspace, assets, physical, canonical)
+        conflicts.extend(rendered_ambiguities)
+        external_pairs: list[tuple[str, str, dict[str, object], list[str], list[str]]] = []
+        for jxl_id, rendered_id, evidence, jxl_files, rendered_files in rendered_pairs:
+            processed += 1
+            left = canonical.get(jxl_id, jxl_id)
+            right = canonical.get(rendered_id, rendered_id)
+            if left == right:
+                external_pairs.append((left, right, evidence, jxl_files, rendered_files))
+                continue
+            if left in blocked_assets or right in blocked_assets:
+                continue
+            if _decision_conflict((left, right), assets):
+                conflicts.append((left, right, "manual_decision_conflict", evidence))
+                continue
+            union_find.union(left, right)
+            external_pairs.append((left, right, evidence, jxl_files, rendered_files))
+
+        canonical = _canonical_map(union_find, assets, blocked_assets)
         for left, right, evidence, raw_files, rendered_files in paired_assets:
             if canonical.get(left, left) != canonical.get(right, right):
                 continue
             for raw_file, rendered_file in itertools.product(raw_files, rendered_files):
                 relationships.append((raw_file, rendered_file, "raw_jpeg", RAW_JPEG_ALGORITHM, RAW_JPEG_VERSION, evidence))
+        for left, right, evidence, jxl_files, rendered_files in external_pairs:
+            if canonical.get(left, left) != canonical.get(right, right):
+                continue
+            for jxl_file, rendered_file in itertools.product(jxl_files, rendered_files):
+                relationships.append((jxl_file, rendered_file, "external_rendered_peer", "same-stem-visual-identity", "1", evidence))
 
         merges = {asset_id: survivor for asset_id, survivor in canonical.items() if asset_id != survivor}
         roles = _roles(physical, relationships)
@@ -254,7 +294,7 @@ def _raw_jpeg_candidates(assets, physical, canonical):
         stem = row["filename"].rsplit(".", 1)[0].casefold()
         if is_raw_extension(row["extension"]):
             groups[stem]["raw"].add(asset_id)
-        elif is_rendered_image_extension(row["extension"]):
+        elif is_rendered_image_extension(row["extension"]) and row["extension"].casefold() != ".jxl":
             groups[stem]["rendered"].add(asset_id)
     candidates = []
     ambiguities = []
@@ -287,6 +327,139 @@ def _raw_jpeg_candidates(assets, physical, canonical):
         if evidence is not None:
             candidates.append((raw_id, rendered_id, evidence, [row["id"] for row in files_by_asset[raw_id] if is_raw_extension(row["extension"])], [row["id"] for row in files_by_asset[rendered_id] if is_rendered_image_extension(row["extension"])]))
     return candidates, ambiguities
+
+
+def _rendered_jxl_candidates(workspace, assets, physical, canonical):
+    asset_map = {row["id"]: row for row in assets}
+    files_by_asset: dict[str, list] = defaultdict(list)
+    groups: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"jxl": set(), "rendered": set()})
+    for row in physical:
+        if row["media_type"] != "image":
+            continue
+        asset_id = canonical.get(row["logical_asset_id"], row["logical_asset_id"])
+        files_by_asset[asset_id].append(row)
+        stem = row["filename"].rsplit(".", 1)[0].casefold()
+        if row["extension"].casefold() == ".jxl":
+            groups[stem]["jxl"].add(asset_id)
+        elif is_rendered_image_extension(row["extension"]) and not is_raw_extension(row["extension"]):
+            groups[stem]["rendered"].add(asset_id)
+    candidates = []
+    conflicts = []
+    for stem, family in sorted(groups.items()):
+        jxl_ids = sorted(family["jxl"])
+        rendered_ids = sorted(family["rendered"])
+        qualifying = []
+        for jxl_id in jxl_ids:
+            for rendered_id in rendered_ids:
+                if jxl_id == rendered_id:
+                    continue
+                evidence = _rendered_jxl_evidence(
+                    workspace,
+                    asset_map[jxl_id],
+                    asset_map[rendered_id],
+                    files_by_asset[jxl_id],
+                    files_by_asset[rendered_id],
+                )
+                if evidence is not None:
+                    qualifying.append((jxl_id, rendered_id, evidence))
+        if len(qualifying) == 1:
+            jxl_id, rendered_id, evidence = qualifying[0]
+            candidates.append(
+                (
+                    jxl_id,
+                    rendered_id,
+                    evidence,
+                    [row["id"] for row in files_by_asset[jxl_id] if row["extension"].casefold() == ".jxl"],
+                    [row["id"] for row in files_by_asset[rendered_id] if is_rendered_image_extension(row["extension"]) and not is_raw_extension(row["extension"]) and row["extension"].casefold() != ".jxl"],
+                )
+            )
+        elif len(qualifying) > 1:
+            conflicts.append(
+                (
+                    qualifying[0][0],
+                    qualifying[0][1],
+                    "ambiguous_external_rendered_peer",
+                    {"stem": stem, "qualifying_pairs": [{"jxl_asset_id": left, "rendered_asset_id": right, **evidence} for left, right, evidence in qualifying]},
+                )
+            )
+    return candidates, conflicts
+
+
+def _rendered_jxl_evidence(workspace, jxl_asset, rendered_asset, jxl_files, rendered_files):
+    jxl_time = _capture_value(jxl_asset["capture_time"], jxl_asset["capture_time_kind"])
+    rendered_time = _capture_value(rendered_asset["capture_time"], rendered_asset["capture_time_kind"])
+    if jxl_time is not None and rendered_time is not None:
+        if jxl_time[1] != rendered_time[1]:
+            if _wall_clock_delta(jxl_asset["capture_time"], rendered_asset["capture_time"]) > RAW_JPEG_TIME_TOLERANCE_SECONDS:
+                return None
+        elif abs(jxl_time[0] - rendered_time[0]) > RAW_JPEG_TIME_TOLERANCE_SECONDS:
+            return None
+    jxl_camera = _camera_identity(jxl_files)
+    rendered_camera = _camera_identity(rendered_files)
+    if jxl_camera and rendered_camera and jxl_camera != rendered_camera:
+        return None
+    best = None
+    for jxl_file in jxl_files:
+        for rendered_file in rendered_files:
+            if rendered_file["extension"].casefold() == ".jxl" or is_raw_extension(rendered_file["extension"]):
+                continue
+            if jxl_file["width"] and jxl_file["height"] and rendered_file["width"] and rendered_file["height"]:
+                if (jxl_file["width"], jxl_file["height"]) != (rendered_file["width"], rendered_file["height"]):
+                    continue
+            try:
+                metrics = _visual_identity_metrics(
+                    workspace.absolute_path(jxl_file["relative_path"]),
+                    workspace.absolute_path(rendered_file["relative_path"]),
+                )
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if (
+                metrics["rmse"] <= RENDERED_PEER_RMSE_MAX
+                and metrics["dhash_distance"] <= RENDERED_PEER_DHASH_MAX
+                and metrics["histogram_distance"] <= RENDERED_PEER_HISTOGRAM_MAX
+                and (best is None or metrics["rmse"] < best["rmse"])
+            ):
+                best = metrics
+    if best is None:
+        return None
+    return {
+        "rule": "same_stem+dimensions+visual_identity",
+        "capture_time": "compatible_or_missing",
+        "lineage": "unknown",
+        **best,
+    }
+
+
+def _visual_identity_metrics(left_path, right_path):
+    left = load_reduced_image(left_path, (32, 32))
+    right = load_reduced_image(right_path, (32, 32))
+    try:
+        left_pixels = list(left.convert("RGB").getdata())
+        right_pixels = list(right.convert("RGB").getdata())
+        count = max(1, len(left_pixels))
+        rmse = (
+            sum((a[channel] - b[channel]) ** 2 for a, b in zip(left_pixels, right_pixels) for channel in range(3))
+            / (count * 3 * 255 * 255)
+        ) ** 0.5
+        left_gray = left.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+        right_gray = right.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+        left_hash = [left_gray.getpixel((x, y)) >= left_gray.getpixel((x + 1, y)) for y in range(8) for x in range(8)]
+        right_hash = [right_gray.getpixel((x, y)) >= right_gray.getpixel((x + 1, y)) for y in range(8) for x in range(8)]
+        dhash_distance = sum(a != b for a, b in zip(left_hash, right_hash))
+        histogram_distance = 0.0
+        for channel in range(3):
+            left_hist = [0] * 16
+            right_hist = [0] * 16
+            for pixel in left_pixels:
+                left_hist[pixel[channel] // 16] += 1
+            for pixel in right_pixels:
+                right_hist[pixel[channel] // 16] += 1
+            histogram_distance += sum(abs(a - b) for a, b in zip(left_hist, right_hist)) / (count * 2)
+        histogram_distance /= 3
+        return {"rmse": rmse, "dhash_distance": dhash_distance, "histogram_distance": histogram_distance}
+    finally:
+        left.close()
+        right.close()
 
 
 def _pair_evidence(raw_asset, rendered_asset, files_by_asset):

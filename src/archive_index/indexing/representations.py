@@ -35,6 +35,7 @@ def preferred_physical(rows: Iterable, *, component: str | None = None):
             not complete if component else False,
             not rendered,
             row_value(row, "role", "") != "camera_jpeg",
+            row_value(row, "extension", "").casefold() == ".jxl" and not str(row_value(row, "role", "")).casefold().startswith(("managed", "derived")),
             row_value(row, "relative_path", "").casefold(),
             row_value(row, "relative_path", ""),
             row_value(row, "id", ""),

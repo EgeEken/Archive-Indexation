@@ -309,7 +309,11 @@ def current_relationships(workspace: Workspace, physical_ids: list[str]) -> dict
         connection.close()
     relationships: dict[str, list[str]] = {}
     for row in rows:
-        label = "Exact duplicate" if row["relationship_type"] == "exact_duplicate" else "RAW/JPEG pair"
+        label = {
+            "exact_duplicate": "Exact duplicate",
+            "raw_jpeg": "RAW/JPEG pair",
+            "external_rendered_peer": "External JPEG XL representation",
+        }.get(row["relationship_type"], "Representation relationship")
         relationships.setdefault(row["source_physical_file_id"], []).append(label)
         relationships.setdefault(row["target_physical_file_id"], []).append(label)
     return {file_id: sorted(set(values)) for file_id, values in relationships.items()}
