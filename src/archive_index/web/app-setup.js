@@ -57,6 +57,7 @@ function filenameMarkup(filename) {
   const extension = match[2].toLowerCase();
   const kind = supportedVideoExtensions.includes(extension) ? "video-extension" :
     [".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"].includes(extension) ? "raw-extension" :
+    [".jxl", ".avif", ".webp"].includes(extension) ? "compressed-extension" :
     supportedImageExtensions.includes(extension) ? "image-extension" : "";
   return `${escapeHtml(match[1])}<span class="${kind}">${escapeHtml(match[2])}</span>`;
 }
@@ -283,9 +284,15 @@ function cancelSetup() {
 
 function formatBytes(value) {
   if (value == null) return "Unavailable";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(2)} MB`;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "Unavailable";
+  if (Math.abs(numeric) < 1000) return `${Math.round(numeric)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let amount = Math.abs(numeric);
+  let unit = -1;
+  while (amount >= 1000 && unit < units.length - 1) { amount /= 1000; unit += 1; }
+  const precision = amount >= 100 ? 1 : 2;
+  return `${numeric < 0 ? "-" : ""}${amount.toFixed(precision).replace(/\.0+$|(?<=\.[0-9])0+$/, "")} ${units[unit]}`;
 }
 
 async function confirmWorkspaceRemoval(id) {

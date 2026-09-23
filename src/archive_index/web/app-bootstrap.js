@@ -27,44 +27,6 @@ $("viewer-info").addEventListener("click", () => toggleViewerInfo());
 $("viewer-grouping").addEventListener("click", locateCurrentGroup);
 $("viewer-smooth").addEventListener("change", (event) => { state.viewerSmooth = event.target.checked; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
 $("viewer-stage").addEventListener("click", (event) => { if (state.viewerClickSuppressed) { state.viewerClickSuppressed = false; return; } if (event.target.closest("video") || $("viewer-media").querySelector("video")) return; if (["viewer-stage", "viewer-media-pane", "viewer-media"].includes(event.target.id)) closeDialog($("viewer")); });
-$("viewer-media-pane").addEventListener("wheel", (event) => {
-  const media = $("viewer-media").querySelector("img.viewer-media");
-  if (!media) return;
-  if (event.deltaY < 0 && !event.target.closest("img.viewer-media")) return;
-  event.preventDefault();
-  const rect = $("viewer-media-pane").getBoundingClientRect();
-  const pointX = event.clientX - (rect.left + rect.width / 2);
-  const pointY = event.clientY - (rect.top + rect.height / 2);
-  const next = Math.max(1, Math.min(MAX_VIEWER_ZOOM, state.viewerZoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2)));
-  if (next === state.viewerZoom) return;
-  if (event.deltaY < 0) {
-    const contentX = (pointX - state.viewerPanX) / state.viewerZoom;
-    const contentY = (pointY - state.viewerPanY) / state.viewerZoom;
-    state.viewerZoom = next;
-    state.viewerPanX = pointX - contentX * next;
-    state.viewerPanY = pointY - contentY * next;
-  } else {
-    const progress = state.viewerZoom > 1 ? (next - 1) / (state.viewerZoom - 1) : 0;
-    state.viewerZoom = next;
-    state.viewerPanX *= progress;
-    state.viewerPanY *= progress;
-    if (next === 1) { state.viewerPanX = 0; state.viewerPanY = 0; }
-  }
-  applyViewerTransform(media);
-}, { passive: false });
-$("viewer-media-pane").addEventListener("pointerdown", (event) => {
-  const media = $("viewer-media").querySelector("img.viewer-media");
-  if (!media || state.viewerZoom <= 1 || event.button !== 0 || !event.target.closest("img.viewer-media")) return;
-  state.dragging = true;
-  state.dragStartX = event.clientX;
-  state.dragStartY = event.clientY;
-  state.dragPanX = state.viewerPanX;
-  state.dragPanY = state.viewerPanY;
-  event.currentTarget.setPointerCapture(event.pointerId);
-  applyViewerTransform(media);
-});
-$("viewer-media-pane").addEventListener("pointermove", (event) => { if (!state.dragging) return; state.viewerPanX = state.dragPanX + event.clientX - state.dragStartX; state.viewerPanY = state.dragPanY + event.clientY - state.dragStartY; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
-["pointerup", "pointercancel"].forEach((eventName) => $("viewer-media-pane").addEventListener(eventName, (event) => { if (!state.dragging) return; state.dragging = false; state.viewerClickSuppressed = true; setTimeout(() => { state.viewerClickSuppressed = false; }, 0); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); }));
 ["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
 ["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => bindBackdropClose($(id)));
 window.addEventListener("resize", () => applyViewerTransform($("viewer-media").querySelector("img.viewer-media")));

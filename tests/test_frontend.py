@@ -579,13 +579,13 @@ class CorrectionFrontendTests(unittest.TestCase):
         management = (root / "app-file-management.js").read_text(encoding="utf-8")
         self.assertIn('id="representation-comparison"', html)
         self.assertIn('id="file-management-dialog"', html)
-        self.assertIn('id="file-management-preset-form"', html)
+        self.assertIn('id="file-management-status"', html)
         self.assertIn('app-file-management.js', html)
-        for marker in ("data-representation-open", "data-representation-compare", "display_preview_url", "showViewer"):
+        for marker in ("data-representation-view", "comparison-preview", "display_preview_url", "showViewer", "SharedImageCamera"):
             self.assertIn(marker, details)
         for marker in ("/api/file-management/profiles", "/api/file-management/rulesets", "/api/file-management/presets", "/api/file-management/plan"):
             self.assertIn(marker, management)
-        self.assertIn("Phase 10A does not change source files", html)
+        self.assertNotIn("Phase 10A does not change source files", html)
         self.assertNotIn("unlink", management)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")

@@ -250,7 +250,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"selection-button select", js)
         self.assertNotIn(b">Clear<", js)
         self.assertIn(b"viewer-smooth", html)
-        self.assertIn(b"const progress = state.viewerZoom > 1", js)
+        self.assertIn(b"const progress = oldZoom > 1", js)
         self.assertIn(b'"viewer-media-pane"', js)
         self.assertIn(b"setPointerCapture", js)
         self.assertIn(b"qualityColor", js)

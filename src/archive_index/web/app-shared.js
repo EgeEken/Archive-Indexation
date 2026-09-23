@@ -68,6 +68,94 @@ function showToast(message) {
   toast.append(text, close);
   region.appendChild(toast);
 }
+
+class SharedImageCamera {
+  constructor({viewport, getImages, maxZoom = MAX_VIEWER_ZOOM, onChange = () => {}}) {
+    this.viewport = viewport;
+    this.getImages = getImages;
+    this.maxZoom = maxZoom;
+    this.onChange = onChange;
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.dragging = false;
+    this.dragStart = null;
+    this.panStart = null;
+    viewport.addEventListener("wheel", event => this.wheel(event), {passive: false});
+    viewport.addEventListener("pointerdown", event => this.pointerDown(event));
+    viewport.addEventListener("pointermove", event => this.pointerMove(event));
+    ["pointerup", "pointercancel"].forEach(name => viewport.addEventListener(name, event => this.pointerUp(event)));
+  }
+  reset() { this.zoom = 1; this.panX = 0; this.panY = 0; this.apply(); }
+  setImages(images) { this.images = images || []; this.apply(); }
+  wheel(event) {
+    const image = event.target.closest?.("img") || null;
+    if (!image || !this.viewport.contains(image)) return;
+    event.preventDefault();
+    const oldZoom = this.zoom;
+    const next = Math.max(1, Math.min(this.maxZoom, oldZoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2)));
+    if (next === oldZoom) return;
+    const rect = this.viewport.getBoundingClientRect();
+    const pointX = event.clientX - (rect.left + rect.width / 2);
+    const pointY = event.clientY - (rect.top + rect.height / 2);
+    if (next > oldZoom) {
+      const contentX = (pointX - this.panX) / oldZoom;
+      const contentY = (pointY - this.panY) / oldZoom;
+      this.panX = pointX - contentX * next;
+      this.panY = pointY - contentY * next;
+    } else {
+      const progress = oldZoom > 1 ? (next - 1) / (oldZoom - 1) : 0;
+      this.panX *= progress;
+      this.panY *= progress;
+      if (next === 1) { this.panX = 0; this.panY = 0; }
+    }
+    this.zoom = next;
+    this.apply();
+  }
+  pointerDown(event) {
+    if (event.button !== 0 || this.zoom <= 1 || !event.target.closest?.("img")) return;
+    event.preventDefault();
+    this.dragging = true;
+    this.dragStart = {x: event.clientX, y: event.clientY};
+    this.panStart = {x: this.panX, y: this.panY};
+    this.viewport.setPointerCapture(event.pointerId);
+    this.apply();
+  }
+  pointerMove(event) {
+    if (!this.dragging) return;
+    event.preventDefault();
+    this.panX = this.panStart.x + event.clientX - this.dragStart.x;
+    this.panY = this.panStart.y + event.clientY - this.dragStart.y;
+    this.apply();
+  }
+  pointerUp(event) {
+    if (!this.dragging) return;
+    this.dragging = false;
+    this.onChange({clickSuppressed: true});
+    if (this.viewport.hasPointerCapture?.(event.pointerId)) this.viewport.releasePointerCapture(event.pointerId);
+    this.apply();
+  }
+  apply() {
+    const images = this.getImages?.() || [];
+    for (const image of images) {
+      if (!image) continue;
+      const rect = this.viewport.getBoundingClientRect();
+      const baseWidth = image.offsetWidth || image.getBoundingClientRect().width / Math.max(this.zoom, 1);
+      const baseHeight = image.offsetHeight || image.getBoundingClientRect().height / Math.max(this.zoom, 1);
+      const maxX = Math.max(0, (baseWidth * this.zoom - rect.width) / 2);
+      const maxY = Math.max(0, (baseHeight * this.zoom - rect.height) / 2);
+      if (maxX === 0) this.panX = 0;
+      if (maxY === 0) this.panY = 0;
+      this.panX = Math.max(-maxX, Math.min(maxX, this.panX));
+      this.panY = Math.max(-maxY, Math.min(maxY, this.panY));
+      image.style.transform = `translate3d(${this.panX}px, ${this.panY}px, 0) scale(${this.zoom})`;
+      image.style.userSelect = "none";
+      image.draggable = false;
+    }
+    this.onChange({zoom: this.zoom, panX: this.panX, panY: this.panY, dragging: this.dragging});
+  }
+}
+globalThis.SharedImageCamera = SharedImageCamera;
 const labels = { offline: "Offline", unsupported: "Unsupported", failed: "Processing failed", processing: "Processing" };
 const reviewFilters = ["all", "representatives", "recommended", "selected", "rejected", "undecided"];
 const supportedImageExtensions = [".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg", ".jpg", ".jxl", ".nef", ".png", ".raf", ".rw2", ".webp"];

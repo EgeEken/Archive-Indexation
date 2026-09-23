@@ -25,8 +25,9 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertIn('"available": False', self.file_management_backend)
 
     def test_representation_eye_and_actual_comparison_controls_exist(self):
-        for marker in ("data-representation-view", "View representation", "comparison-preview", "Side by side", "Slider", "PSNR", "bindComparisonTransform"):
+        for marker in ("data-representation-view", "View representation", "comparison-preview", "Side by side", "Slider", "PSNR", "SharedImageCamera"):
             self.assertIn(marker, self.details + (self.root.parent / "api" / "comparison.py").read_text(encoding="utf-8"))
+        self.assertNotIn("bindComparisonTransform", self.details)
 
 
 if __name__ == "__main__":

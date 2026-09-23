@@ -23,7 +23,19 @@ function assetToViewerItem(asset) {
 }
 
 function bindRepresentationActions(container, asset) {
-  container.querySelectorAll("[data-representation-view]").forEach(button => button.addEventListener("click", () => openRepresentationInspection(asset, button.dataset.representationView)));
+  container.querySelectorAll("[data-representation-view]").forEach(button => button.addEventListener("click", () => {
+    const file = asset.physical_files?.find(candidate => candidate.id === button.dataset.representationView);
+    if (!file) return;
+    if (file.is_preferred && asset._context) {
+      const context = asset._context;
+      const items = context.items?.length ? context.items.map(item => item.display_url || item.original_url ? item : assetToViewerItem(item)) : [assetToViewerItem(asset)];
+      const index = Math.max(0, Math.min(Number(context.index) || 0, items.length - 1));
+      $("details").close();
+      showViewer(index, items, context);
+    } else {
+      openRepresentationInspection(asset, file.id);
+    }
+  }));
 }
 
 function compatibleRepresentations(asset, fileId) {
@@ -32,7 +44,8 @@ function compatibleRepresentations(asset, fileId) {
 
 function defaultComparisonTarget(asset, fileId) {
   const compatible = compatibleRepresentations(asset, fileId);
-  return compatible.find(file => file.is_preferred) || compatible[0] || null;
+  const conventional = file => [".jpg", ".jpeg", ".png"].includes(file.extension?.toLowerCase());
+  return compatible.find(file => file.is_preferred && conventional(file)) || compatible.find(conventional) || compatible.find(file => file.is_preferred) || compatible[0] || null;
 }
 
 function representationPreviewUrl(fileId) { return apiPath(`/api/files/${encodeURIComponent(fileId)}/comparison-preview`); }
@@ -45,49 +58,58 @@ function openRepresentationInspection(asset, fileId) {
   const target = defaultComparisonTarget(asset, fileId);
   const dialog = $("representation-comparison");
   const relationship = file.relationships?.includes("External JPEG XL representation") ? "External JPEG XL representation · Lineage unknown" : file.representation_label || file.role || "Physical file";
-  dialog.innerHTML = `<div class="dialog-inner representation-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(relationship)}</p></div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div><div class="representation-preview-wrap"><img src="${escapeHtml(representationPreviewUrl(file.id))}" alt="${escapeHtml(file.filename)}"></div><dl class="kv"><dt>Format</dt><dd>${escapeHtml(file.extension?.replace(".", "").toUpperCase() || "Unavailable")}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(file.size_bytes))}</dd><dt>Dimensions</dt><dd>${file.width && file.height ? `${file.width} × ${file.height}` : "Unavailable"}</dd><dt>Role</dt><dd>${escapeHtml(relationship)}</dd></dl><div class="representation-inspection-actions"><button class="secondary" type="button" data-representation-open-viewer>Open</button><button class="secondary" type="button" data-representation-details>Details</button></div>${target ? `<div class="comparison-toolbar"><label>Compare with <select data-comparison-target>${compatibleRepresentations(asset, fileId).map(candidate => `<option value="${escapeHtml(candidate.id)}"${candidate.id === target.id ? " selected" : ""}>${escapeHtml(candidate.filename)}</option>`).join("")}</select></label><button class="secondary" type="button" data-compare-mode="side">Side by side</button><button class="secondary" type="button" data-compare-mode="slider">Slider</button></div><div data-comparison-result></div>` : ""}</div>`;
+  dialog.innerHTML = `<div class="dialog-inner representation-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(relationship)}</p></div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div><div class="representation-preview-wrap"><img src="${escapeHtml(representationPreviewUrl(file.id))}" alt="${escapeHtml(file.filename)}"></div><p class="muted representation-file-size">${escapeHtml(formatBytes(file.size_bytes))}</p><div class="representation-inspection-actions"><button class="secondary" type="button" data-representation-open-viewer>Open</button><button class="secondary" type="button" data-representation-details>Details</button></div>${target ? `<div class="comparison-toolbar"><label>Compare with <select data-comparison-target>${compatibleRepresentations(asset, fileId).map(candidate => `<option value="${escapeHtml(candidate.id)}"${candidate.id === target.id ? " selected" : ""}>${escapeHtml(candidate.filename)}</option>`).join("")}</select></label><div class="comparison-mode" role="group" aria-label="Comparison mode"><button class="secondary active" type="button" data-compare-mode="side">Side by side</button><button class="secondary" type="button" data-compare-mode="slider">Slider</button></div></div><div data-comparison-result></div>` : ""}</div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   dialog.querySelector("[data-representation-open-viewer]").onclick = () => {
     dialog.close();
-    showViewer(0, [showViewerForRepresentation(asset, file)], {mode: "visualization", assetIds: [asset.asset_id], total: 1});
+    const context = asset._context || {mode: "visualization", assetIds: [asset.asset_id], total: 1};
+    showViewer(0, [showViewerForRepresentation(asset, file)], {...context, assetIds: [asset.asset_id], total: 1});
   };
   dialog.querySelector("[data-representation-details]").onclick = () => {
     dialog.close();
     showDetails(asset.asset_id, {mode: "visualization", items: [asset], index: 0, total: 1});
   };
-  dialog.querySelectorAll("[data-compare-mode]").forEach(button => button.addEventListener("click", () => renderRepresentationComparison(asset, fileId, dialog.querySelector("[data-comparison-target]").value, button.dataset.compareMode)));
+  dialog.querySelectorAll("[data-compare-mode]").forEach(button => button.addEventListener("click", () => {
+    dialog.querySelectorAll("[data-compare-mode]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
+    renderRepresentationComparison(asset, fileId, dialog.querySelector("[data-comparison-target]").value, button.dataset.compareMode);
+  }));
 }
 
 async function renderRepresentationComparison(asset, leftId, rightId, mode = "side") {
   const dialog = $("representation-comparison");
   const result = dialog.querySelector("[data-comparison-result]");
   if (!result) return;
-  result.innerHTML = `<p class="muted">Calculating comparison…</p>`;
+  const previousCamera = dialog._comparisonCamera;
+  const cameraState = previousCamera ? {zoom: previousCamera.zoom, panX: previousCamera.panX, panY: previousCamera.panY} : null;
   try {
-    const data = await api(`/api/files/${encodeURIComponent(leftId)}/comparison?with_id=${encodeURIComponent(rightId)}`);
+    const data = dialog._comparisonData || await api(`/api/files/${encodeURIComponent(leftId)}/comparison?with_id=${encodeURIComponent(rightId)}`);
+    dialog._comparisonData = data;
     const metrics = data.metrics || {};
-    const metricText = `${formatBytes(metrics.source_bytes)} → ${formatBytes(metrics.comparison_bytes)}${metrics.compression_ratio ? ` · ${metrics.compression_ratio}× smaller` : ""}${metrics.mse == null ? "" : ` · MSE ${metrics.mse} · PSNR ${metrics.psnr} dB`}`;
-    const stage = mode === "slider" ? `<div class="comparison-slider"><img src="${escapeHtml(data.right.preview_url)}" alt="${escapeHtml(data.right.filename)}"><img class="comparison-slider-top" data-slider-image src="${escapeHtml(data.left.preview_url)}" alt="${escapeHtml(data.left.filename)}"><input type="range" min="0" max="100" value="50" aria-label="Comparison wipe position"></div>` : `<div class="comparison-stage"><div class="comparison-pane"><img src="${escapeHtml(data.left.preview_url)}" alt="${escapeHtml(data.left.filename)}"></div><div class="comparison-pane"><img src="${escapeHtml(data.right.preview_url)}" alt="${escapeHtml(data.right.filename)}"></div></div>`;
-    result.innerHTML = `${stage}<div class="muted comparison-labels">${escapeHtml(data.left.filename)} · ${escapeHtml(data.right.filename)} · ${escapeHtml(metricText)}</div>${data.metrics_note ? `<p class="muted">${escapeHtml(data.metrics_note)}</p>` : ""}`;
-    const slider = result.querySelector("input[type=range]");
-    slider?.addEventListener("input", event => result.querySelector("[data-slider-image]").style.clipPath = `inset(0 ${100 - Number(event.target.value)}% 0 0)`);
-    bindComparisonTransform(result);
+    const reference = data.reference || data.left;
+    const compressed = data.compressed || data.right;
+    const ratio = metrics.compression_ratio == null ? "Unavailable" : `${metrics.compression_ratio}× smaller`;
+    const percent = metrics.compressed_percent == null ? "Unavailable" : `${metrics.compressed_percent}% of reference`;
+    const metricText = `Reference ${formatBytes(metrics.reference_bytes)} → compressed ${formatBytes(metrics.compressed_bytes)} · ${ratio} · ${percent}`;
+    const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"><div class="comparison-wipe-top" data-wipe-top><img src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button><span class="comparison-wipe-label comparison-wipe-label-left">${escapeHtml(compressed.filename)}</span><span class="comparison-wipe-label comparison-wipe-label-right">${escapeHtml(reference.filename)}</span></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><img src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><img src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
+    result.innerHTML = `${stage}<div class="comparison-metrics"><span>${escapeHtml(metricText)}</span>${metrics.mse == null ? "" : `<span>MSE ${metrics.mse} · PSNR ${metrics.psnr == null ? "Lossless" : `${metrics.psnr} dB`}</span>`}</div>${data.metrics_note ? `<p class="muted">${escapeHtml(data.metrics_note)}</p>` : ""}`;
+    if (!dialog._comparisonCamera || dialog._comparisonCamera.viewport !== result.querySelector("[data-comparison-viewport]")) {
+      dialog._comparisonCamera = new SharedImageCamera({viewport: result.querySelector("[data-comparison-viewport]"), getImages: () => [...result.querySelectorAll("[data-comparison-viewport] img") ]});
+      if (cameraState) Object.assign(dialog._comparisonCamera, cameraState);
+    }
+    dialog._comparisonCamera.setImages([...result.querySelectorAll("[data-comparison-viewport] img")]);
+    const wipe = result.querySelector("[data-wipe-top]");
+    const handle = result.querySelector("[data-wipe-handle]");
+    if (wipe && handle) {
+      const setWipe = value => { const position = Math.max(0, Math.min(100, Number(value))); wipe.style.width = `${position}%`; handle.style.left = `${position}%`; handle.setAttribute("aria-valuenow", String(Math.round(position))); };
+      setWipe(50);
+      let wiping = false;
+      handle.addEventListener("pointerdown", event => { wiping = true; handle.setPointerCapture(event.pointerId); event.preventDefault(); });
+      handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = result.querySelector("[data-comparison-viewport]").getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
+      ["pointerup", "pointercancel"].forEach(name => handle.addEventListener(name, () => { wiping = false; }));
+      handle.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); setWipe(Number(handle.getAttribute("aria-valuenow")) + (event.key === "ArrowRight" ? 5 : -5)); });
+    }
   } catch (error) { result.innerHTML = `<p class="error">Comparison unavailable: ${escapeHtml(error.message)}</p>`; }
-}
-
-function bindComparisonTransform(container) {
-  let scale = 1;
-  let offsetX = 0;
-  let offsetY = 0;
-  let dragging = false;
-  let startX = 0;
-  let startY = 0;
-  const apply = () => container.querySelectorAll(".comparison-pane img, .comparison-slider img").forEach(image => { image.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`; });
-  container.addEventListener("wheel", event => { event.preventDefault(); scale = Math.max(1, Math.min(8, scale * (event.deltaY < 0 ? 1.1 : .9))); apply(); }, {passive: false});
-  container.addEventListener("pointerdown", event => { if (event.target.tagName === "INPUT") return; dragging = true; startX = event.clientX - offsetX; startY = event.clientY - offsetY; container.setPointerCapture(event.pointerId); });
-  container.addEventListener("pointermove", event => { if (!dragging) return; offsetX = event.clientX - startX; offsetY = event.clientY - startY; apply(); });
-  container.addEventListener("pointerup", () => { dragging = false; });
 }
 
 function renderDetails(asset, options = {}) {
@@ -123,7 +145,8 @@ function renderRepresentations(asset) {
   const filenameMarkup = displayFilename;
   const rows = asset.physical_files.map(file => {
     const problems = renderComponentProblems(file);
-    return `<div class="representation-row"><div><div class="representation-title"><strong>${filenameMarkup(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><div class="representation-actions"><button class="icon" type="button" data-representation-view="${escapeHtml(file.id)}" data-representation-open="${escapeHtml(file.id)}" data-representation-compare="${escapeHtml(file.id)}" aria-label="View representation" title="View representation">◉</button><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Show in Explorer" title="Show in Explorer">📁</button></div></div>`;
+    const eye = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.5 12s3.4-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.4 5.5-9.5 5.5S2.5 12 2.5 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+    return `<div class="representation-row"><div><div class="representation-title"><strong>${filenameMarkup(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><div class="representation-actions"><button class="representation-eye" type="button" data-representation-view="${escapeHtml(file.id)}" aria-label="View representation" title="View representation">${eye}</button><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Show in Explorer" title="Show in Explorer"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5.5h7l2 2H21v11H3Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button></div></div>`;
   }).join("");
   return `<section class="section"><h3>Representations</h3><div class="representations">${rows}</div></section>`;
 }

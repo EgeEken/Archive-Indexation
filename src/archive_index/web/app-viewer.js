@@ -1,7 +1,31 @@
+let viewerCamera;
+
+function ensureViewerCamera() {
+  if (viewerCamera) return viewerCamera;
+  viewerCamera = new SharedImageCamera({
+    viewport: $("viewer-media-pane"),
+    getImages: () => [$("viewer-media")?.querySelector("img.viewer-media")],
+    onChange: change => {
+      if (change.zoom != null) state.viewerZoom = change.zoom;
+      if (change.panX != null) state.viewerPanX = change.panX;
+      if (change.panY != null) state.viewerPanY = change.panY;
+      if (change.dragging != null) state.dragging = change.dragging;
+      if (change.clickSuppressed) {
+        state.viewerClickSuppressed = true;
+        setTimeout(() => { state.viewerClickSuppressed = false; }, 0);
+      }
+      $("viewer-media-pane").classList.toggle("zoomed", state.viewerZoom > 1);
+      $("viewer-media-pane").classList.toggle("dragging", state.dragging);
+    },
+  });
+  return viewerCamera;
+}
+
 function resetViewerZoom() {
   state.viewerZoom = 1;
   state.viewerPanX = 0;
   state.viewerPanY = 0;
+  ensureViewerCamera().reset();
 }
 
 function visibleStrictGroupId(item) {
@@ -98,24 +122,14 @@ async function loadVisualizationViewerItem(index) {
 
 function applyViewerTransform(media) {
   if (!media || media.tagName !== "IMG") return;
-  clampViewerPan(media);
-  media.style.transform = `translate3d(${state.viewerPanX}px, ${state.viewerPanY}px, 0) scale(${state.viewerZoom})`;
+  const camera = ensureViewerCamera();
+  camera.zoom = state.viewerZoom;
+  camera.panX = state.viewerPanX;
+  camera.panY = state.viewerPanY;
+  camera.setImages([media]);
   media.style.imageRendering = state.viewerSmooth ? "auto" : "pixelated";
   $("viewer-media-pane").classList.toggle("zoomed", state.viewerZoom > 1);
   $("viewer-media-pane").classList.toggle("dragging", state.dragging);
-}
-
-function clampViewerPan(media) {
-  if (!media) return;
-  const viewport = $("viewer-media-pane").getBoundingClientRect();
-  const baseWidth = media.offsetWidth || media.getBoundingClientRect().width / Math.max(state.viewerZoom, 1);
-  const baseHeight = media.offsetHeight || media.getBoundingClientRect().height / Math.max(state.viewerZoom, 1);
-  const maxX = Math.max(0, (baseWidth * state.viewerZoom - viewport.width) / 2);
-  const maxY = Math.max(0, (baseHeight * state.viewerZoom - viewport.height) / 2);
-  state.viewerPanX = Math.max(-maxX, Math.min(maxX, state.viewerPanX));
-  state.viewerPanY = Math.max(-maxY, Math.min(maxY, state.viewerPanY));
-  if (maxX === 0) state.viewerPanX = 0;
-  if (maxY === 0) state.viewerPanY = 0;
 }
 
 async function moveViewer(delta) {
