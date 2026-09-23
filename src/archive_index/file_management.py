@@ -112,6 +112,7 @@ def save_ruleset(
     if ruleset_id in {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}:
         raise ValueError("built-in rulesets are immutable")
     now = _timestamp()
+    new_ruleset = ruleset_id is None
     ruleset_id = ruleset_id or str(uuid.uuid4())
     with workspace.transaction() as connection:
         connection.execute(
@@ -124,6 +125,7 @@ def save_ruleset(
             (ruleset_id, name.strip(), description.strip(), now, now),
         )
         connection.execute("DELETE FROM file_management_rule WHERE ruleset_id = ?", (ruleset_id,))
+        rule_ids = set()
         for position, rule in enumerate(rules):
             if not isinstance(rule, dict):
                 raise ValueError("each rule must be an object")
@@ -131,6 +133,10 @@ def save_ruleset(
             action = rule.get("action") or {}
             if not isinstance(match, dict) or not isinstance(action, dict):
                 raise ValueError("rule match and action must be objects")
+            rule_id = str(rule.get("id") or uuid.uuid4())
+            if new_ruleset or rule_id in rule_ids:
+                rule_id = str(uuid.uuid4())
+            rule_ids.add(rule_id)
             connection.execute(
                 """
                 INSERT INTO file_management_rule(
@@ -138,7 +144,7 @@ def save_ruleset(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(rule.get("id") or uuid.uuid4()), ruleset_id, position,
+                    rule_id, ruleset_id, position,
                     int(bool(rule.get("enabled", True))), json.dumps(match, sort_keys=True),
                     json.dumps(action, sort_keys=True), now, now,
                 ),

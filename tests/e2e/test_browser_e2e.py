@@ -12,6 +12,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import imagecodecs
+import numpy as np
 from PIL import Image
 
 try:
@@ -24,6 +26,7 @@ from archive_index.app_state import WorkspaceRegistry, workspace_id
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.projection import build_semantic_projection
+from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.quality_provider import OffQualityProvider
 from archive_index.workspace import Workspace
@@ -100,10 +103,13 @@ class BrowserE2ETests(unittest.TestCase):
     @classmethod
     def _create_main_fixtures(cls, root: Path) -> None:
         cls._create_image(root / "alpha.jpg", (160, 100), (220, 80, 80))
+        with Image.open(root / "alpha.jpg") as image:
+            (root / "alpha.jxl").write_bytes(imagecodecs.jpegxl_encode(np.asarray(image.convert("RGB")), lossless=True))
+        (root / "alpha.arw").write_bytes(b"test-only raw fixture")
         cls._create_image(root / "nested" / "portrait.jpg", (80, 140), (70, 150, 220))
         cls._create_image(root / "nested" / "child" / "child.jpg", (140, 80), (80, 190, 110))
         cls._create_image(root / "group" / "group-a.jpg", (120, 80), (220, 180, 60))
-        cls._create_image(root / "group" / "group-b.jpg", (120, 80), (220, 180, 60))
+        cls._create_image(root / "group" / "group-b.jpg", (120, 80), (220, 179, 60))
 
     @classmethod
     def _create_setup_fixtures(cls, root: Path) -> None:
@@ -119,6 +125,7 @@ class BrowserE2ETests(unittest.TestCase):
         configuration.update(
             {
                 "quality_enabled": False,
+                "include_raw": False,
                 "rendered_quality_provider": "off",
                 "raw_quality_provider": "off",
                 "video_quality_enabled": False,
@@ -129,7 +136,10 @@ class BrowserE2ETests(unittest.TestCase):
         )
         workspace.apply_configuration(configuration)
         scan(workspace)
+        with workspace.transaction() as connection:
+            connection.execute("UPDATE physical_file SET in_scope = 0 WHERE extension = '.arw'")
         index_workspace(workspace, components=("metadata", "thumbnail"), quality_provider=OffQualityProvider())
+        reconcile_workspace(workspace)
         with workspace.transaction() as connection:
             rows = connection.execute(
                 "SELECT logical_asset_id, relative_path FROM physical_file ORDER BY relative_path"
@@ -146,8 +156,12 @@ class BrowserE2ETests(unittest.TestCase):
                 "2026-02-05T12:00:00",
                 "2026-03-01T09:30:00",
             ]
+            capture_by_stem = {}
             for index, row in enumerate(rows):
-                capture = capture_times[index]
+                stem = Path(row["relative_path"]).stem.casefold()
+                if stem not in capture_by_stem:
+                    capture_by_stem[stem] = capture_times[len(capture_by_stem) % len(capture_times)]
+                capture = capture_by_stem[stem]
                 connection.execute(
                     "UPDATE logical_asset SET capture_time = ?, capture_time_kind = 'exif_local_unknown' WHERE id = ?",
                     (capture, row["logical_asset_id"]),
@@ -184,7 +198,11 @@ class BrowserE2ETests(unittest.TestCase):
             rows = connection.execute(
                 "SELECT pf.id, pf.logical_asset_id, pf.filename FROM physical_file AS pf WHERE pf.in_scope = 1 AND pf.media_type = 'image' ORDER BY pf.relative_path"
             ).fetchall()
+            seen_assets = set()
             for row in rows:
+                if row["logical_asset_id"] in seen_assets:
+                    continue
+                seen_assets.add(row["logical_asset_id"])
                 values = (1.0, 0.0) if row["filename"] == "alpha.jpg" else (0.6, 0.8) if row["filename"] == "child.jpg" else (0.0, 1.0)
                 blob = _float16_blob(values)
                 fingerprint = "e2e-controlled"
@@ -366,6 +384,39 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#viewer").wait_for(state="hidden")
         self.assertTrue(self.page.locator("#gallery").is_visible())
         self.assertEqual(self.page.locator("dialog[open]").count(), 0)
+
+    def test_file_management_and_representation_comparison_workflow(self) -> None:
+        self._open_main()
+        self.page.locator("#file-management-button").click()
+        self.page.locator("#file-management-dialog[open]").wait_for()
+        self.assertIn("Archive cleanup", self.page.locator("#file-management-ruleset-select").inner_text())
+        self.assertGreater(self.page.locator(".file-rule-card").count(), 0)
+        first_rule = self.page.locator(".file-rule-card").first
+        first_rule.locator('[data-rule-field="operation"]').select_option("copy")
+        self.page.locator("#file-management-ruleset-kind").wait_for()
+        self.assertEqual(self.page.locator("#file-management-ruleset-kind").inner_text(), "Custom Ruleset")
+        self.page.get_by_role("button", name="Analyze plan").click()
+        self.page.locator('[data-file-management-section="plan"]:not(.hidden)').wait_for()
+        self.page.locator("#file-management-plan-summary").wait_for()
+        dialog_text = self.page.locator("#file-management-dialog").inner_text()
+        self.assertNotIn("Settings JSON", dialog_text)
+        self.assertNotIn("Rules JSON", dialog_text)
+        self.assertNotIn("candidate_count", dialog_text)
+        self.page.locator("#file-management-close").click()
+
+        self.page.locator(".photo-card", has_text="alpha.jpg").first.locator(".info-button").click()
+        self.page.locator("#details[open]").wait_for()
+        self.assertGreaterEqual(self.page.locator("#details .representation-row").count(), 2)
+        jxl_row = self.page.locator("#details .representation-row", has_text="alpha.jxl").first
+        jxl_row.locator('[data-representation-view]').click()
+        self.page.locator("#representation-comparison[open]").wait_for()
+        self.assertIn("Lineage unknown", self.page.locator("#representation-comparison").inner_text())
+        self.page.get_by_role("button", name="Side by side").click()
+        self.page.locator(".comparison-stage").wait_for()
+        self.page.get_by_role("button", name="Slider").click()
+        self.page.locator(".comparison-slider").wait_for()
+        self.page.locator("[data-comparison-close]").click()
+        self.page.locator("#details-close").click()
 
     def test_similar_weaker_results_navigation_and_close_variants(self) -> None:
         self._open_main()
