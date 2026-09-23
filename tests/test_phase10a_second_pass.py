@@ -8,8 +8,8 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from archive_index.api.comparison import comparison_data
-from archive_index.file_management import build_dry_run_plan, list_presets, list_rulesets, save_ruleset
+from archive_index.api.comparison import _mse, comparison_data
+from archive_index.file_management import build_dry_run_plan, list_presets, list_profiles, list_rulesets, save_ruleset
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
@@ -18,6 +18,28 @@ from archive_index.workspace import Workspace
 
 
 class Phase10ASecondPassTests(unittest.TestCase):
+    def test_mse_is_true_per_channel_pixel_mean(self):
+        left = Image.fromarray(np.array([[[0, 0, 0], [255, 255, 255]]], dtype=np.uint8))
+        right = Image.fromarray(np.array([[[0, 0, 0], [255, 0, 0]]], dtype=np.uint8))
+        self.assertAlmostEqual(_mse(left, right), (2 * 65025) / 6)
+        left.close()
+        right.close()
+
+    def test_builtins_expose_three_quality_profiles_and_refresh_code_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace.create(Path(directory))
+            profiles = {item["name"] for item in list_profiles(workspace)}
+            self.assertTrue({"JXL High Quality", "JXL Balanced", "JXL High Compression"}.issubset(profiles))
+            custom = save_ruleset(workspace, name="Custom", rules=[])
+            connection = workspace.connect()
+            try:
+                connection.execute("UPDATE file_management_rule SET match_json = '{}' WHERE ruleset_id = ?", ("builtin-archive-cleanup",))
+                connection.commit()
+            finally:
+                connection.close()
+            cleanup = next(item for item in list_rulesets(workspace) if item["id"] == "builtin-archive-cleanup")
+            self.assertEqual(len(cleanup["rules"]), 8)
+            self.assertEqual(next(item for item in list_rulesets(workspace) if item["id"] == custom["id"])["rules"], [])
     def test_builtin_presets_are_seeded_and_delete_is_planned(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

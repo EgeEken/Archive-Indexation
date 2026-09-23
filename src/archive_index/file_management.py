@@ -11,10 +11,30 @@ from pathlib import PurePosixPath
 
 from .workspace import Workspace, WorkspaceError
 
+BUILTIN_HIGH_QUALITY_PROFILE_ID = "builtin-jxl-high-quality"
 BUILTIN_BALANCED_PROFILE_ID = "builtin-jxl-balanced"
+BUILTIN_HIGH_COMPRESSION_PROFILE_ID = "builtin-jxl-high-compression"
 BUILTIN_ARCHIVE_CLEANUP_ID = "builtin-archive-cleanup"
 BUILTIN_KEEP_SELECTED_ID = "builtin-keep-selected-only"
 BUILTIN_AV1_PROFILE_ID = "builtin-av1-archival"
+BUILTIN_PROFILE_IDS = {
+    BUILTIN_HIGH_QUALITY_PROFILE_ID,
+    BUILTIN_BALANCED_PROFILE_ID,
+    BUILTIN_HIGH_COMPRESSION_PROFILE_ID,
+    BUILTIN_AV1_PROFILE_ID,
+}
+BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
+
+
+def quality_to_distance(quality: float) -> float:
+    """Map the user-facing quality scale to the native JPEG XL distance scale."""
+    value = max(0.0, min(100.0, float(quality)))
+    return round((100.0 - value) * 1.5 / 40.0, 4)
+
+
+def distance_to_quality(distance: float) -> float:
+    """Read legacy/custom native-distance settings without changing their meaning."""
+    return round(max(0.0, min(100.0, 100.0 - float(distance) * 40.0 / 1.5)), 2)
 
 
 def list_profiles(workspace: Workspace) -> list[dict[str, object]]:
@@ -26,7 +46,7 @@ def list_profiles(workspace: Workspace) -> list[dict[str, object]]:
         ).fetchall()
     finally:
         connection.close()
-    return [{**_profile(row), "is_builtin": row["id"] == BUILTIN_BALANCED_PROFILE_ID} for row in rows]
+    return [{**_profile(row), "is_builtin": row["id"] in BUILTIN_PROFILE_IDS} for row in rows]
 
 
 def save_profile(
@@ -44,8 +64,15 @@ def save_profile(
         raise ValueError("codec must be jpeg-xl, avif, or av1")
     if not container.strip():
         raise ValueError("container is required")
-    if profile_id == BUILTIN_BALANCED_PROFILE_ID:
+    if profile_id in BUILTIN_PROFILE_IDS:
         raise ValueError("built-in compression profiles are immutable")
+    normalized_settings = dict(settings or {})
+    if codec == "jpeg-xl":
+        if "quality" in normalized_settings:
+            normalized_settings["quality"] = max(0.0, min(100.0, float(normalized_settings["quality"])))
+            normalized_settings["distance"] = quality_to_distance(normalized_settings["quality"])
+        elif "distance" in normalized_settings:
+            normalized_settings["quality"] = distance_to_quality(normalized_settings["distance"])
     now = _timestamp()
     profile_id = profile_id or str(uuid.uuid4())
     with workspace.transaction() as connection:
@@ -57,7 +84,7 @@ def save_profile(
               container = excluded.container, settings_json = excluded.settings_json,
               updated_at = excluded.updated_at
             """,
-            (profile_id, name.strip(), codec, container.strip(), json.dumps(settings or {}, sort_keys=True), now, now),
+            (profile_id, name.strip(), codec, container.strip(), json.dumps(normalized_settings, sort_keys=True), now, now),
         )
     return next(profile for profile in list_profiles(workspace) if profile["id"] == profile_id)
 
@@ -70,14 +97,14 @@ def list_rulesets(workspace: Workspace) -> list[dict[str, object]]:
             "SELECT * FROM file_management_ruleset ORDER BY name, id"
         ).fetchall()
         rules = connection.execute(
-            "SELECT * FROM file_management_rule ORDER BY ruleset_id, position, id"
+            "SELECT * FROM file_management_rule WHERE enabled = 1 ORDER BY ruleset_id, position, id"
         ).fetchall()
     finally:
         connection.close()
     by_ruleset: dict[str, list[dict[str, object]]] = {}
     for row in rules:
         by_ruleset.setdefault(row["ruleset_id"], []).append(_rule(row))
-    return [{**_ruleset(row), "rules": by_ruleset.get(row["id"], []), "is_builtin": row["id"] in {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}} for row in rulesets]
+    return [{**_ruleset(row), "rules": by_ruleset.get(row["id"], []), "is_builtin": row["id"] in BUILTIN_RULESET_IDS} for row in rulesets]
 
 
 def list_presets(workspace: Workspace) -> list[dict[str, object]]:
@@ -94,7 +121,7 @@ def list_presets(workspace: Workspace) -> list[dict[str, object]]:
         ).fetchall()
     finally:
         connection.close()
-    return [{**dict(row), "is_builtin": row["id"] in {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}} for row in rows]
+    return [{**dict(row), "is_builtin": row["id"] in BUILTIN_RULESET_IDS} for row in rows]
 
 
 def save_ruleset(
@@ -109,7 +136,7 @@ def save_ruleset(
         raise ValueError("ruleset name is required")
     if not isinstance(rules, list):
         raise ValueError("rules must be a list")
-    if ruleset_id in {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}:
+    if ruleset_id in BUILTIN_RULESET_IDS:
         raise ValueError("built-in rulesets are immutable")
     now = _timestamp()
     new_ruleset = ruleset_id is None
@@ -145,7 +172,7 @@ def save_ruleset(
                 """,
                 (
                     rule_id, ruleset_id, position,
-                    int(bool(rule.get("enabled", True))), json.dumps(match, sort_keys=True),
+                    1, json.dumps(match, sort_keys=True),
                     json.dumps(action, sort_keys=True), now, now,
                 ),
             )
@@ -169,7 +196,7 @@ def save_preset(
 ) -> dict[str, object]:
     if not name.strip():
         raise ValueError("preset name is required")
-    if preset_id in {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}:
+    if preset_id in BUILTIN_RULESET_IDS:
         raise ValueError("built-in presets are immutable")
     if not any(item["id"] == ruleset_id for item in list_rulesets(workspace)):
         raise ValueError("ruleset not found")
@@ -264,13 +291,17 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
             if target is not None:
                 key = target.casefold()
                 if key == source.casefold():
-                    item_conflicts.append("target would overwrite the source")
-                elif key in targets and targets[key][0] != row["id"]:
-                    item_conflicts.append(f"target collides with {targets[key][1]}")
+                    item_conflicts.append({
+                        "compress": "Compression output path is the same as the source file.",
+                        "copy": "Copy destination is the same as the source file.",
+                        "move": "Move destination is the same as the source file.",
+                    }.get(operation, "Destination is the same as the source file."))
+                elif key in targets:
+                    item_conflicts.append("Another planned output already uses this destination.")
                 else:
                     existing = _workspace_target_status(workspace, target, row["sha256"])
                     if existing == "conflict":
-                        item_conflicts.append("destination exists with different content")
+                        item_conflicts.append("A different file already exists at this destination.")
                 if key not in targets:
                     targets[key] = (row["id"], source)
             operation_row = {
@@ -284,13 +315,23 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                 "profile_name": item["profile"]["name"] if item["profile"] else None,
                 "rule_id": item["rule"]["id"],
                 "bytes": row["size_bytes"] or 0,
+                "estimated_output_bytes": _estimated_output_bytes(row["size_bytes"] or 0, item["profile"]),
+                "estimated_storage_delta_bytes": _storage_delta(row["size_bytes"] or 0, item["profile"], operation, item["action"]),
                 "source_disposition": item["action"].get("source_disposition", "keep"),
                 "destination_status": _workspace_target_status(workspace, target, row["sha256"]) if target else None,
                 "conflicts": item_conflicts,
                 "requires_confirmation": True,
             }
             operations.append(operation_row)
-            conflicts.extend({"physical_file_id": row["id"], "reason": reason} for reason in item_conflicts)
+            conflicts.extend({
+                "physical_file_id": row["id"],
+                "filename": row["filename"],
+                "source_relative_path": source,
+                "target_relative_path": target,
+                "rule_id": item["rule"]["id"],
+                "operation": operation,
+                "reason": reason,
+            } for reason in item_conflicts)
     summary = _plan_summary(workspace, rows, operations, conflicts)
     return {
         "available": True,
@@ -298,7 +339,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
         "operations": operations,
         "conflicts": conflicts,
         "summary": summary,
-        "executor": {"available": False, "message": "Phase 10A is planning-only; no files will be changed."},
+        "executor": {"available": False, "message": "Execution is unavailable until the safety executor is enabled."},
     }
 
 
@@ -337,18 +378,27 @@ def _matches(row, match: dict[str, object]) -> bool:
 
 
 def _target_path(row, action, profile):
+    source = PurePosixPath(row["relative_path"])
+    container = profile["container"] if profile else ""
+    if action.get("destination_dir") is not None:
+        destination = str(action.get("destination_dir") or "").strip().strip("/")
+        if action.get("operation") == "compress" and action.get("compress_in_place", True):
+            destination = "/".join(part for part in (destination, str(source.parent) if str(source.parent) != "." else "") if part)
+        elif action.get("operation") in {"copy", "move"} and action.get("preserve_relative_structure"):
+            destination = "/".join(part for part in (destination, str(source.parent) if str(source.parent) != "." else "") if part)
+        filename = f"{source.stem}.{container}" if action.get("operation") == "compress" else row["filename"]
+        return "/".join(part for part in (destination, filename) if part) or None
     template = action.get("target_template")
     if not template:
         if profile is None:
             return None
         template = "{relative_dir}/{stem}.{container}"
-    source = PurePosixPath(row["relative_path"])
     values = {
         "filename": row["filename"],
         "stem": source.stem,
         "ext": source.suffix.removeprefix("."),
         "relative_dir": str(source.parent) if str(source.parent) != "." else "",
-        "container": profile["container"] if profile else "",
+        "container": container,
     }
     try:
         target = str(template).format(**values).replace("\\", "/")
@@ -397,31 +447,33 @@ def _validate_action_combination(compiled) -> None:
     if "delete" in operations and "copy" in operations:
         for item in compiled:
             if item["operation"] in {"delete", "copy"}:
-                item["conflicts"].append("a source representation cannot be copied and deleted in the same plan")
+                item["conflicts"].append("A source representation cannot be copied and deleted in the same plan.")
 
 
 def _plan_summary(workspace, rows, operations, conflicts):
     groups = {
-        "delete": {"file_count": 0, "bytes": 0},
-        "copy": {"file_count": 0, "bytes_added": 0},
-        "move": {"file_count": 0, "bytes_moved": 0},
-        "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0},
+        "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
+        "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
+        "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
+        "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
     }
     for operation in operations:
         group = groups[operation["operation"]]
         size = int(operation["bytes"] or 0)
         group["file_count"] += 1
+        group["estimated_storage_delta_bytes"] += int(operation.get("estimated_storage_delta_bytes") or 0)
         if operation["operation"] == "delete":
             group["bytes"] += size
+            group["source_bytes"] += size
         elif operation["operation"] == "copy":
             group["bytes_added"] += size
         elif operation["operation"] == "move":
             group["bytes_moved"] += size
         else:
             group["source_bytes"] += size
-            estimated = max(1, int(size * 0.35)) if operation["profile_id"] and str(operation["profile_id"]).startswith("builtin-jxl") else max(1, int(size * 0.5))
+            estimated = int(operation.get("estimated_output_bytes") or _estimated_output_bytes(size, None))
             group["estimated_output_bytes"] += estimated
-            group["estimated_bytes_saved"] += max(0, size - estimated)
+            group["estimated_bytes_saved"] += max(0, size - estimated) if operation.get("source_disposition") == "replace" else 0
     surviving = 0
     connection = workspace.connect()
     try:
@@ -443,7 +495,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
             for row in members
         ):
             surviving += 1
-    net_freed = groups["delete"]["bytes"] + groups["compress"]["estimated_bytes_saved"] - groups["copy"]["bytes_added"]
+    storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
     return {
         "candidate_count": len(operations),
         "conflict_count": len(conflicts),
@@ -452,11 +504,38 @@ def _plan_summary(workspace, rows, operations, conflicts):
         "copy": groups["copy"],
         "move": groups["move"],
         "compress": groups["compress"],
-        "estimated_net_bytes_freed": net_freed,
-        "peak_temporary_bytes": max((operation["bytes"] for operation in operations if operation["operation"] == "compress"), default=0),
+        "estimated_storage_delta_bytes": storage_delta,
+        "estimated_net_bytes_freed": max(0, -storage_delta),
+        "estimated_net_bytes_added": max(0, storage_delta),
+        "peak_temporary_bytes": sum(int(operation.get("estimated_output_bytes") or 0) for operation in operations if operation["operation"] == "compress"),
         "available_space_bytes": _available_space(workspace),
         "assets_with_no_surviving_representation": max(0, len(assets) - surviving),
     }
+
+
+def _estimated_output_bytes(size: int, profile: dict[str, object] | None) -> int:
+    if not size:
+        return 0
+    settings = (profile or {}).get("settings") or {}
+    if "estimated_output_ratio" in settings:
+        ratio = max(0.01, min(1.0, float(settings["estimated_output_ratio"])))
+    elif profile and profile.get("codec") == "jpeg-xl":
+        quality = float(settings.get("quality", distance_to_quality(settings.get("distance", 1.5))))
+        ratio = {80: 0.5, 60: 0.35, 40: 0.25}.get(round(quality), 0.35)
+    else:
+        ratio = 0.5
+    return max(1, int(size * ratio))
+
+
+def _storage_delta(size: int, profile: dict[str, object] | None, operation: str, action: dict[str, object]) -> int:
+    if operation == "delete":
+        return -size
+    if operation == "copy":
+        return size
+    if operation == "move":
+        return 0
+    output = _estimated_output_bytes(size, profile)
+    return output - size if action.get("source_disposition", "keep") == "replace" else output
 
 
 def _available_space(workspace):
@@ -473,7 +552,14 @@ def _format_name(extension: str) -> str:
 def _representation_class(row) -> str:
     if row["media_type"] == "video":
         return "video"
-    return "raw" if row["extension"].casefold() in {".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"} else "rendered-image"
+    extension = row["extension"].casefold()
+    if extension in {".arw", ".cr2", ".cr3", ".dng", ".nef", ".raf", ".rw2"}:
+        return "raw"
+    if extension in {".jpg", ".jpeg", ".png"}:
+        return "conventional-image"
+    if extension in {".jxl", ".avif", ".webp"}:
+        return "compressed-image"
+    return "rendered-image"
 
 
 def _representation_origin(row) -> str:
@@ -508,46 +594,50 @@ def _empty_plan(reason: str):
             "candidate_count": 0,
             "conflict_count": 0,
             "safe_count": 0,
-            "delete": {"file_count": 0, "bytes": 0},
-            "copy": {"file_count": 0, "bytes_added": 0},
-            "move": {"file_count": 0, "bytes_moved": 0},
-            "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0},
+            "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
+            "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
+            "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
+            "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
+            "estimated_storage_delta_bytes": 0,
             "estimated_net_bytes_freed": 0,
+            "estimated_net_bytes_added": 0,
             "peak_temporary_bytes": 0,
             "available_space_bytes": None,
             "assets_with_no_surviving_representation": 0,
         },
         "empty_reason": reason,
-        "executor": {"available": False, "message": "Phase 10A is planning-only; no files will be changed."},
+        "executor": {"available": False, "message": "Execution is unavailable until the safety executor is enabled."},
     }
 
 
 def _ensure_builtins(workspace: Workspace) -> None:
     now = _timestamp()
-    profile_settings = {"distance": 1.5, "effort": 7}
+    profiles = [
+        (BUILTIN_HIGH_QUALITY_PROFILE_ID, "JXL High Quality", {"quality": 80, "distance": quality_to_distance(80), "effort": 7}),
+        (BUILTIN_BALANCED_PROFILE_ID, "JXL Balanced", {"quality": 60, "distance": quality_to_distance(60), "effort": 7}),
+        (BUILTIN_HIGH_COMPRESSION_PROFILE_ID, "JXL High Compression", {"quality": 40, "distance": quality_to_distance(40), "effort": 7}),
+        (BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", {"status": "pending"}),
+    ]
     cleanup_rules = [
         {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "copy", "target_template": "raws/{filename}"}},
-        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "target_template": "jpgs/{filename}"}},
-        {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "rendered-image"}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace"}},
-        {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "rendered-image"}, "action": {"operation": "delete"}},
+        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "copy", "destination_dir": "raws", "preserve_relative_structure": True}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False}},
+        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True}},
+        {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace"}},
+        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True}},
     ]
     selected_rules = [
         {"enabled": True, "match": {"selection_state": "rejected"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "undecided"}, "action": {"operation": "delete"}},
     ]
     with workspace.transaction() as connection:
-        connection.execute(
-            "INSERT OR IGNORE INTO compression_profile(id, name, codec, container, settings_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (BUILTIN_BALANCED_PROFILE_ID, "JXL Balanced", "jpeg-xl", "jxl", json.dumps(profile_settings, sort_keys=True), now, now),
-        )
-        connection.execute(
-            "INSERT OR IGNORE INTO compression_profile(id, name, codec, container, settings_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", "av1", "mp4", json.dumps({"status": "pending"}, sort_keys=True), now, now),
-        )
+        for profile_id, name, settings in profiles:
+            connection.execute(
+                "INSERT INTO compression_profile(id, name, codec, container, settings_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, codec=excluded.codec, container=excluded.container, settings_json=excluded.settings_json, updated_at=excluded.updated_at",
+                (profile_id, name, "jpeg-xl" if profile_id != BUILTIN_AV1_PROFILE_ID else "av1", "jxl" if profile_id != BUILTIN_AV1_PROFILE_ID else "mp4", json.dumps(settings, sort_keys=True), now, now),
+            )
         for ruleset_id, name, description, rules in (
             (BUILTIN_ARCHIVE_CLEANUP_ID, "Archive cleanup", "Conservative archive cleanup planning", cleanup_rules),
             (BUILTIN_KEEP_SELECTED_ID, "Keep selected only", "Keep selected representations and plan removal of the rest", selected_rules),
@@ -556,12 +646,12 @@ def _ensure_builtins(workspace: Workspace) -> None:
                 "INSERT OR IGNORE INTO file_management_ruleset(id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (ruleset_id, name, description, now, now),
             )
-            if connection.execute("SELECT COUNT(*) FROM file_management_rule WHERE ruleset_id = ?", (ruleset_id,)).fetchone()[0] == 0:
-                for position, rule in enumerate(rules):
-                    connection.execute(
-                        "INSERT INTO file_management_rule(id, ruleset_id, position, enabled, match_json, action_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (f"{ruleset_id}-{position + 1}", ruleset_id, position, int(rule["enabled"]), json.dumps(rule["match"], sort_keys=True), json.dumps(rule["action"], sort_keys=True), now, now),
-                    )
+            connection.execute("DELETE FROM file_management_rule WHERE ruleset_id = ?", (ruleset_id,))
+            for position, rule in enumerate(rules):
+                connection.execute(
+                    "INSERT INTO file_management_rule(id, ruleset_id, position, enabled, match_json, action_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (f"{ruleset_id}-{position + 1}", ruleset_id, position, 1, json.dumps(rule["match"], sort_keys=True), json.dumps(rule["action"], sort_keys=True), now, now),
+                )
             connection.execute(
                 "INSERT OR IGNORE INTO file_management_preset(id, name, ruleset_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (ruleset_id, name, ruleset_id, now, now),

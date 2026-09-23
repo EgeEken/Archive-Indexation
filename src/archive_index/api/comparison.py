@@ -27,35 +27,45 @@ def comparison_preview(workspace: Workspace, physical_id: str) -> bytes:
 
 
 def comparison_data(workspace: Workspace, left_id: str, right_id: str, handle: str) -> dict[str, object]:
-    left_row = _physical(workspace, left_id)
-    right_row = _physical(workspace, right_id)
-    if left_row["logical_asset_id"] != right_row["logical_asset_id"]:
+    first_row = _physical(workspace, left_id)
+    second_row = _physical(workspace, right_id)
+    if first_row["logical_asset_id"] != second_row["logical_asset_id"]:
         raise ResourceNotFound("representations must belong to the same logical asset")
-    left = _decode(workspace, left_row)
-    right = _decode(workspace, right_row)
+    reference_row, compressed_row = _orient(first_row, second_row)
+    reference = _decode(workspace, reference_row)
+    compressed = _decode(workspace, compressed_row)
     try:
         metrics = {
-            "source_bytes": left_row["size_bytes"],
-            "comparison_bytes": right_row["size_bytes"],
-            "compression_ratio": round(left_row["size_bytes"] / right_row["size_bytes"], 3) if right_row["size_bytes"] else None,
-            "comparison_percent": round(right_row["size_bytes"] / left_row["size_bytes"] * 100, 2) if left_row["size_bytes"] else None,
+            "reference_bytes": reference_row["size_bytes"],
+            "compressed_bytes": compressed_row["size_bytes"],
+            "compression_ratio": round(reference_row["size_bytes"] / compressed_row["size_bytes"], 3) if compressed_row["size_bytes"] else None,
+            "compressed_percent": round(compressed_row["size_bytes"] / reference_row["size_bytes"] * 100, 2) if reference_row["size_bytes"] else None,
             "mse": None,
             "psnr": None,
+            "pixel_identical": None,
         }
-        if left.size == right.size:
-            mse = _mse(left, right)
+        metrics["source_bytes"] = metrics["reference_bytes"]
+        metrics["comparison_bytes"] = metrics["compressed_bytes"]
+        metrics["comparison_percent"] = metrics["compressed_percent"]
+        if reference.size == compressed.size:
+            mse = _mse(reference, compressed)
             metrics["mse"] = round(mse, 6)
             metrics["psnr"] = None if mse == 0 else round(10 * log10((255 * 255) / mse), 3)
+            metrics["pixel_identical"] = mse == 0
+        reference_data = _representation(reference_row, handle)
+        compressed_data = _representation(compressed_row, handle)
         return {
-            "left": _representation(left_row, handle),
-            "right": _representation(right_row, handle),
+            "reference": reference_data,
+            "compressed": compressed_data,
+            "left": reference_data,
+            "right": compressed_data,
             "metrics": metrics,
-            "same_dimensions": left.size == right.size,
-            "metrics_note": None if left.size == right.size else "MSE and PSNR are unavailable because dimensions differ.",
+            "same_dimensions": reference.size == compressed.size,
+            "metrics_note": None if reference.size == compressed.size else "MSE and PSNR are unavailable because dimensions differ.",
         }
     finally:
-        left.close()
-        right.close()
+        reference.close()
+        compressed.close()
 
 
 def _physical(workspace: Workspace, physical_id: str):
@@ -84,12 +94,24 @@ def _mse(left: Image.Image, right: Image.Image) -> float:
     right_rgb = right.convert("RGB")
     difference = ImageChops.difference(left_rgb, right_rgb)
     try:
-        values = ImageStat.Stat(difference).mean
-        return sum(value * value for value in values) / 3
+        width, height = difference.size
+        return sum(ImageStat.Stat(difference).sum2) / (width * height * 3)
     finally:
         difference.close()
         left_rgb.close()
         right_rgb.close()
+
+
+def _orient(first, second):
+    conventional = {".jpg", ".jpeg", ".png"}
+    compressed = {".jxl", ".avif", ".webp"}
+    first_ext = first["extension"].casefold()
+    second_ext = second["extension"].casefold()
+    if first_ext in compressed and second_ext in conventional:
+        return second, first
+    if second_ext in compressed and first_ext in conventional:
+        return first, second
+    return (first, second) if (first["relative_path"].casefold(), first["id"]) <= (second["relative_path"].casefold(), second["id"]) else (second, first)
 
 
 def _representation(row, handle: str) -> dict[str, object]:
