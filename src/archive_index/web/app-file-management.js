@@ -1,7 +1,7 @@
 let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false};
 
 const assetSelectors = [["all", "All"], ["selected", "Selected"], ["undecided", "Undecided"], ["rejected", "Rejected"]];
-const representationSelectors = [["all", "All representations"], ["raw", "RAW"], ["conventional-image", "JPEG/PNG"], ["jpeg", "JPEG"], ["png", "PNG"], ["jxl", "JXL"], ["avif", "AVIF"], ["webp", "WebP"], ["video", "Video"]];
+const representationSelectors = [["all", "All"], ["raw", "RAW"], ["conventional-image", "JPEG/PNG"], ["jpeg", "JPEG"], ["png", "PNG"], ["jxl", "JXL"], ["avif", "AVIF"], ["webp", "WebP"], ["video", "Video"]];
 const operationSelectors = [["copy", "Copy"], ["move", "Move"], ["compress", "Compress"], ["delete", "Delete"]];
 
 function fileManagementOptionList(values, selected) { return values.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join(""); }
@@ -14,7 +14,7 @@ function ruleToUi(rule = {}) {
   const action = rule.action || {};
   let representation = match.representation_class || match.format || "all";
   if (match.formats?.length === 2 && match.formats.includes("jpeg") && match.formats.includes("png")) representation = "conventional-image";
-  return {id: rule.id || newId(), enabled: rule.enabled !== false, asset: match.selection_state || "all", representation, operation: action.operation || "delete", profileId: action.profile_id || fileManagement.profiles.find(profile => profile.codec === "jpeg-xl")?.id || "", disposition: action.source_disposition !== "replace", inPlace: action.compress_in_place !== false, destination: action.destination_dir || action.target_template || "", preserve: action.preserve_relative_structure !== false};
+  return {id: rule.id || newId(), enabled: true, asset: match.selection_state || "all", representation, operation: action.operation || "delete", profileId: action.profile_id || fileManagement.profiles.find(profile => profile.codec === "jpeg-xl")?.id || "", disposition: action.source_disposition !== "replace", inPlace: action.compress_in_place !== false, destination: action.destination_dir || action.target_template || "", preserve: action.preserve_relative_structure !== false};
 }
 
 function uiToRule(rule) {
@@ -26,7 +26,7 @@ function uiToRule(rule) {
   const action = {operation: rule.operation};
   if (rule.operation === "compress") { action.profile_id = rule.profileId || null; action.source_disposition = rule.disposition ? "keep" : "replace"; action.compress_in_place = rule.inPlace; if (!rule.inPlace) action.destination_dir = rule.destination; }
   if (["copy", "move"].includes(rule.operation)) { action.destination_dir = rule.destination; action.preserve_relative_structure = rule.preserve; }
-  return {id: rule.id, enabled: rule.enabled !== false, match, action};
+  return {id: rule.id, enabled: true, match, action};
 }
 
 function setFileManagementTab(tab) {
@@ -54,8 +54,12 @@ function renderFileManagementRules() {
   const profiles = fileManagement.profiles.filter(profile => profile.codec === "jpeg-xl" || profile.codec === "av1" || profile.codec === "avif");
   $("file-management-rules").innerHTML = fileManagement.draft.map((rule, index) => {
     const profileOptions = profiles.map(profile => `<option value="${escapeHtml(profile.id)}"${profile.id === rule.profileId ? " selected" : ""}>${escapeHtml(profile.name)}${profile.codec === "av1" ? " · pending" : ""}</option>`).join("");
-    const actionFields = rule.operation === "compress" ? `<div class="rule-options rule-options-compress"><div class="rule-options-row"><label class="rule-field">Profile <select data-rule-field="profileId">${profileOptions}</select></label><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="disposition"${rule.disposition ? " checked" : ""}> Keep source</label></div><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="inPlace"${rule.inPlace ? " checked" : ""}> Compress in place</label><label class="rule-field">Destination <input data-rule-field="destination" value="${escapeHtml(rule.destination)}" placeholder="compressed/"${rule.inPlace ? " disabled" : ""}></label></div>` : ["copy", "move"].includes(rule.operation) ? `<div class="rule-options rule-options-copy"><label class="rule-field">Destination <input data-rule-field="destination" value="${escapeHtml(rule.destination)}" placeholder="raws/"></label><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="preserve"${rule.preserve ? " checked" : ""}> Recreate source folders inside destination</label><p class="muted rule-help">For example, <code>photos/day1/file.jpg</code> becomes <code>raws/photos/day1/file.jpg</code>.</p></div>` : "";
-    return `<article class="file-rule-card${rule.enabled ? "" : " disabled"}" data-rule-index="${index}"><div class="rule-card-header"><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="enabled"${rule.enabled ? " checked" : ""}> Rule ${index + 1}</label><button class="icon" type="button" data-rule-remove aria-label="Remove rule">×</button></div><div class="rule-line">When <select data-rule-field="asset">${fileManagementOptionList(assetSelectors, rule.asset)}</select> assets with <select data-rule-field="representation">${fileManagementOptionList(representationSelectors, rule.representation)}</select> representations → <select data-rule-field="operation">${fileManagementOptionList(operationSelectors, rule.operation)}</select></div>${actionFields}</article>`;
+    const actionFields = rule.operation === "compress"
+      ? `<div class="rule-options rule-options-compress"><label class="rule-field">Profile <select data-rule-field="profileId">${profileOptions}</select></label><div class="rule-checkboxes"><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="disposition"${rule.disposition ? " checked" : ""}> Keep source</label><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="inPlace"${rule.inPlace ? " checked" : ""}> Compress in place</label></div><label class="rule-field">Destination <input data-rule-field="destination" value="${escapeHtml(rule.destination)}" placeholder="compressed/"${rule.inPlace ? " disabled" : ""}></label></div>`
+      : ["copy", "move"].includes(rule.operation)
+        ? `<div class="rule-options rule-options-copy"><label class="rule-field">Destination <input data-rule-field="destination" value="${escapeHtml(rule.destination)}" placeholder="raws/"></label><label class="checkbox-line rule-checkbox"><input type="checkbox" data-rule-field="preserve"${rule.preserve ? " checked" : ""}> Recreate source folders inside destination</label><p class="muted rule-help">Source <code>photos/day1/file.jpg</code> → <code>raws/photos/day1/file.jpg</code></p></div>`
+        : "";
+    return `<article class="file-rule-card" data-rule-index="${index}"><div class="rule-card-header"><span class="rule-number">Rule ${index + 1}</span><button class="icon" type="button" data-rule-remove aria-label="Remove rule">×</button></div><div class="rule-line">For <select data-rule-field="representation">${fileManagementOptionList(representationSelectors, rule.representation)}</select> representations of <select data-rule-field="asset">${fileManagementOptionList(assetSelectors, rule.asset)}</select> assets → <select data-rule-field="operation">${fileManagementOptionList(operationSelectors, rule.operation)}</select></div>${actionFields}</article>`;
   }).join("") || `<p class="muted">No rules yet. Add a rule to define the plan.</p>`;
   $("file-management-rules").querySelectorAll("[data-rule-index]").forEach(card => {
     const index = Number(card.dataset.ruleIndex);
@@ -68,7 +72,7 @@ function selectRuleset(id, {dirty = false} = {}) {
   const ruleset = fileManagement.rulesets.find(item => item.id === id);
   if (!ruleset) return;
   fileManagement.current = ruleset.id;
-  fileManagement.draft = (ruleset.rules || []).map(ruleToUi);
+  fileManagement.draft = (ruleset.rules || []).filter(rule => rule.enabled !== false).map(ruleToUi);
   fileManagement.dirty = dirty;
   $("file-management-ruleset-kind").textContent = ruleset.is_builtin && !dirty ? "Built-in" : dirty ? "Custom Ruleset" : "Custom";
   $("file-management-rename").classList.toggle("hidden", ruleset.is_builtin);
