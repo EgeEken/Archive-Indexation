@@ -1599,6 +1599,8 @@ The application image boundary is `media/image_decode.py`; Pillow-supported imag
 
 Phase 10A second-pass presentation details: File Management is planning-only and keeps its structured Rules/Compression profiles/Plan UI free of raw JSON. Disk capacity is displayed in IEC units as current free space, with estimated post-plan free space when available; copy/move rules say `Recreate source folders inside destination`. Zero storage-delta lines are omitted. The comparison and RAW overlays reuse the shared camera lifecycle, and RAW eye actions never enter comparison.
 
+The File Management dialog may show the restrained `Planning only` badge requested for this phase; the earlier no-phase-language rule applies to explanatory developer copy, not this concise product status badge.
+
 ## Phase 10 — compression pipeline
 
 ### Goal
