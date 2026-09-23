@@ -33,7 +33,7 @@ async function loadJobs() {
       const elapsed = formatRuntime(runtime.elapsed_seconds);
       const projected = formatRuntime(Math.max(runtime.projected_total_seconds, runtime.elapsed_seconds));
       const label = runtime.mode === "reindexing" ? "Re-indexing" : "Indexing";
-      $("job-runtime-copy").textContent = `${label} · elapsed ${elapsed} · projected total ${projected}`;
+      $("job-runtime-copy").textContent = `${label} · ${elapsed} / ${projected}`;
     } else {
       $("job-runtime-copy").textContent = "";
     }

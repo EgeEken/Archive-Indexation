@@ -41,17 +41,23 @@ class BrowserE2ETests(unittest.TestCase):
         cls.main_root = root / "indexed-workspace"
         cls.setup_root = root / "setup-workspace"
         cls.offline_root = root / "offline-workspace"
+        cls.raw_offline_root = root / "raw-offline-workspace"
         cls._create_main_fixtures(cls.main_root)
         cls._create_setup_fixtures(cls.setup_root)
         cls._create_image(cls.offline_root / "initial.jpg", (120, 80), (70, 140, 220))
+        cls._create_image(cls.raw_offline_root / "initial.jpg", (120, 80), (70, 140, 220))
+        (cls.raw_offline_root / "initial.arw").write_bytes(b"offline raw fixture")
         cls.main_workspace = cls._build_workspace(cls.main_root, semantic=True)
         cls.offline_workspace = cls._build_workspace(cls.offline_root, semantic=False)
+        cls.raw_offline_workspace = cls._build_workspace(cls.raw_offline_root, semantic=False)
         cls.main_handle = workspace_id(cls.main_workspace)
         cls.offline_handle = workspace_id(cls.offline_workspace)
+        cls.raw_offline_handle = workspace_id(cls.raw_offline_workspace)
         cls.registry_path = root / "registry.json"
         registry = WorkspaceRegistry(cls.registry_path)
         registry.add(cls.main_workspace)
         registry.add(cls.offline_workspace)
+        registry.add(cls.raw_offline_workspace)
 
         cls.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=cls.registry_path)
         cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -140,6 +146,16 @@ class BrowserE2ETests(unittest.TestCase):
             connection.execute("UPDATE physical_file SET in_scope = 0 WHERE extension = '.arw'")
         index_workspace(workspace, components=("metadata", "thumbnail"), quality_provider=OffQualityProvider())
         reconcile_workspace(workspace)
+        if (root / "initial.arw").exists():
+            with workspace.transaction() as connection:
+                jpeg = connection.execute("SELECT logical_asset_id FROM physical_file WHERE relative_path = 'initial.jpg'").fetchone()
+                raw = connection.execute("SELECT logical_asset_id FROM physical_file WHERE relative_path = 'initial.arw'").fetchone()
+                if jpeg and raw:
+                    if jpeg["logical_asset_id"] != raw["logical_asset_id"]:
+                        connection.execute("UPDATE physical_file SET logical_asset_id = ? WHERE relative_path = 'initial.arw'", (jpeg["logical_asset_id"],))
+                    connection.execute("UPDATE physical_file SET in_scope = 1, is_online = 0 WHERE relative_path = 'initial.arw'")
+                    if jpeg["logical_asset_id"] != raw["logical_asset_id"]:
+                        connection.execute("DELETE FROM logical_asset WHERE id = ?", (raw["logical_asset_id"],))
         with workspace.transaction() as connection:
             rows = connection.execute(
                 "SELECT logical_asset_id, relative_path FROM physical_file ORDER BY relative_path"
@@ -391,8 +407,29 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#file-management-dialog[open]").wait_for()
         self.assertIn("Archive cleanup", self.page.locator("#file-management-ruleset-select").inner_text())
         self.assertGreater(self.page.locator(".file-rule-card").count(), 0)
+        dialog_text = self.page.locator("#file-management-dialog").inner_text()
+        self.assertNotIn("Plan changes to the files in this archive.", dialog_text)
+        self.assertEqual(self.page.locator('[data-rule-field="enabled"]').count(), 0)
+        self.assertTrue(self.page.locator(".rule-number").first.inner_text().startswith("Rule "))
+        self.assertTrue(self.page.locator(".rule-line").first.inner_text().lstrip().startswith("For"), repr(self.page.locator(".rule-line").first.inner_text()))
+        copy_rule = self.page.locator(".file-rule-card").nth(2)
+        self.assertEqual(copy_rule.locator(".rule-options-copy [data-rule-field=\"destination\"]").count(), 1)
+        self.assertGreater(
+            copy_rule.locator(".rule-help").bounding_box()["y"],
+            copy_rule.locator("[data-rule-field=\"preserve\"]").bounding_box()["y"],
+        )
+        compression_rule = self.page.locator(".file-rule-card").nth(4)
+        self.assertEqual(compression_rule.locator(".rule-options-compress [data-rule-field=\"profileId\"]").count(), 1)
+        self.assertEqual(compression_rule.locator(".rule-options-compress [data-rule-field=\"disposition\"]").count(), 1)
+        self.assertEqual(compression_rule.locator(".rule-options-compress [data-rule-field=\"inPlace\"]").count(), 1)
+        self.assertGreater(
+            compression_rule.locator(".rule-options-compress [data-rule-field=\"destination\"]").bounding_box()["y"],
+            compression_rule.locator(".rule-options-compress .rule-checkboxes").bounding_box()["y"],
+        )
         first_rule = self.page.locator(".file-rule-card").first
         first_rule.locator('[data-rule-field="operation"]').select_option("copy")
+        self.assertEqual(first_rule.locator(".rule-options-copy [data-rule-field=\"destination\"]").count(), 1)
+        self.assertEqual(first_rule.locator(".rule-options-copy [data-rule-field=\"preserve\"]").count(), 1)
         self.page.locator("#file-management-ruleset-kind").wait_for()
         self.assertEqual(self.page.locator("#file-management-ruleset-kind").inner_text(), "Custom Ruleset")
         self.page.get_by_role("button", name="Analyze plan").click()
@@ -421,6 +458,23 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator(".comparison-slider").wait_for()
         self.page.locator("[data-comparison-close]").click()
         self.page.locator("#details-close").click()
+
+    def test_offline_raw_representation_short_circuits_viewer(self) -> None:
+        self.page.goto(f"{self.base_url}/?workspace={self.raw_offline_handle}", wait_until="domcontentloaded")
+        self.page.locator(".photo-card", has_text="initial.jpg").first.wait_for()
+        requests: list[str] = []
+        self.page.on("request", lambda request: requests.append(request.url))
+        self.page.locator(".photo-card", has_text="initial.jpg").first.locator(".info-button").click()
+        self.page.locator("#details[open]").wait_for()
+        raw_row = self.page.locator("#details .representation-row", has_text="initial.arw").first
+        self.assertIn("Offline", raw_row.inner_text())
+        raw_row.locator('[data-representation-view]').click()
+        self.page.locator("#representation-comparison[open]").wait_for()
+        self.assertIn("This representation is offline.", self.page.locator("#representation-comparison").inner_text())
+        self.assertEqual(self.page.locator("[data-raw-image]").count(), 0)
+        self.assertEqual(self.page.locator("[data-raw-exposure]").count(), 0)
+        self.assertEqual(self.page.locator("[data-compare-mode]").count(), 0)
+        self.assertFalse(any("raw-development-preview" in url for url in requests))
 
     def test_similar_weaker_results_navigation_and_close_variants(self) -> None:
         self._open_main()

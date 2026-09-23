@@ -16,11 +16,24 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
     def test_file_management_is_header_action_with_structured_sections(self):
         self.assertLess(self.html.index('id="file-management-button"'), self.html.index('id="configure-workspace"'))
         self.assertLess(self.html.index('id="configure-workspace"'), self.html.index('id="index"'))
+        self.assertNotIn("Plan changes to the files in this archive.", self.html)
         self.assertNotIn("Settings JSON", self.html)
         self.assertNotIn("Rules JSON", self.html)
         self.assertNotIn('id="file-management-output"', self.html)
         for marker in ("data-file-management-tab=\"rules\"", "data-file-management-tab=\"profiles\"", "data-file-management-tab=\"plan\"", "Analyze plan", "Custom Ruleset"):
             self.assertIn(marker, self.html + self.management)
+
+    def test_final_rule_editor_sentence_and_layout_contract(self):
+        maintenance = (self.root / "app-maintenance.js").read_text(encoding="utf-8")
+        self.assertNotIn('data-rule-field="enabled"', self.management)
+        self.assertNotIn("All representations", self.management)
+        self.assertIn('For <select data-rule-field="representation">', self.management)
+        self.assertIn('representations of <select data-rule-field="asset">', self.management)
+        self.assertIn('assets → <select data-rule-field="operation">', self.management)
+        self.assertIn("Rule ${index + 1}", self.management)
+        self.assertIn("${label} · ${elapsed} / ${projected}", maintenance)
+        self.assertNotIn("elapsed ${elapsed}", maintenance)
+        self.assertNotIn("projected total", maintenance)
 
     def test_rules_use_semantic_controls_and_no_executor(self):
         for marker in ("representation_class", "selection_state", "delete", "source_disposition", "destination_status", "executor"):
@@ -73,6 +86,12 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertNotIn("wipe.style.width", self.details)
         self.assertIn("dialog._comparisonDataKey", self.details)
         self.assertIn("Reference", self.details)
+        self.assertIn('min="-5" max="5"', self.details)
+        self.assertIn("openOfflineRepresentation", self.details)
+        self.assertIn("byte_identical", self.details)
+        for marker in ("Exact duplicate of preferred representation", "Pixel-identical to preferred representation", "Same size", "Reference ", "comparisonFactor"):
+            self.assertIn(marker, self.details)
+        self.assertNotIn("1× smaller", self.details)
         self.assertIn("Recreate source folders inside destination", (self.root / "app-file-management.js").read_text(encoding="utf-8"))
 
     def test_file_management_layout_uses_binary_disk_labels_and_conditional_rows(self):

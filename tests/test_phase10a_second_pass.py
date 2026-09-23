@@ -121,7 +121,45 @@ class Phase10ASecondPassTests(unittest.TestCase):
                 connection.close()
             result = comparison_data(workspace, ids[0], ids[1], "workspace")
             self.assertIsNotNone(result["metrics"]["mse"])
+            self.assertIn("byte_identical", result["metrics"])
             self.assertIn("comparison-preview", result["left"]["preview_url"])
+
+    def test_byte_identical_pair_is_explicitly_marked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pixels = np.full((20, 30, 3), [80, 120, 160], dtype=np.uint8)
+            Image.fromarray(pixels).save(root / "photo.jpg", quality=95)
+            (root / "copy.jpg").write_bytes((root / "photo.jpg").read_bytes())
+            workspace = Workspace.create(root)
+            scan(workspace)
+            reconcile_workspace(workspace)
+            connection = workspace.connect()
+            try:
+                ids = [row[0] for row in connection.execute("SELECT id FROM physical_file ORDER BY relative_path")]
+            finally:
+                connection.close()
+            result = comparison_data(workspace, ids[0], ids[1], "workspace")
+            self.assertTrue(result["metrics"]["byte_identical"])
+            self.assertTrue(result["metrics"]["pixel_identical"])
+
+    def test_pixel_identical_non_duplicate_pair_is_distinguished(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pixels = np.full((20, 30, 3), [80, 120, 160], dtype=np.uint8)
+            Image.fromarray(pixels).save(root / "photo.png", compress_level=0)
+            Image.fromarray(pixels).save(root / "other.png", compress_level=9)
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                rows = connection.execute("SELECT id, logical_asset_id FROM physical_file ORDER BY relative_path").fetchall()
+                connection.execute("UPDATE physical_file SET logical_asset_id = ? WHERE id = ?", (rows[0]["logical_asset_id"], rows[1]["id"]))
+                connection.commit()
+                result = comparison_data(workspace, rows[0]["id"], rows[1]["id"], "workspace")
+            finally:
+                connection.close()
+            self.assertFalse(result["metrics"]["byte_identical"])
+            self.assertTrue(result["metrics"]["pixel_identical"])
 
     def test_lar_iqa_preparation_uses_canonical_loader(self):
         provider = object.__new__(LARIQAProvider)
