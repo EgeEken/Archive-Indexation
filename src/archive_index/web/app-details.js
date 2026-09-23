@@ -26,7 +26,9 @@ function bindRepresentationActions(container, asset) {
   container.querySelectorAll("[data-representation-view]").forEach(button => button.addEventListener("click", () => {
     const file = asset.physical_files?.find(candidate => candidate.id === button.dataset.representationView);
     if (!file) return;
-    if (isRawRepresentation(file)) {
+    if (!file.is_online || file.in_scope === false) {
+      openOfflineRepresentation(file);
+    } else if (isRawRepresentation(file)) {
       openRawInspection(asset, file.id);
     } else if (file.is_preferred && asset._context) {
       const context = asset._context;
@@ -47,6 +49,15 @@ function compatibleRepresentations(asset, fileId) {
 }
 function defaultComparisonTarget(asset, fileId) {
   return compatibleRepresentations(asset, fileId).find(file => file.is_preferred) || null;
+}
+function openOfflineRepresentation(file) {
+  const dialog = $("representation-comparison");
+  ensureRepresentationDialogLifecycle(dialog);
+  disposeRepresentationDialog(dialog);
+  const format = isRawRepresentation(file) ? "RAW source" : (String(file.extension || "").replace(".", "").toUpperCase() || "File") + " representation";
+  dialog.innerHTML = `<div class="dialog-inner representation-offline"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">${escapeHtml(format)} (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close representation">×</button></div><div class="representation-offline-message"><strong>This representation is offline.</strong><p>Reconnect the storage containing this file to view it.</p></div></div>`;
+  dialog.showModal();
+  dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
 }
 function representationPreviewUrl(fileId) { return apiPath(`/api/files/${encodeURIComponent(fileId)}/comparison-preview`); }
 const displayPreviewUrl = file => file.display_preview_url || file.thumbnail_url || file.original_url;
@@ -88,6 +99,7 @@ function ensureRepresentationDialogLifecycle(dialog) {
 function openRepresentationInspection(asset, fileId) {
   const file = asset.physical_files?.find(candidate => candidate.id === fileId);
   if (!file) return;
+  if (!file.is_online || file.in_scope === false) return openOfflineRepresentation(file);
   if (isRawRepresentation(file)) return openRawInspection(asset, fileId);
   const target = defaultComparisonTarget(asset, fileId);
   const dialog = $("representation-comparison");
@@ -118,11 +130,28 @@ function openRepresentationInspection(asset, fileId) {
   if (comparisonOnly) renderRepresentationComparison(asset, fileId, target.id, "slider");
 }
 
-function comparisonMetricsMarkup(metrics) {
-  const ratio = metrics.compression_ratio == null ? "Unavailable" : `${metrics.compression_ratio}× smaller`;
+function isCompressedRepresentation(file) {
+  const extension = file?.extension?.toLowerCase() || (file?.format ? `.${file.format.toLowerCase()}` : "");
+  return [".jxl", ".avif", ".webp"].includes(extension);
+}
+function comparisonFactor(value) {
+  const number = Number(value);
+  return number.toFixed(number < 1.01 ? 3 : 2).replace(/\.?0+$/, "");
+}
+function comparisonMetricsMarkup(metrics, comparedFile) {
+  const referenceBytes = Number(metrics.reference_bytes || 0);
+  const comparedBytes = Number(metrics.compressed_bytes || 0);
+  const sizeLabel = comparedBytes === referenceBytes
+    ? "Same size"
+    : comparedBytes < referenceBytes
+      ? `${comparisonFactor(referenceBytes / comparedBytes)}× smaller`
+      : `${comparisonFactor(comparedBytes / referenceBytes)}× larger`;
+  const comparedLabel = isCompressedRepresentation(comparedFile) ? "Compressed" : "Compared";
   const percent = metrics.compressed_percent == null ? "Unavailable" : `${metrics.compressed_percent}% of reference`;
   const mse = metrics.mse == null ? `<span class="comparison-metric-mse">MSE Unavailable</span>` : `<span class="comparison-metric-mse" style="color:${escapeHtml(comparisonMseColor(metrics.mse))}">MSE ${escapeHtml(metrics.mse)}</span>`;
-  return `<span class="comparison-metric-reference">Reference ${escapeHtml(formatBytes(metrics.reference_bytes))} → Compressed ${escapeHtml(formatBytes(metrics.compressed_bytes))}</span><span class="comparison-metric-ratio">${escapeHtml(ratio)}</span><span class="comparison-metric-percent">${escapeHtml(percent)}</span>${mse}`;
+  const identity = metrics.byte_identical ? "Exact duplicate of preferred representation" : metrics.pixel_identical ? "Pixel-identical to preferred representation" : "";
+  const parts = [`Reference ${escapeHtml(formatBytes(referenceBytes))} → ${comparedLabel} ${escapeHtml(formatBytes(comparedBytes))}`, `<span class="comparison-metric-ratio">${escapeHtml(sizeLabel)}</span>`, `<span class="comparison-metric-percent">${escapeHtml(percent)}</span>`, mse];
+  return `${identity ? `<div class="comparison-metric-identity">${identity}</div>` : ""}<div class="comparison-metric-row">${parts.join(" · ")}</div>`;
 }
 
 function comparisonLabel(file) { return `${escapeHtml(file.filename)} · ${escapeHtml(formatBytes(file.size_bytes))}`; }
@@ -148,7 +177,7 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
     const reference = data.reference || data.left;
     const compressed = data.compressed || data.right;
     const headerMetrics = dialog.querySelector("[data-comparison-metrics]");
-    if (headerMetrics) headerMetrics.innerHTML = comparisonMetricsMarkup(metrics);
+    if (headerMetrics) headerMetrics.innerHTML = comparisonMetricsMarkup(metrics, compressed);
     const referenceLabel = comparisonLabel(reference);
     const compressedLabel = comparisonLabel(compressed);
     const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-base"><img class="comparison-compressed" src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
@@ -197,10 +226,11 @@ function rawExposureLabel(value) { return `${Number(value) >= 0 ? "+" : ""}${Num
 function openRawInspection(asset, fileId) {
   const file = asset.physical_files?.find(candidate => candidate.id === fileId);
   if (!file) return;
+  if (!file.is_online || file.in_scope === false) return openOfflineRepresentation(file);
   const dialog = $("representation-comparison");
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p><p class="muted raw-loading hidden" data-raw-loading>Loading preview…</p></div><label class="raw-exposure-control">Exposure <output data-raw-exposure-label>+0.00 EV</output><input data-raw-exposure type="range" min="-2" max="3" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p><p class="muted raw-loading hidden" data-raw-loading>Loading preview…</p></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-label>+0.00 EV</output><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
@@ -209,6 +239,11 @@ function openRawInspection(asset, fileId) {
   const errorNode = dialog.querySelector("[data-raw-error]");
   const label = dialog.querySelector("[data-raw-exposure-label]");
   const input = dialog.querySelector("[data-raw-exposure]");
+  const updateExposureControl = () => {
+    const value = Number(input.value);
+    label.textContent = rawExposureLabel(value);
+    input.style.setProperty("--range-progress", `${((value + 5) / 10) * 100}%`);
+  };
   const camera = new SharedImageCamera({viewport: stage, getFrames: () => [{image, frame: stage}], onChange: change => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }});
   dialog._rawCamera = camera;
   camera.setImages([image]);
@@ -243,10 +278,11 @@ function openRawInspection(asset, fileId) {
     }
   };
   input.addEventListener("input", () => {
-    label.textContent = rawExposureLabel(input.value);
+    updateExposureControl();
     clearTimeout(timer);
     timer = setTimeout(() => load(Number(input.value)), 150);
   });
+  updateExposureControl();
   load(0);
 }
 

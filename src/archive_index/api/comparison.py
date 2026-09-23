@@ -43,6 +43,7 @@ def comparison_data(workspace: Workspace, left_id: str, right_id: str, handle: s
             "mse": None,
             "psnr": None,
             "pixel_identical": None,
+            "byte_identical": bool(reference_row["sha256"] and compressed_row["sha256"] and reference_row["sha256"] == compressed_row["sha256"]),
         }
         metrics["source_bytes"] = metrics["reference_bytes"]
         metrics["comparison_bytes"] = metrics["compressed_bytes"]
