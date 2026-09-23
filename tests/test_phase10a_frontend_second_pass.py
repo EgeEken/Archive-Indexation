@@ -42,7 +42,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
           const value={style:{},offsetWidth:1200,offsetHeight:800,parent,
             getBoundingClientRect:()=>({left,top:0,right:left+width,bottom:height,width,height}),
             addEventListener(name,fn){listeners.set(value,{...(listeners.get(value)||{}),[name]:fn})},
-            removeEventListener(){}, closest(selector){return selector==='img'?value:null},
+            removeEventListener(name){const current=listeners.get(value)||{}; delete current[name]; listeners.set(value,current)}, closest(selector){return selector==='img'?value:null},
             contains(other){return other===value}, setPointerCapture(){}, hasPointerCapture(){return false}, releasePointerCapture(){}};
           return value;
         }
@@ -62,6 +62,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertLessEqual(abs(value["bounded"]["panX"]), 470)
         self.assertLessEqual(abs(value["bounded"]["panY"]), 80)
         self.assertTrue(value["bounded"]["same"])
+        self.assertEqual(value["listenerCount"], 0)
 
     def test_comparison_and_raw_interaction_contract(self):
         css = (self.root / "app.css").read_text(encoding="utf-8")
@@ -73,6 +74,18 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertIn("dialog._comparisonDataKey", self.details)
         self.assertIn("Reference", self.details)
         self.assertIn("Recreate source folders inside destination", (self.root / "app-file-management.js").read_text(encoding="utf-8"))
+
+    def test_file_management_layout_uses_binary_disk_labels_and_conditional_rows(self):
+        management = self.management
+        self.assertIn("Current free disk space", management)
+        self.assertIn("Estimated free disk space after plan", management)
+        self.assertIn("formatDiskSpace", management + (self.root / "app-setup.js").read_text(encoding="utf-8"))
+        self.assertIn("rule-options-compress", management)
+        self.assertIn("rule-options-copy", management)
+        self.assertIn("rule-checkbox", management)
+        self.assertNotIn("Keep source subfolders", management)
+        self.assertNotIn("Available space", management)
+        self.assertIn("storageDelta ?", management)
 
 
 if __name__ == "__main__":

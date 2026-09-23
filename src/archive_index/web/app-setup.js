@@ -295,6 +295,18 @@ function formatBytes(value) {
   return `${numeric < 0 ? "-" : ""}${amount.toFixed(precision).replace(/\.0+$|(?<=\.[0-9])0+$/, "")} ${units[unit]}`;
 }
 
+function formatDiskSpace(value) {
+  if (value == null) return "Unavailable";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "Unavailable";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = Math.abs(numeric);
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
+  const precision = unit === 0 ? 0 : amount >= 100 ? 1 : 2;
+  return `${numeric < 0 ? "-" : ""}${amount.toFixed(precision).replace(/\.0+$|(?<=\.[0-9])0+$/, "")} ${units[unit]}`;
+}
+
 async function confirmWorkspaceRemoval(id) {
   try {
     const info = await fetch("/api/workspaces/remove-info", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspace: id }) }).then(async (response) => {
