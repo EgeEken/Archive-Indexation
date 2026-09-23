@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from io import BytesIO
+from math import isfinite
 from threading import RLock
 
 from PIL import Image
@@ -14,13 +15,17 @@ from .errors import ResourceNotFound
 
 MAX_LONG_EDGE = 2560
 MAX_CACHE_ENTRIES = 16
+MIN_EXPOSURE_EV = -5.0
+MAX_EXPOSURE_EV = 5.0
+RAW_EXP_MIN_EV = -2.0
+RAW_EXP_MAX_EV = 3.0
 _cache: OrderedDict[tuple[str, int, int, float], bytes] = OrderedDict()
 _cache_lock = RLock()
 
 
 def raw_development_preview(workspace: Workspace, physical_id: str, exposure_ev: float) -> bytes:
-    if not -2 <= exposure_ev <= 3 or abs(exposure_ev * 4 - round(exposure_ev * 4)) > 1e-6:
-        raise ValueError("exposure_ev must be between -2 and 3 in 0.25 EV steps")
+    if not isfinite(exposure_ev) or not MIN_EXPOSURE_EV <= exposure_ev <= MAX_EXPOSURE_EV or abs(exposure_ev * 4 - round(exposure_ev * 4)) > 1e-6:
+        raise ValueError("exposure_ev must be between -5 and 5 in 0.25 EV steps")
     connection = workspace.connect()
     try:
         row = connection.execute(
@@ -57,16 +62,17 @@ def _decode_and_resize(source, exposure_ev: float) -> bytes:
     except ImportError as error:
         raise ValueError("RAW development is unavailable for this file") from error
     try:
+        raw_exposure = max(RAW_EXP_MIN_EV, min(RAW_EXP_MAX_EV, exposure_ev))
+        residual_exposure = exposure_ev - raw_exposure
         with rawpy.imread(str(source)) as raw:
             pixels = raw.postprocess(
                 use_camera_wb=True,
                 no_auto_bright=True,
-                exp_shift=2.0 ** exposure_ev,
+                exp_shift=2.0 ** raw_exposure,
+                bright=2.0 ** residual_exposure,
                 output_color=rawpy.ColorSpace.sRGB,
                 output_bps=8,
-                gamma=(1, 1),
                 half_size=True,
-                user_flip=0,
             )
         with Image.fromarray(pixels, mode="RGB") as image:
             image.thumbnail((MAX_LONG_EDGE, MAX_LONG_EDGE), Image.Resampling.LANCZOS)
