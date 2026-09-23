@@ -222,12 +222,12 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
             item_conflicts.append("target path is missing")
         elif target.casefold() == source.casefold():
             item_conflicts.append("target would overwrite the source")
-        elif target in targets:
-            item_conflicts.append(f"target collides with {targets[target]}")
+        elif target.casefold() in targets:
+            item_conflicts.append(f"target collides with {targets[target.casefold()]}")
         elif _workspace_file_exists(workspace, target):
             item_conflicts.append("target already exists")
         if target:
-            targets[target] = source
+            targets[target.casefold()] = source
         operation_row = {
             "physical_file_id": row["id"],
             "logical_asset_id": row["logical_asset_id"],

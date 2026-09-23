@@ -79,6 +79,21 @@ def extract_metadata(path: Path, media_type: str) -> MediaMetadata:
 
 
 def _extract_image_metadata(path: Path) -> MediaMetadata:
+    if path.suffix.casefold() == ".jxl":
+        from .jxl import decode
+
+        try:
+            image = decode(path)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise UnsupportedDecoderError(str(error)) from error
+        try:
+            return MediaMetadata(
+                values={"format": "JXL", "mode": image.mode, "exif": {}},
+                width=image.width,
+                height=image.height,
+            )
+        finally:
+            image.close()
     try:
         with Image.open(path) as image:
             exif = image.getexif()
