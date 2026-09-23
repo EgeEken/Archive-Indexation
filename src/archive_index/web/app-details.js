@@ -65,6 +65,8 @@ function comparisonMseColor(value) {
 }
 
 function disposeRepresentationDialog(dialog) {
+  const rawImage = dialog.querySelector("[data-raw-image]");
+  if (rawImage?.dataset.objectUrl) URL.revokeObjectURL(rawImage.dataset.objectUrl);
   dialog._comparisonCamera?.destroy();
   dialog._rawCamera?.destroy();
   dialog._comparisonCamera = null;
@@ -198,7 +200,7 @@ function openRawInspection(asset, fileId) {
   const dialog = $("representation-comparison");
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p><p class="muted raw-loading hidden" data-raw-loading>Loading preview…</p></div><label class="raw-exposure-control">Exposure <output data-raw-exposure-label>+0.00 EV</output><input data-raw-exposure type="range" min="-2" max="3" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p><p class="muted raw-loading hidden" data-raw-loading>Loading preview…</p></div><label class="raw-exposure-control">Exposure <output data-raw-exposure-label>+0.00 EV</output><input data-raw-exposure type="range" min="-2" max="3" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
