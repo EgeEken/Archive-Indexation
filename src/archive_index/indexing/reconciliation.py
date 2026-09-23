@@ -305,7 +305,7 @@ def _raw_jpeg_candidates(assets, physical, canonical):
             members = files_by_asset[raw_ids[0]]
             candidates.append((raw_ids[0], rendered_ids[0], {"rule": "already_reconciled"},
                                [row["id"] for row in members if is_raw_extension(row["extension"])],
-                               [row["id"] for row in members if is_rendered_image_extension(row["extension"])]))
+                               [row["id"] for row in members if is_rendered_image_extension(row["extension"]) and row["extension"].casefold() != ".jxl"]))
             continue
         if len(raw_ids) != 1 or len(rendered_ids) != 1:
             if raw_ids and rendered_ids:
@@ -325,7 +325,7 @@ def _raw_jpeg_candidates(assets, physical, canonical):
         raw_id, rendered_id = raw_ids[0], rendered_ids[0]
         evidence = _pair_evidence(asset_map[raw_id], asset_map[rendered_id], files_by_asset)
         if evidence is not None:
-            candidates.append((raw_id, rendered_id, evidence, [row["id"] for row in files_by_asset[raw_id] if is_raw_extension(row["extension"])], [row["id"] for row in files_by_asset[rendered_id] if is_rendered_image_extension(row["extension"])]))
+            candidates.append((raw_id, rendered_id, evidence, [row["id"] for row in files_by_asset[raw_id] if is_raw_extension(row["extension"])], [row["id"] for row in files_by_asset[rendered_id] if is_rendered_image_extension(row["extension"]) and row["extension"].casefold() != ".jxl"]))
     return candidates, ambiguities
 
 

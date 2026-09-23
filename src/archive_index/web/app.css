@@ -206,9 +206,6 @@
 .representation-actions .secondary { padding: .25rem .45rem; font-size: .75rem; }
 .representation-comparison-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 #representation-comparison { width: min(760px, calc(100% - 2rem)); }
-.file-management-form { display: grid; gap: .45rem; margin-top: .8rem; }
-.file-management-form textarea { min-height: 5rem; font: .8rem ui-monospace, SFMono-Regular, Consolas, monospace; }
-.file-management-output { max-height: 18rem; overflow: auto; white-space: pre-wrap; background: #151b20; padding: .7rem; }
 .file-management-dialog { width: min(92vw, 1180px); height: min(88vh, 900px); }
 .file-management-inner { min-height: 100%; box-sizing: border-box; display: flex; flex-direction: column; }
 .file-management-header-actions, .ruleset-toolbar, .file-management-tabs, .form-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
