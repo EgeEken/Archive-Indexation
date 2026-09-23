@@ -12,6 +12,8 @@ from typing import Any
 
 from PIL import ExifTags, Image, UnidentifiedImageError
 
+from .image_decode import load_full_image
+
 DECODER_GAP_EXTENSIONS = frozenset(
     {".arw", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jxl", ".nef", ".raf", ".rw2"}
 )
@@ -70,20 +72,22 @@ class MediaMetadata:
     codec: str | None = None
 
 
-def extract_metadata(path: Path, media_type: str) -> MediaMetadata:
+def extract_metadata(
+    path: Path,
+    media_type: str,
+    prepared_image: Image.Image | None = None,
+) -> MediaMetadata:
     if media_type == "image":
-        return _extract_image_metadata(path)
+        return _extract_image_metadata(path, prepared_image)
     if media_type == "video":
         return _probe_video_metadata(path)
     raise MetadataExtractionError(f"unsupported media type: {media_type}")
 
 
-def _extract_image_metadata(path: Path) -> MediaMetadata:
+def _extract_image_metadata(path: Path, prepared_image: Image.Image | None = None) -> MediaMetadata:
     if path.suffix.casefold() == ".jxl":
-        from .jxl import decode
-
         try:
-            image = decode(path)
+            image = load_full_image(path, prepared_image)
         except (OSError, RuntimeError, ValueError) as error:
             raise UnsupportedDecoderError(str(error)) from error
         try:

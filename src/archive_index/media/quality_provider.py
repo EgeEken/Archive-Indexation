@@ -15,6 +15,8 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, ImageOps
 
+from .image_decode import load_full_image
+
 QUALITY_PROVIDER_OFF = "off"
 QUALITY_PROVIDER_LAR_IQA = "lar-iqa"
 LAR_IQA_ALGORITHM = "lar-iqa"
@@ -34,6 +36,13 @@ class QualityProviderError(RuntimeError):
 
 class QualityProviderUnavailable(QualityProviderError):
     """The selected provider is not installed or configured."""
+
+
+class QualityPreparationBatchError(QualityProviderError):
+    def __init__(self, results, errors):
+        super().__init__("one or more images could not be prepared for quality scoring")
+        self.results = results
+        self.errors = errors
 
 
 @dataclass(frozen=True)
@@ -94,8 +103,11 @@ class LegacyPillowProvider:
 
         results = []
         for path in paths:
-            with Image.open(path) as image:
+            image = load_full_image(path)
+            try:
                 result = measure_quality(image)
+            finally:
+                image.close()
             results.append(ProviderResult(result.raw, result.score, result.components))
         return results
 
@@ -218,11 +230,17 @@ class LARIQAProvider:
         return self._score_tensors(authentic, synthetic)
 
     def _prepare_batch(self, preparation_pool, paths):
-        return list(preparation_pool.map(self._prepare_path, paths))
+        prepared = []
+        futures = [preparation_pool.submit(self._prepare_path, path) for path in paths]
+        for future in futures:
+            try:
+                prepared.append((future.result(), None))
+            except Exception as error:
+                prepared.append((None, error))
+        return prepared
 
     def _prepare_path(self, path: Path):
-        with Image.open(path) as source:
-            image = ImageOps.exif_transpose(source).convert("RGB")
+        image = load_full_image(path)
         try:
             return self._transforms.authentic(image), self._transforms.synthetic(image)
         finally:
@@ -412,7 +430,9 @@ class _LARIQABatchSession:
             paths[start : start + self.provider.batch_size]
             for start in range(0, len(paths), self.provider.batch_size)
         ]
-        results: list[ProviderResult] = []
+        results: list[ProviderResult | None] = [None] * len(paths)
+        errors = {}
+        start = 0
         future = self.prefetch_pool.submit(
             self.provider._prepare_batch, self.preparation_pool, batches[0]
         )
@@ -429,12 +449,22 @@ class _LARIQABatchSession:
                     self.preparation_pool,
                     batches[index + 1],
                 )
-            authentic = [item[0] for item in prepared]
-            synthetic = [item[1] for item in prepared]
-            inference_started = perf_counter()
-            results.extend(self.provider._score_tensors(authentic, synthetic))
-            self.provider.last_timings["quality.inference"] = (
-                self.provider.last_timings.get("quality.inference", 0.0)
-                + perf_counter() - inference_started
-            )
+            valid = [(position, item[0]) for position, item in enumerate(prepared) if item[0] is not None]
+            for position, (_, error) in enumerate(prepared):
+                if error is not None:
+                    errors[start + position] = error
+            if valid:
+                authentic = [item[1][0] for item in valid]
+                synthetic = [item[1][1] for item in valid]
+                inference_started = perf_counter()
+                batch_results = self.provider._score_tensors(authentic, synthetic)
+                self.provider.last_timings["quality.inference"] = (
+                    self.provider.last_timings.get("quality.inference", 0.0)
+                    + perf_counter() - inference_started
+                )
+                for (position, _), result in zip(valid, batch_results):
+                    results[start + position] = result
+            start += len(prepared)
+        if errors:
+            raise QualityPreparationBatchError(results, errors)
         return results

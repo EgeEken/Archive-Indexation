@@ -15,6 +15,7 @@ from ..jobs.engine import JobProgress, JobRunResult, JobStore, run_batches, run_
 from ..media.metadata import UnsupportedDecoderError, extract_metadata
 from ..media.quality_provider import (
     QualityProvider,
+    QualityPreparationBatchError,
     QualityProviderUnavailable,
     create_quality_provider,
 )
@@ -70,7 +71,15 @@ def index_workspace(
         connection = workspace.connect()
         try:
             rows = connection.execute(
-                "SELECT * FROM physical_file WHERE is_online = 1 AND in_scope = 1 ORDER BY relative_path"
+                """
+                SELECT pf.*, dp.output_path AS current_display_preview_path,
+                       dp.version AS current_display_preview_version,
+                       dp.input_fingerprint AS current_display_preview_fingerprint
+                FROM physical_file AS pf
+                LEFT JOIN display_preview AS dp ON dp.physical_file_id = pf.id
+                WHERE pf.is_online = 1 AND pf.in_scope = 1
+                ORDER BY pf.relative_path
+                """
             ).fetchall()
         finally:
             connection.close()
@@ -510,19 +519,29 @@ def _index_media_batches(
             "errors": {},
             "timings": TimingRecorder(),
         }
-        if not pending:
+        preview_needed = row["extension"].casefold() == ".jxl" and not _display_preview_current(workspace, row, fingerprint)
+        if not pending and not preview_needed:
             return result
         source = workspace.absolute_path(row["relative_path"])
-        if METADATA_COMPONENT in pending:
+        prepared_image = None
+        if row["media_type"] == "image" and row["extension"].casefold() == ".jxl" and (pending or preview_needed):
+            try:
+                with timed(result["timings"], "jxl.decode"):
+                    prepared_image = load_full_image(source)
+            except Exception as error:
+                if METADATA_COMPONENT in pending:
+                    result["errors"][METADATA_COMPONENT] = error
+                if THUMBNAIL_COMPONENT in pending:
+                    result["errors"][THUMBNAIL_COMPONENT] = error
+        if METADATA_COMPONENT in pending and METADATA_COMPONENT not in result["errors"]:
             try:
                 with timed(result["timings"], "metadata.extract"):
-                    result["metadata"] = extract_metadata(source, row["media_type"])
+                    result["metadata"] = extract_metadata(source, row["media_type"], prepared_image)
             except Exception as error:
                 result["errors"][METADATA_COMPONENT] = error
         if THUMBNAIL_COMPONENT in pending:
-            prepared_image = None
             try:
-                if row["media_type"] == "image":
+                if row["media_type"] == "image" and prepared_image is None:
                     with timed(result["timings"], "thumbnail.decode"):
                         prepared_image = (
                             load_raw_preview(source)
@@ -535,9 +554,9 @@ def _index_media_batches(
                     generate_thumbnail(source, destination, THUMBNAIL_SIZE, media_type="video", **timing_kwargs)
                 else:
                     generate_thumbnail(source, destination, THUMBNAIL_SIZE, prepared_image, **timing_kwargs)
-                if row["extension"].casefold() == ".jxl":
+                if row["extension"].casefold() == ".jxl" and not _display_preview_current(workspace, row, fingerprint):
                     display_destination = workspace.index_directory / "previews" / f"{row['id']}.jpg"
-                    generate_display_preview(source, display_destination)
+                    generate_display_preview(source, display_destination, prepared_image)
                     result["display_preview"] = (
                         workspace.index_relative_path(display_destination),
                         "imagecodecs-jxl-display-jpeg",
@@ -549,6 +568,20 @@ def _index_media_batches(
                     destination,
                     workspace.index_relative_path(destination),
                     output_fingerprint,
+                )
+            except Exception as error:
+                result["errors"][THUMBNAIL_COMPONENT] = error
+            finally:
+                if prepared_image is not None:
+                    prepared_image.close()
+        elif preview_needed and prepared_image is not None:
+            try:
+                display_destination = workspace.index_directory / "previews" / f"{row['id']}.jpg"
+                generate_display_preview(source, display_destination, prepared_image)
+                result["display_preview"] = (
+                    workspace.index_relative_path(display_destination),
+                    "imagecodecs-jxl-display-jpeg",
+                    "imagecodecs-jxl-display-v1",
                 )
             except Exception as error:
                 result["errors"][THUMBNAIL_COMPONENT] = error
@@ -817,7 +850,10 @@ def _process_file(
     needs_pixels = THUMBNAIL_COMPONENT in image_components or QUALITY_COMPONENT in image_components
     if row["media_type"] == "image" and needs_pixels:
         try:
-            if QUALITY_COMPONENT in image_components and provider.algorithm == "lar-iqa" and not is_raw_extension(row["extension"]):
+            if row["extension"].casefold() == ".jxl":
+                with timed(timings, "jxl.decode"):
+                    prepared_image = load_full_image(source)
+            elif QUALITY_COMPONENT in image_components and provider.algorithm == "lar-iqa" and not is_raw_extension(row["extension"]):
                 with timed(timings, "quality.decode_rgb"):
                     prepared_image = load_full_image(source)
             else:
@@ -835,7 +871,7 @@ def _process_file(
             try:
                 if component == METADATA_COMPONENT:
                     with timed(timings, "metadata.processing", 1):
-                        _process_metadata(workspace, row, source, fingerprint, timings)
+                        _process_metadata(workspace, row, source, fingerprint, timings, prepared_image)
                 elif row["media_type"] == "video" and component == QUALITY_COMPONENT:
                     _mark_not_requested(workspace, row["id"], component, fingerprint, provider)
                 elif image_error is not None:
@@ -866,9 +902,10 @@ def _process_metadata(
     source: Path,
     fingerprint: str,
     timings: TimingRecorder | None = None,
+    prepared_image=None,
 ) -> None:
     with timed(timings, "metadata.extract"):
-        result = extract_metadata(source, row["media_type"])
+        result = extract_metadata(source, row["media_type"], prepared_image)
     values = json.dumps(result.values, ensure_ascii=False, sort_keys=True)
     with timed(timings, "metadata.persistence"):
         with workspace.transaction() as connection:
@@ -923,9 +960,9 @@ def _process_thumbnail(
     else:
         generate_thumbnail(source, destination, THUMBNAIL_SIZE, prepared_image, **timing_kwargs)
     display_destination = None
-    if row["extension"].casefold() == ".jxl":
+    if row["extension"].casefold() == ".jxl" and not _display_preview_current(workspace, row, fingerprint):
         display_destination = workspace.index_directory / "previews" / f"{row['id']}.jpg"
-        generate_display_preview(source, display_destination)
+        generate_display_preview(source, display_destination, prepared_image)
     output_fingerprint = _file_fingerprint(destination)
     output_path = workspace.index_relative_path(destination)
     settings = json.dumps(provenance, sort_keys=True)
@@ -1125,6 +1162,20 @@ def _index_quality_batches(
                 for row, _ in pending:
                     _mark_failed(workspace, row["id"], QUALITY_COMPONENT, error)
                     outcomes[row["id"]] = error
+            except QualityPreparationBatchError as error:
+                for index, ((row, fingerprint), result) in enumerate(zip(pending, error.results)):
+                    preparation_error = error.errors.get(index)
+                    if preparation_error is not None:
+                        _mark_failed(workspace, row["id"], QUALITY_COMPONENT, preparation_error)
+                        outcomes[row["id"]] = preparation_error
+                    else:
+                        try:
+                            _store_quality_result(workspace, row, fingerprint, provider, result)
+                        except Exception as store_error:
+                            _mark_failed(workspace, row["id"], QUALITY_COMPONENT, store_error)
+                            outcomes[row["id"]] = store_error
+                        else:
+                            outcomes[row["id"]] = None
             except Exception:
                 for row, fingerprint in pending:
                     try:
@@ -1386,6 +1437,25 @@ def _file_fingerprint(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _display_preview_current(workspace, row, fingerprint: str) -> bool:
+    try:
+        path = row["current_display_preview_path"]
+        version = row["current_display_preview_version"]
+        source_fingerprint = row["current_display_preview_fingerprint"]
+    except (IndexError, KeyError):
+        return False
+    try:
+        exists = workspace.index_path(path).is_file()
+    except (OSError, ValueError):
+        exists = False
+    return bool(
+        path
+        and exists
+        and version == "imagecodecs-jxl-display-v1"
+        and source_fingerprint == fingerprint
+    )
 
 
 def _provenance(

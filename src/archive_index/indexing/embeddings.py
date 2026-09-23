@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 from ..embeddings.providers import EmbeddingProvider, create_embedding_provider
 from ..embeddings.runtime import embedding_runtime
@@ -21,6 +21,7 @@ from ..embeddings.vector import vector_to_blob
 from ..indexing.representations import preferred_physical
 from ..jobs.engine import SUBSTAGE_CONTEXT, report_substage, JobProgress, JobRunResult, JobStore
 from ..media.metadata import UnsupportedDecoderError
+from ..media.image_decode import load_full_image
 from ..media.raw_preview import extract_embedded_preview
 from ..media_types import is_raw_extension, is_rendered_image_extension
 from ..workspace import Workspace
@@ -552,8 +553,7 @@ def _load_source_image(workspace, source):
     path = workspace.absolute_path(source["relative_path"])
     if source["source_kind"] == "raw_preview":
         return extract_embedded_preview(path).image
-    with Image.open(path) as image:
-        return ImageOps.exif_transpose(image).convert("RGB").copy()
+    return load_full_image(path)
 
 
 def _store_image_embedding(workspace, source, provider, run_id, vector):

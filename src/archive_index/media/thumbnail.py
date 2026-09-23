@@ -10,7 +10,8 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .metadata import DECODER_GAP_EXTENSIONS, MetadataExtractionError, UnsupportedDecoderError
-from .jxl import decode as decode_jxl
+from .image_decode import load_full_image as _load_full_image
+from .image_decode import load_reduced_image as _load_reduced_image
 from .raw_preview import RAW_PREVIEW_ALGORITHM, RAW_PREVIEW_VERSION, extract_embedded_preview
 from ..timing import TimingRecorder, timed
 
@@ -117,10 +118,14 @@ def generate_thumbnail(
             pass
 
 
-def generate_display_preview(source: Path, destination: Path) -> None:
+def generate_display_preview(
+    source: Path,
+    destination: Path,
+    prepared_image: Image.Image | None = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
-    image = load_full_image(source)
+    image = _load_full_image(source, prepared_image)
     try:
         image.thumbnail(DISPLAY_PREVIEW_SIZE, Image.Resampling.LANCZOS)
         image.save(temporary, format="JPEG", quality=88, optimize=True)
@@ -135,20 +140,13 @@ def generate_display_preview(source: Path, destination: Path) -> None:
             pass
 
 
-def load_reduced_image(source: Path, size: tuple[int, int] = THUMBNAIL_SIZE) -> Image.Image:
-    if source.suffix.casefold() == ".jxl":
-        image = decode_jxl(source)
-        image.thumbnail(size, Image.Resampling.LANCZOS)
-        return image.convert("RGB") if image.mode != "RGB" else image
+def load_reduced_image(
+    source: Path,
+    size: tuple[int, int] = THUMBNAIL_SIZE,
+    prepared_image: Image.Image | None = None,
+) -> Image.Image:
     try:
-        with Image.open(source) as image:
-            if image.format in {"JPEG", "MPO"}:
-                image.draft("RGB", size)
-            image = ImageOps.exif_transpose(image)
-            image.thumbnail(size, Image.Resampling.LANCZOS)
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            return image.copy()
+        return _load_reduced_image(source, size, prepared_image)
     except UnidentifiedImageError as error:
         if source.suffix.casefold() in DECODER_GAP_EXTENSIONS:
             raise UnsupportedDecoderError(
@@ -157,16 +155,9 @@ def load_reduced_image(source: Path, size: tuple[int, int] = THUMBNAIL_SIZE) -> 
         raise
 
 
-def load_full_image(source: Path) -> Image.Image:
-    if source.suffix.casefold() == ".jxl":
-        image = decode_jxl(source)
-        return image.convert("RGB") if image.mode != "RGB" else image
+def load_full_image(source: Path, prepared_image: Image.Image | None = None) -> Image.Image:
     try:
-        with Image.open(source) as image:
-            oriented = ImageOps.exif_transpose(image)
-            if oriented.mode != "RGB":
-                oriented = oriented.convert("RGB")
-            return oriented.copy()
+        return _load_full_image(source, prepared_image)
     except UnidentifiedImageError as error:
         if source.suffix.casefold() in DECODER_GAP_EXTENSIONS:
             raise UnsupportedDecoderError(
