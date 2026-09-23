@@ -10,16 +10,20 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .metadata import DECODER_GAP_EXTENSIONS, MetadataExtractionError, UnsupportedDecoderError
+from .jxl import decode as decode_jxl
 from .raw_preview import RAW_PREVIEW_ALGORITHM, RAW_PREVIEW_VERSION, extract_embedded_preview
 from ..timing import TimingRecorder, timed
 
 THUMBNAIL_SIZE = (320, 320)
+DISPLAY_PREVIEW_SIZE = (2048, 2048)
 IMAGE_THUMBNAIL_ALGORITHM = "pillow-reduced-jpeg"
 IMAGE_THUMBNAIL_VERSION = "pillow-jpeg-v2"
 VIDEO_THUMBNAIL_ALGORITHM = "ffmpeg-center-frame-jpeg"
 VIDEO_THUMBNAIL_VERSION = "ffmpeg-center-frame-jpeg-v2"
 RAW_THUMBNAIL_ALGORITHM = "rawpy-preview-jpeg"
 RAW_THUMBNAIL_VERSION = "rawpy-preview-jpeg-v2"
+JXL_THUMBNAIL_ALGORITHM = "imagecodecs-jxl-jpeg"
+JXL_THUMBNAIL_VERSION = "imagecodecs-jxl-jpeg-v1"
 THUMBNAIL_JPEG_QUALITY = 50
 THUMBNAIL_VERSION = IMAGE_THUMBNAIL_VERSION
 
@@ -44,6 +48,16 @@ def thumbnail_provenance(media_type: str, extension: str | None = None) -> tuple
                 "pipeline": "rawpy-embedded-preview",
                 "preview_algorithm": RAW_PREVIEW_ALGORITHM,
                 "preview_version": RAW_PREVIEW_VERSION,
+                "size": THUMBNAIL_SIZE,
+                "jpeg_quality": THUMBNAIL_JPEG_QUALITY,
+            },
+        )
+    if extension and extension.casefold() == ".jxl":
+        return (
+            JXL_THUMBNAIL_ALGORITHM,
+            JXL_THUMBNAIL_VERSION,
+            {
+                "pipeline": "imagecodecs-jpegxl-decode",
                 "size": THUMBNAIL_SIZE,
                 "jpeg_quality": THUMBNAIL_JPEG_QUALITY,
             },
@@ -103,7 +117,29 @@ def generate_thumbnail(
             pass
 
 
+def generate_display_preview(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    image = load_full_image(source)
+    try:
+        image.thumbnail(DISPLAY_PREVIEW_SIZE, Image.Resampling.LANCZOS)
+        image.save(temporary, format="JPEG", quality=88, optimize=True)
+        with Image.open(temporary) as validation:
+            validation.verify()
+        os.replace(temporary, destination)
+    finally:
+        image.close()
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def load_reduced_image(source: Path, size: tuple[int, int] = THUMBNAIL_SIZE) -> Image.Image:
+    if source.suffix.casefold() == ".jxl":
+        image = decode_jxl(source)
+        image.thumbnail(size, Image.Resampling.LANCZOS)
+        return image.convert("RGB") if image.mode != "RGB" else image
     try:
         with Image.open(source) as image:
             if image.format in {"JPEG", "MPO"}:
@@ -122,6 +158,9 @@ def load_reduced_image(source: Path, size: tuple[int, int] = THUMBNAIL_SIZE) -> 
 
 
 def load_full_image(source: Path) -> Image.Image:
+    if source.suffix.casefold() == ".jxl":
+        image = decode_jxl(source)
+        return image.convert("RGB") if image.mode != "RGB" else image
     try:
         with Image.open(source) as image:
             oriented = ImageOps.exif_transpose(image)

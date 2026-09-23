@@ -65,11 +65,11 @@ $("viewer-media-pane").addEventListener("pointerdown", (event) => {
 });
 $("viewer-media-pane").addEventListener("pointermove", (event) => { if (!state.dragging) return; state.viewerPanX = state.dragPanX + event.clientX - state.dragStartX; state.viewerPanY = state.dragPanY + event.clientY - state.dragStartY; applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); });
 ["pointerup", "pointercancel"].forEach((eventName) => $("viewer-media-pane").addEventListener(eventName, (event) => { if (!state.dragging) return; state.dragging = false; state.viewerClickSuppressed = true; setTimeout(() => { state.viewerClickSuppressed = false; }, 0); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); applyViewerTransform($("viewer-media").querySelector("img.viewer-media")); }));
-["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
-["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => bindBackdropClose($(id)));
+["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => $(id).addEventListener("close", () => { if (!["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((name) => $(name).open)) document.body.classList.remove("modal-open"); }));
+["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].forEach((id) => bindBackdropClose($(id)));
 window.addEventListener("resize", () => applyViewerTransform($("viewer-media").querySelector("img.viewer-media")));
 document.addEventListener("keydown", (event) => {
-  if ($("details").open || $("problems-dialog").open || $("offline-dialog").open || $("remove-workspace-dialog").open || ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
+  if ($("details").open || $("representation-comparison").open || $("file-management-dialog").open || $("problems-dialog").open || $("offline-dialog").open || $("remove-workspace-dialog").open || ["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
   const key = event.key.toLowerCase();
   if ($("viewer").open) {
     if ({ s: "selected", r: "rejected", u: "undecided" }[key]) { event.preventDefault(); const item = state.viewerItems[state.viewerIndex]; if (item) setDecision(item.asset_id, { s: "selected", r: "rejected", u: "undecided" }[key]); return; }

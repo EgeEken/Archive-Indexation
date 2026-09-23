@@ -29,6 +29,7 @@ const state = {
   viewerSequenceIds: [],
   viewerGroupId: null,
   viewerDetail: null,
+  representationComparison: [],
   activeJobId: null,
   assetRequest: 0,
   jobsRequest: 0,

@@ -82,7 +82,8 @@ function renderSetupFolder(node, configuration) {
   const supported = Number(planRow?.supported_files ?? node.recognized_files ?? 0);
   const pending = Number(planRow?.pending_files ?? supported);
   const reusable = Number(planRow?.reusable_files ?? 0);
-  const counts = `${supported.toLocaleString()}/${Number(node.direct_files || 0).toLocaleString()} supported${compositionText ? ` · ${compositionText}` : ""} · ${formatBytes(planRow?.supported_bytes ?? node.direct_bytes ?? 0)} · ${pending.toLocaleString()} pending · ${reusable.toLocaleString()} cached · +${formatEta(planRow?.pending_eta_seconds ?? planRow?.eta_seconds ?? 0)}`;
+  const pendingEta = Number(planRow?.pending_eta_seconds ?? planRow?.eta_seconds ?? 0);
+  const counts = `${supported.toLocaleString()}/${Number(node.direct_files || 0).toLocaleString()} supported${compositionText ? ` · ${compositionText}` : ""} · ${formatBytes(planRow?.supported_bytes ?? node.direct_bytes ?? 0)} · ${pending.toLocaleString()} pending · ${reusable.toLocaleString()} cached · ${pendingEta > 0 ? `+${formatEta(pendingEta)}` : "ready"}`;
   const children = (node.children || []).map((child) => renderSetupFolder(child, configuration)).join("");
   return `<div class="folder-node"><label class="folder-choice"><input type="checkbox" data-folder-path="${escapeHtml(node.path)}"${checked ? " checked" : ""}> <span>${escapeHtml(label)}</span></label><span class="muted folder-node-counts">${counts}</span>${node.error ? `<p class="error">${escapeHtml(node.error)}</p>` : ""}${children ? `<div class="folder-children">${children}</div>` : ""}</div>`;
 }
@@ -104,10 +105,11 @@ function renderSetupPlanData(plan) {
   $("setup-index-summary").innerHTML = `Indexed: ${reusable.toLocaleString()} / ${files.toLocaleString()} · Estimated indexing time: <span class="setup-eta-value">${escapeHtml(formatEta(remaining))}</span>`;
   const eta = plan.eta_seconds_by_feature || {};
   const qualityEta = Number(eta.rendered_quality || 0) + Number(eta.raw_quality || 0);
-  $("setup-quality-eta").textContent = configuration.quality_enabled ? `+${formatEta(qualityEta)}` : "off";
+  $("setup-quality-eta").textContent = configuration.quality_enabled ? qualityEta > 0 ? `+${formatEta(qualityEta)}` : "ready" : "off";
   const videoEta = Number(configuration.video_quality_enabled ? eta.video_quality || 0 : 0) + Number(configuration.include_videos_in_semantic_search ? plan.embedding_video_estimated_seconds || 0 : 0);
-  $("setup-video-eta").textContent = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search ? `+${formatEta(videoEta)}` : "off";
-  $("setup-semantic-eta").textContent = configuration.semantic_search_enabled ? `+${formatEta(eta.semantic_search ?? plan.embedding_estimated_seconds)}` : "off";
+  $("setup-video-eta").textContent = configuration.video_quality_enabled || configuration.include_videos_in_semantic_search ? videoEta > 0 ? `+${formatEta(videoEta)}` : "ready" : "off";
+  const semanticEta = Number(eta.semantic_search ?? plan.embedding_estimated_seconds ?? 0);
+  $("setup-semantic-eta").textContent = configuration.semantic_search_enabled ? semanticEta > 0 ? `+${formatEta(semanticEta)}` : "ready" : "off";
   $("setup-embedding-status").classList.toggle("hidden", !configuration.semantic_search_enabled);
   const quality = plan.lar_iqa_readiness || plan.rendered_quality_readiness || {};
   const qualityModel = quality.model || {};

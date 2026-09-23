@@ -116,7 +116,7 @@ class WorkspaceTests(unittest.TestCase):
 
             self.assertIsNotNone(info["workspace_id"])
             self.assertEqual(info["quality_provider"], "lar-iqa")
-            self.assertEqual(version, 23)
+            self.assertEqual(version, 24)
             self.assertEqual(workspace.root, root.resolve())
 
             with Workspace.open(root).connect() as connection:
@@ -321,7 +321,7 @@ class WorkspaceTests(unittest.TestCase):
                 configuration = connection.execute(
                     "SELECT quality_provider, updated_at, recommendation_threshold FROM workspace_config WHERE id = 1"
                 ).fetchone()
-            self.assertEqual(version, 23)
+            self.assertEqual(version, 24)
             self.assertIsNotNone(column)
             self.assertTrue({"stage", "failed_items", "skipped_items"} <= job_columns)
             self.assertIn("selection_updated_at", selection_columns)

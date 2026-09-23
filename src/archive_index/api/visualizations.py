@@ -106,16 +106,8 @@ def visualization_data(workspace, query, handle, *, filter_assets, kind: str) ->
             base.update(available=False, empty_reason=reason)
             return base | {"points": []}
         points = projection_points(workspace, projection["id"], [item["asset_id"] for item in items])
-        item_by_asset = {item["asset_id"]: item for item in items}
         points = [
-            {
-                **point,
-                "capture_time": item_by_asset[point["asset_id"]].get("capture_time"),
-                "capture_time_kind": item_by_asset[point["asset_id"]].get("capture_time_kind"),
-                "height": item_by_asset[point["asset_id"]].get("height"),
-                "quality_score": item_by_asset[point["asset_id"]].get("quality_score"),
-                "width": item_by_asset[point["asset_id"]].get("width"),
-            }
+            {"asset_id": point["asset_id"], "x": point["x"], "y": point["y"], "media_type": point["media_type"]}
             for point in points
         ]
         base.update(

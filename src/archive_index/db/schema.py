@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -604,6 +604,70 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         WHEN OLD.component LIKE 'embedding:%'
         BEGIN UPDATE workspace_semantic_projection SET active_run_id = NULL, updated_at = datetime('now') WHERE id = 1; END
         """,
+    ),
+    24: (
+        """
+        CREATE TABLE IF NOT EXISTS compression_profile (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            codec TEXT NOT NULL,
+            container TEXT NOT NULL,
+            settings_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS file_management_ruleset (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS file_management_rule (
+            id TEXT PRIMARY KEY,
+            ruleset_id TEXT NOT NULL REFERENCES file_management_ruleset(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            match_json TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(ruleset_id, position)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS file_management_rule_order_idx ON file_management_rule(ruleset_id, position)",
+        """
+        CREATE TABLE IF NOT EXISTS file_management_preset (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            ruleset_id TEXT NOT NULL REFERENCES file_management_ruleset(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS workspace_file_management (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active_ruleset_id TEXT REFERENCES file_management_ruleset(id),
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "INSERT OR IGNORE INTO workspace_file_management(id, active_ruleset_id, updated_at) VALUES (1, NULL, datetime('now'))",
+        """
+        CREATE TABLE IF NOT EXISTS display_preview (
+            physical_file_id TEXT PRIMARY KEY REFERENCES physical_file(id) ON DELETE CASCADE,
+            output_path TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            version TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS display_preview_output_idx ON display_preview(output_path)",
     ),
 }
 

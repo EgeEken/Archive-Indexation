@@ -22,6 +22,43 @@ function assetToViewerItem(asset) {
   };
 }
 
+function bindRepresentationActions(container, asset) {
+  container.querySelectorAll("[data-representation-open]").forEach(button => {
+    button.addEventListener("click", () => {
+      const file = asset.physical_files?.find(candidate => candidate.id === button.dataset.representationOpen);
+      if (!file) return;
+      const item = {
+        ...assetToViewerItem(asset),
+        filename: file.filename,
+        preferred_physical_id: file.id,
+        thumbnail_url: file.thumbnail_url,
+        display_url: file.display_preview_url || file.thumbnail_url || file.original_url,
+        original_url: file.original_url,
+      };
+      closeDialog($("details"));
+      showViewer(0, [item], {mode: "visualization", assetIds: [asset.asset_id], total: 1});
+    });
+  });
+  container.querySelectorAll("[data-representation-compare]").forEach(button => {
+    button.addEventListener("click", () => toggleRepresentationComparison(asset, button.dataset.representationCompare));
+  });
+}
+
+function toggleRepresentationComparison(asset, fileId) {
+  const selected = state.representationComparison || [];
+  const next = selected.includes(fileId) ? selected.filter(id => id !== fileId) : [...selected, fileId].slice(-2);
+  state.representationComparison = next;
+  const dialog = $("representation-comparison");
+  if (next.length < 2) {
+    dialog.close();
+    return;
+  }
+  const files = next.map(id => asset.physical_files?.find(file => file.id === id)).filter(Boolean);
+  dialog.innerHTML = `<div class="dialog-inner"><div class="dialog-header"><h2>Compare representations</h2><button class="icon" type="button" data-comparison-close aria-label="Close comparison">×</button></div><div class="representation-comparison-grid">${files.map(file => `<section><h3>${escapeHtml(file.filename)}</h3><dl class="kv"><dt>Role</dt><dd>${escapeHtml(file.representation_label || file.role || "Physical file")}</dd><dt>Size</dt><dd>${escapeHtml(formatBytes(file.size_bytes))}</dd><dt>Dimensions</dt><dd>${file.width && file.height ? `${file.width} × ${file.height}` : "Unavailable"}</dd><dt>Quality</dt><dd>${file.quality_score == null ? "Unavailable" : Number(file.quality_score).toFixed(2)}</dd><dt>Metadata</dt><dd>${file.metadata ? "Available" : "Unavailable"}</dd></dl></section>`).join("")}</div></div>`;
+  dialog.showModal();
+  dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
+}
+
 function renderDetails(asset, options = {}) {
   const displayFilename = typeof globalThis.filenameMarkup === "function" ? globalThis.filenameMarkup : escapeHtml;
   const filenameMarkup = displayFilename;
@@ -55,7 +92,7 @@ function renderRepresentations(asset) {
   const filenameMarkup = displayFilename;
   const rows = asset.physical_files.map(file => {
     const problems = renderComponentProblems(file);
-    return `<div class="representation-row"><div><div class="representation-title"><strong>${filenameMarkup(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Reveal representation in Explorer">📁</button></div>`;
+    return `<div class="representation-row"><div><div class="representation-title"><strong>${filenameMarkup(file.filename)}</strong> · ${escapeHtml(formatBytes(file.size_bytes))}${file.is_preferred ? " · Preferred" : ""}${file.is_online ? "" : " · Offline"}</div><div class="muted representation-path">${escapeHtml(file.relative_path)}</div>${problems ? `<details class="representation-diagnostics"><summary>⚠ Representation status</summary>${problems}</details>` : ""}</div><div class="representation-actions"><button class="secondary" type="button" data-representation-open="${escapeHtml(file.id)}">Open</button><button class="secondary" type="button" data-representation-compare="${escapeHtml(file.id)}">Compare</button><button class="explorer-button" data-reveal="${escapeHtml(file.id)}" aria-label="Reveal representation in Explorer">📁</button></div></div>`;
   }).join("");
   return `<section class="section"><h3>Representations</h3><div class="representations">${rows}</div></section>`;
 }
@@ -159,6 +196,7 @@ async function loadViewerDetails() {
       $("viewer-details").innerHTML = renderDetails(state.viewerDetail, { viewerPanel: true });
       $("viewer-details").querySelector("#viewer-details-close")?.addEventListener("click", () => toggleViewerInfo(false));
       $("viewer-details").querySelector("[data-find-similar]")?.addEventListener("click", () => showSimilar(item.asset_id));
+      bindRepresentationActions($("viewer-details"), state.viewerDetail);
     }
   } catch (error) {
     $("viewer-details").innerHTML = '<div class="viewer-error">Details unavailable.</div>';

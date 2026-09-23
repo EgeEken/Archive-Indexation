@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local-first indexing and browsing for personal media archives."
 requires-python = ">=3.11"
 dependencies = [
+    "imagecodecs>=2025.11,<2027",
     "pillow>=10",
 ]
 
@@ -47,7 +48,7 @@ archive-index = "archive_index.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"archive_index.web" = ["index.html", "app.css", "app.js", "app-visualizations.js", "world.json"]
+"archive_index.web" = ["index.html", "app.css", "app.js", "app-visualizations.js", "app-file-management.js", "world.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

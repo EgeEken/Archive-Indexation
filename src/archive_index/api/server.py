@@ -39,6 +39,16 @@ from ..media_types import is_raw_extension
 from ..jobs.engine import JobStore, SUBSTAGES
 from ..planning import _historical_rate, analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
+from ..file_management import (
+    build_dry_run_plan,
+    list_profiles,
+    list_presets,
+    list_rulesets,
+    save_profile,
+    save_preset,
+    save_ruleset,
+    set_active_ruleset,
+)
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
 from .exports import selected_zip
@@ -111,6 +121,7 @@ _UI_RESOURCES = {
     "app-viewer.js",
     "app-details.js",
     "app-maintenance.js",
+    "app-file-management.js",
     "app-groups.js",
     "app-visualizations.js",
     "app-bootstrap.js",
@@ -324,6 +335,14 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="timeline"))
             elif request.path == "/api/visualizations/vector":
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="vector"))
+            elif request.path == "/api/file-management/profiles":
+                self._send_json(200, {"profiles": list_profiles(workspace)})
+            elif request.path == "/api/file-management/rulesets":
+                self._send_json(200, {"rulesets": list_rulesets(workspace)})
+            elif request.path == "/api/file-management/presets":
+                self._send_json(200, {"presets": list_presets(workspace)})
+            elif request.path == "/api/file-management/plan":
+                self._send_json(200, build_dry_run_plan(workspace, _first(query, "ruleset_id", "") or None))
             elif request.path == "/api/exports/selected.zip":
                 archive, _, _ = selected_zip(workspace)
                 try:
@@ -487,6 +506,46 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(409, {"error": "indexing is already running"})
                 else:
                     self._send_json(202, {"job_id": job_id})
+                return
+            if request.path == "/api/file-management/profiles":
+                body = self._json_body()
+                self._send_json(200, save_profile(
+                    workspace,
+                    name=str(body.get("name", "")),
+                    codec=str(body.get("codec", "")),
+                    container=str(body.get("container", "")),
+                    settings=body.get("settings") if isinstance(body.get("settings"), dict) else {},
+                    profile_id=body.get("id"),
+                ))
+                return
+            if request.path == "/api/file-management/rulesets":
+                body = self._json_body()
+                self._send_json(200, save_ruleset(
+                    workspace,
+                    name=str(body.get("name", "")),
+                    description=str(body.get("description", "")),
+                    rules=body.get("rules") if isinstance(body.get("rules"), list) else [],
+                    ruleset_id=body.get("id"),
+                ))
+                return
+            if request.path == "/api/file-management/presets":
+                body = self._json_body()
+                ruleset_id = body.get("ruleset_id")
+                if not isinstance(ruleset_id, str):
+                    raise InvalidRequest("ruleset_id is required")
+                self._send_json(200, save_preset(
+                    workspace,
+                    name=str(body.get("name", "")),
+                    ruleset_id=ruleset_id,
+                    preset_id=body.get("id"),
+                ))
+                return
+            if request.path == "/api/file-management/active":
+                value = self._json_body().get("ruleset_id")
+                if value is not None and not isinstance(value, str):
+                    raise InvalidRequest("ruleset_id must be a string or null")
+                set_active_ruleset(workspace, value)
+                self._send_json(200, {"active_ruleset_id": value})
                 return
             if request.path == "/api/offline-media/forget":
                 self._send_json(200, self.server.forget_offline_media(handle))
@@ -685,12 +744,25 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         connection = workspace.connect()
         try:
             row = connection.execute(
-                "SELECT relative_path, extension, is_online, in_scope FROM physical_file WHERE id = ?",
+                """
+                SELECT pf.relative_path, pf.extension, pf.is_online, pf.in_scope,
+                       dp.output_path AS display_preview_output_path
+                FROM physical_file AS pf
+                LEFT JOIN display_preview AS dp ON dp.physical_file_id = pf.id
+                WHERE pf.id = ?
+                """,
                 (physical_id,),
             ).fetchone()
         finally:
             connection.close()
-        if row is None or not row["is_online"] or not row["in_scope"] or not is_raw_extension(row["extension"]):
+        if row is None or not row["is_online"] or not row["in_scope"]:
+            raise ResourceNotFound("RAW preview is unavailable")
+        if row["extension"].casefold() == ".jxl":
+            if not row["display_preview_output_path"]:
+                raise ResourceNotFound("JPEG XL display preview is unavailable")
+            self._send_validated_thumbnail(workspace, row["display_preview_output_path"])
+            return
+        if not is_raw_extension(row["extension"]):
             raise ResourceNotFound("RAW preview is unavailable")
         try:
             source = workspace.absolute_path(row["relative_path"])
@@ -1129,12 +1201,14 @@ def _browser_catalog(workspace, handle):
                    thumbnail.status AS thumbnail_status, thumbnail.algorithm AS thumbnail_algorithm,
                    thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
                    thumbnail.output_path AS thumbnail_output_path,
+                   display_preview.output_path AS display_preview_output_path,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
             JOIN logical_asset AS la ON la.id = pf.logical_asset_id
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
+            LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE EXISTS (
                 SELECT 1 FROM physical_file AS pf_scope

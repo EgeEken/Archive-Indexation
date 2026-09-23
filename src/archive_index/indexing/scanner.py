@@ -352,6 +352,10 @@ def _update_existing(
             (existing["id"],),
         )
         connection.execute(
+            "DELETE FROM display_preview WHERE physical_file_id = ?",
+            (existing["id"],),
+        )
+        connection.execute(
             """
             UPDATE component_state
             SET status = 'pending', input_fingerprint = NULL,

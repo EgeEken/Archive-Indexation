@@ -205,7 +205,7 @@ function finishCloseDialog(dialog) {
     $("viewer-toast-region").replaceChildren();
   }
   if (dialog.open) dialog.close();
-  if (!["viewer", "details", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
+  if (!["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
   if (dialog.id === "viewer") {
     highlightViewerReturn(state.viewerReturnAssetId);
     state.viewerReturnAssetId = null;
@@ -274,6 +274,7 @@ async function showDetails(assetId, context = { mode: "gallery", items: state.it
     document.body.classList.add("modal-open");
     $("details-close").addEventListener("click", () => closeDialog($("details")));
     $("details").querySelector("[data-find-similar]")?.addEventListener("click", () => showSimilar(asset.asset_id));
+    bindRepresentationActions($("details"), asset);
     $("details").querySelector("[data-detail-thumbnail]")?.addEventListener("click", () => {
       closeDialog($("details"));
       const item = context.items?.[context.index] || assetToViewerItem(asset);

@@ -54,10 +54,12 @@ def asset_summary(
     ) or online
     display_url = None
     if display is not None:
-        display_url = _url(
-            f"/api/files/{display['id']}/{('preview' if display['media_type'] == 'image' and is_raw_extension(display['extension']) else 'original')}",
-            handle,
-        )
+        if display["extension"].casefold() == ".jxl" and display["display_preview_output_path"] and _valid_index_file(workspace, display["display_preview_output_path"]):
+            display_url = _url(f"/api/files/{display['id']}/preview", handle)
+        elif display["media_type"] == "image" and is_raw_extension(display["extension"]):
+            display_url = _url(f"/api/files/{display['id']}/preview", handle)
+        else:
+            display_url = _url(f"/api/files/{display['id']}/original", handle)
     return {
         "asset_id": asset["id"],
         "media_type": asset["media_type"],
@@ -191,6 +193,7 @@ def asset_detail(
                 if row["media_type"] == "video" else None,
                 "original_url": _url(f"/api/files/{row['id']}/original", handle) if row["is_online"] and row["in_scope"] else None,
                 "thumbnail_url": _url(f"/api/files/{row['id']}/thumbnail", handle) if row["in_scope"] and row["thumbnail_status"] == "complete" and row["thumbnail_output_path"] and _valid_index_file(workspace, row["thumbnail_output_path"]) else None,
+                "display_preview_url": _url(f"/api/files/{row['id']}/preview", handle) if row["in_scope"] and row["display_preview_output_path"] and _valid_index_file(workspace, row["display_preview_output_path"]) else None,
                 "in_scope": bool(row["in_scope"]),
                 "components": {
                     "metadata": component_info(row, "metadata"),
@@ -233,11 +236,13 @@ def physical_rows(workspace: Workspace, asset_id: str):
                    thumbnail.status AS thumbnail_status, thumbnail.algorithm AS thumbnail_algorithm,
                    thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
                    thumbnail.output_path AS thumbnail_output_path,
+                   display_preview.output_path AS display_preview_output_path,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
+            LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE pf.logical_asset_id = ?
             ORDER BY pf.is_online DESC, pf.relative_path
@@ -262,11 +267,13 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
                    thumbnail.status AS thumbnail_status, thumbnail.algorithm AS thumbnail_algorithm,
                    thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
                    thumbnail.output_path AS thumbnail_output_path,
+                   display_preview.output_path AS display_preview_output_path,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
+            LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE pf.logical_asset_id IN ({placeholders}) AND pf.in_scope = 1
             ORDER BY pf.logical_asset_id, pf.is_online DESC, pf.relative_path

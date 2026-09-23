@@ -20,6 +20,7 @@ from ..media.quality_provider import (
 )
 from ..media.thumbnail import (
     THUMBNAIL_SIZE,
+    generate_display_preview,
     generate_thumbnail,
     load_full_image,
     load_raw_preview,
@@ -505,6 +506,7 @@ def _index_media_batches(
             "pending": pending,
             "metadata": None,
             "thumbnail": None,
+            "display_preview": None,
             "errors": {},
             "timings": TimingRecorder(),
         }
@@ -533,6 +535,14 @@ def _index_media_batches(
                     generate_thumbnail(source, destination, THUMBNAIL_SIZE, media_type="video", **timing_kwargs)
                 else:
                     generate_thumbnail(source, destination, THUMBNAIL_SIZE, prepared_image, **timing_kwargs)
+                if row["extension"].casefold() == ".jxl":
+                    display_destination = workspace.index_directory / "previews" / f"{row['id']}.jpg"
+                    generate_display_preview(source, display_destination)
+                    result["display_preview"] = (
+                        workspace.index_relative_path(display_destination),
+                        "imagecodecs-jxl-display-jpeg",
+                        "imagecodecs-jxl-display-v1",
+                    )
                 with timed(result["timings"], "thumbnail.hash"):
                     output_fingerprint = _file_fingerprint(destination)
                 result["thumbnail"] = (
@@ -558,6 +568,19 @@ def _index_media_batches(
                 thumbnail = result["thumbnail"]
                 if thumbnail is not None:
                     _persist_thumbnail_sql(connection, row, fingerprint, thumbnail)
+                if result["display_preview"] is not None:
+                    output_path, algorithm, version = result["display_preview"]
+                    connection.execute(
+                        """
+                        INSERT INTO display_preview(
+                            physical_file_id, output_path, algorithm, version, input_fingerprint, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(physical_file_id) DO UPDATE SET output_path = excluded.output_path,
+                          algorithm = excluded.algorithm, version = excluded.version,
+                          input_fingerprint = excluded.input_fingerprint, created_at = excluded.created_at
+                        """,
+                        (row["id"], output_path, algorithm, version, fingerprint, _timestamp()),
+                    )
                 for component, error in result["errors"].items():
                     _mark_failed_sql(connection, row["id"], component, error)
 
@@ -899,6 +922,10 @@ def _process_thumbnail(
         generate_thumbnail(source, destination, THUMBNAIL_SIZE, media_type="video", **timing_kwargs)
     else:
         generate_thumbnail(source, destination, THUMBNAIL_SIZE, prepared_image, **timing_kwargs)
+    display_destination = None
+    if row["extension"].casefold() == ".jxl":
+        display_destination = workspace.index_directory / "previews" / f"{row['id']}.jpg"
+        generate_display_preview(source, display_destination)
     output_fingerprint = _file_fingerprint(destination)
     output_path = workspace.index_relative_path(destination)
     settings = json.dumps(provenance, sort_keys=True)
@@ -924,6 +951,22 @@ def _process_thumbnail(
                     THUMBNAIL_COMPONENT,
                 ),
             )
+            if display_destination is not None:
+                connection.execute(
+                    """
+                    INSERT INTO display_preview(
+                        physical_file_id, output_path, algorithm, version, input_fingerprint, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(physical_file_id) DO UPDATE SET output_path = excluded.output_path,
+                      algorithm = excluded.algorithm, version = excluded.version,
+                      input_fingerprint = excluded.input_fingerprint, created_at = excluded.created_at
+                    """,
+                    (
+                        row["id"], workspace.index_relative_path(display_destination),
+                        "imagecodecs-jxl-display-jpeg", "imagecodecs-jxl-display-v1",
+                        fingerprint, _timestamp(),
+                    ),
+                )
 
 
 def _process_quality(
@@ -1297,7 +1340,10 @@ def _state_ready(
         return False
     if state["version"] != version:
         return False
-    if state["status"] == "unsupported":
+    if state["status"] == "unsupported" and not (
+        row["extension"].casefold() == ".jxl"
+        and component in {METADATA_COMPONENT, THUMBNAIL_COMPONENT}
+    ):
         return True
     if component == QUALITY_COMPONENT and not provider.enabled:
         return (
