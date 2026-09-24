@@ -1832,6 +1832,8 @@ These can initially remain manual/unknown rather than risking false associations
 
 - calibration of the LAR-IQA output for downstream subjective usefulness;
 - whether a smaller/mobile learned model should supplement or replace LAR-IQA later.
+- compare stronger modern image-quality models on representative archive-selection decisions before considering any replacement;
+- investigate an on-demand focus/defocus/blur-localization model that returns a focus-area or sharpness mask only when requested. Do not precompute masks for every indexed image unless later benchmarking justifies it.
 
 ## Grouping
 
