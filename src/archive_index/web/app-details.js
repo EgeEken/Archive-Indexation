@@ -288,25 +288,42 @@ function openRawInspection(asset, fileId) {
   const dialog = $("representation-comparison");
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><label class="raw-exposure-control"><span>Exposure</span><span class="raw-exposure-readout"><output data-raw-exposure-label><span data-raw-exposure-value>+0.00 EV</span></output><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></span><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><div class="raw-development-controls"><div class="raw-development-status"><span data-raw-wb-status>Camera/as-shot white balance when available</span><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-value>+0.00 EV</output><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label><label class="raw-exposure-control"><span>White balance</span><output data-raw-wb-value>Camera</output><small>Cool ← Camera → Warm</small><input data-raw-white-balance type="range" min="-100" max="100" step="1" value="0" aria-label="White balance"></label><label class="raw-exposure-control"><span>Saturation</span><output data-raw-saturation-value>100%</output><input data-raw-saturation type="range" min="50" max="150" step="1" value="100" aria-label="Saturation"></label><label class="raw-exposure-control"><span>Highlights</span><output data-raw-highlights-value>0</output><input data-raw-highlights type="range" min="-100" max="100" step="1" value="0" aria-label="Highlights"></label><label class="raw-exposure-control"><span>Shadows</span><output data-raw-shadows-value>0</output><input data-raw-shadows type="range" min="-100" max="100" step="1" value="0" aria-label="Shadows"></label><button type="button" class="secondary" data-raw-reset>Reset adjustments</button></div></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
   const image = dialog.querySelector("[data-raw-image]");
   const loading = dialog.querySelector("[data-raw-loading]");
   const errorNode = dialog.querySelector("[data-raw-error]");
-  const valueNode = dialog.querySelector("[data-raw-exposure-value]");
-  const input = dialog.querySelector("[data-raw-exposure]");
-  const updateExposureControl = () => {
-    const value = Number(input.value);
-    valueNode.textContent = rawExposureLabel(value);
-    input.style.setProperty("--range-progress", `${((value + 5) / 10) * 100}%`);
+  const wbStatus = dialog.querySelector("[data-raw-wb-status]");
+  const inputs = {
+    exposure_ev: dialog.querySelector("[data-raw-exposure]"),
+    white_balance: dialog.querySelector("[data-raw-white-balance]"),
+    saturation: dialog.querySelector("[data-raw-saturation]"),
+    highlights: dialog.querySelector("[data-raw-highlights]"),
+    shadows: dialog.querySelector("[data-raw-shadows]"),
+  };
+  const updateControls = () => {
+    const exposure = Number(inputs.exposure_ev.value);
+    const wb = Number(inputs.white_balance.value);
+    const saturation = Number(inputs.saturation.value);
+    const highlights = Number(inputs.highlights.value);
+    const shadows = Number(inputs.shadows.value);
+    dialog.querySelector("[data-raw-exposure-value]").textContent = rawExposureLabel(exposure);
+    dialog.querySelector("[data-raw-wb-value]").textContent = wb === 0 ? "Camera" : `${wb < 0 ? "Cool" : "Warm"} ${Math.abs(wb)}`;
+    dialog.querySelector("[data-raw-saturation-value]").textContent = `${saturation}%`;
+    dialog.querySelector("[data-raw-highlights-value]").textContent = String(highlights);
+    dialog.querySelector("[data-raw-shadows-value]").textContent = String(shadows);
+    Object.values(inputs).forEach(input => {
+      const min = Number(input.min), max = Number(input.max), value = Number(input.value);
+      input.style.setProperty("--range-progress", `${((value - min) / (max - min)) * 100}%`);
+    });
   };
   const camera = new SharedImageCamera({viewport: stage, getFrames: () => [{image, frame: stage}], onChange: change => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }});
   dialog._rawCamera = camera;
   camera.setImages([image]);
   let timer = null;
-  const load = async exposure => {
+  const load = async () => {
     const generation = (dialog._rawGeneration || 0) + 1;
     dialog._rawGeneration = generation;
     dialog._rawAbort?.abort();
@@ -315,10 +332,12 @@ function openRawInspection(asset, fileId) {
     loading.classList.remove("hidden");
     errorNode.classList.add("hidden");
     try {
-      const response = await fetch(apiPath(`/api/files/${encodeURIComponent(file.id)}/raw-development-preview?exposure_ev=${encodeURIComponent(exposure)}`), {signal: controller.signal});
+      const params = new URLSearchParams(Object.entries(inputs).map(([key, input]) => [key, input.value]));
+      const response = await fetch(apiPath(`/api/files/${encodeURIComponent(file.id)}/raw-development-preview?${params}`), {signal: controller.signal});
       if (!response.ok) throw new Error("RAW development is unavailable for this file.");
       const blob = await response.blob();
       if (generation !== dialog._rawGeneration || controller.signal.aborted) return;
+      wbStatus.textContent = response.headers.get("X-RAW-White-Balance") || "White balance status unavailable";
       const url = URL.createObjectURL(blob);
       const previous = image.dataset.objectUrl;
       image.dataset.objectUrl = url;
@@ -333,13 +352,23 @@ function openRawInspection(asset, fileId) {
       if (generation === dialog._rawGeneration) loading.classList.add("hidden");
     }
   };
-  input.addEventListener("input", () => {
-    updateExposureControl();
+  Object.values(inputs).forEach(input => input.addEventListener("input", () => {
+    updateControls();
     clearTimeout(timer);
-    timer = setTimeout(() => load(Number(input.value)), 150);
+    timer = setTimeout(load, 180);
+  }));
+  dialog.querySelector("[data-raw-reset]").addEventListener("click", () => {
+    inputs.exposure_ev.value = "0";
+    inputs.white_balance.value = "0";
+    inputs.saturation.value = "100";
+    inputs.highlights.value = "0";
+    inputs.shadows.value = "0";
+    updateControls();
+    clearTimeout(timer);
+    timer = setTimeout(load, 0);
   });
-  updateExposureControl();
-  load(0);
+  updateControls();
+  load();
 }
 
 function renderDetails(asset, options = {}) {

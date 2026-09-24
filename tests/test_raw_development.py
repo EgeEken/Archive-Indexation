@@ -18,6 +18,7 @@ from archive_index.indexing.scanner import scan
 
 class _FakeRaw:
     calls = []
+    camera_whitebalance = [2.0, 1.0, 1.5, 1.0]
 
     def __enter__(self):
         return self
@@ -60,8 +61,8 @@ class RawDevelopmentTests(unittest.TestCase):
             _FakeRaw.calls = []
             before = source.read_bytes()
             with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
-                negative = raw_development_preview(workspace, physical_id, -1)
-                positive = raw_development_preview(workspace, physical_id, 1)
+                negative, _ = raw_development_preview(workspace, physical_id, -1)
+                positive, _ = raw_development_preview(workspace, physical_id, 1)
             self.assertEqual([round(call["exp_shift"], 3) for call in _FakeRaw.calls], [0.5, 2.0])
             self.assertEqual(source.read_bytes(), before)
             with Image.open(__import__("io").BytesIO(negative)) as image:
@@ -155,6 +156,72 @@ class RawDevelopmentTests(unittest.TestCase):
             with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
                 with self.assertRaises(ResourceNotFound):
                     raw_development_preview(workspace, physical_id, 0)
+
+    def test_as_shot_white_balance_is_neutral_and_relative_adjustments_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "camera.arw"
+            source.write_bytes(b"raw source")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                physical_id = connection.execute("SELECT id FROM physical_file WHERE extension = '.arw'").fetchone()[0]
+            finally:
+                connection.close()
+            fake_rawpy = SimpleNamespace(ColorSpace=SimpleNamespace(sRGB="sRGB"), imread=lambda _: _FakeRaw())
+            _FakeRaw.calls = []
+            with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
+                _, baseline = raw_development_preview(workspace, physical_id, 0)
+                raw_development_preview(workspace, physical_id, 0, white_balance=100)
+                raw_development_preview(workspace, physical_id, 0, white_balance=-100)
+                raw_development_preview(workspace, physical_id, 0, saturation=125, highlights=-30, shadows=40)
+            self.assertEqual(baseline, "Camera/as-shot WB")
+            self.assertTrue(_FakeRaw.calls[0]["use_camera_wb"])
+            self.assertIsNone(_FakeRaw.calls[0]["user_wb"])
+            self.assertGreater(_FakeRaw.calls[1]["user_wb"][0], _FakeRaw.calls[1]["user_wb"][2])
+            self.assertLess(_FakeRaw.calls[2]["user_wb"][0], _FakeRaw.calls[2]["user_wb"][2])
+            self.assertFalse(_FakeRaw.calls[1]["use_camera_wb"])
+
+    def test_missing_camera_white_balance_reports_rawpy_fallback(self):
+        class NoCameraWB(_FakeRaw):
+            camera_whitebalance = None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "camera.arw").write_bytes(b"raw source")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                physical_id = connection.execute("SELECT id FROM physical_file WHERE extension = '.arw'").fetchone()[0]
+            finally:
+                connection.close()
+            fake_rawpy = SimpleNamespace(ColorSpace=SimpleNamespace(sRGB="sRGB"), imread=lambda _: NoCameraWB())
+            with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
+                _, status = raw_development_preview(workspace, physical_id, 0)
+            self.assertEqual(status, "Rawpy auto-WB fallback (camera WB unavailable)")
+            self.assertTrue(NoCameraWB.calls[-1]["use_auto_wb"])
+
+    def test_all_controls_participate_in_cache_and_invalid_ranges_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "camera.arw").write_bytes(b"raw source")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                physical_id = connection.execute("SELECT id FROM physical_file WHERE extension = '.arw'").fetchone()[0]
+            finally:
+                connection.close()
+            fake_rawpy = SimpleNamespace(ColorSpace=SimpleNamespace(sRGB="sRGB"), imread=lambda _: _FakeRaw())
+            _FakeRaw.calls = []
+            with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
+                for settings in ({}, {"white_balance": 1}, {"saturation": 101}, {"highlights": 1}, {"shadows": 1}):
+                    raw_development_preview(workspace, physical_id, 0, **settings)
+                with self.assertRaises(ValueError):
+                    raw_development_preview(workspace, physical_id, 0, saturation=151)
+            self.assertEqual(len(_FakeRaw.calls), 5)
 
 
 if __name__ == "__main__":

@@ -590,11 +590,13 @@ class BrowserE2ETests(unittest.TestCase):
             (() => {
               const originalFetch = window.fetch.bind(window);
               window.__rawResolvers = [];
+              window.__rawUrls = [];
               window.fetch = (input, init) => {
                 if (!String(input).includes("raw-development-preview")) return originalFetch(input, init);
+                window.__rawUrls.push(String(input));
                 return new Promise(resolve => window.__rawResolvers.push(resolve));
               };
-              window.__resolveRaw = index => window.__rawResolvers[index](new Response(new Blob([], {type: "image/jpeg"}), {status: 200}));
+              window.__resolveRaw = index => window.__rawResolvers[index](new Response(new Blob([], {type: "image/jpeg"}), {status: 200, headers:{"X-RAW-White-Balance":"Camera/as-shot WB"}}));
             })();
             """
         )
@@ -612,12 +614,25 @@ class BrowserE2ETests(unittest.TestCase):
         exposure = self.page.locator("[data-raw-exposure]")
         exposure.evaluate("node => { node.value = '1'; node.dispatchEvent(new Event('input', {bubbles: true})); }")
         self.page.wait_for_function("window.__rawResolvers.length === 2")
+        second_params = self.page.evaluate("new URL(window.__rawUrls[1], location.origin).searchParams.toString()")
+        for name, value in (("exposure_ev", "1"), ("white_balance", "0"), ("saturation", "100"), ("highlights", "0"), ("shadows", "0")):
+            self.assertIn(f"{name}={value}", second_params)
         self.page.evaluate("window.__resolveRaw(0)")
         self.assertTrue(loading.is_visible())
         self.page.evaluate("window.__resolveRaw(1)")
         self.page.wait_for_function("document.querySelector('[data-raw-loading]').classList.contains('hidden')")
         self.assertFalse(loading.is_visible())
         self.assertIn("+1.00 EV", self.page.locator("[data-raw-exposure-value]").inner_text())
+        self.page.locator("[data-raw-white-balance]").evaluate("node => { node.value = '35'; node.dispatchEvent(new Event('input', {bubbles: true})); }")
+        self.page.wait_for_function("window.__rawResolvers.length === 3")
+        self.assertIn("white_balance=35", self.page.evaluate("new URL(window.__rawUrls[2], location.origin).searchParams.toString()"))
+        self.page.evaluate("window.__resolveRaw(2)")
+        self.page.wait_for_function("document.querySelector('[data-raw-wb-status]').textContent === 'Camera/as-shot WB'")
+        self.page.locator("[data-raw-reset]").click()
+        self.page.wait_for_function("window.__rawResolvers.length === 4")
+        reset_params = self.page.evaluate("new URL(window.__rawUrls[3], location.origin).searchParams.toString()")
+        self.assertEqual(self.page.locator("[data-raw-saturation-value]").inner_text(), "100%")
+        self.assertIn("white_balance=0", reset_params)
 
     def test_similar_weaker_results_navigation_and_close_variants(self) -> None:
         self._open_main()

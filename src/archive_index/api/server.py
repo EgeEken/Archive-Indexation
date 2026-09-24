@@ -706,12 +706,16 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "raw-development-preview":
             try:
                 exposure = float(_first(query, "exposure_ev", "0"))
-                output = raw_development_preview(workspace, parts[2], exposure)
+                white_balance = int(_first(query, "white_balance", "0"))
+                saturation = int(_first(query, "saturation", "100"))
+                highlights = int(_first(query, "highlights", "0"))
+                shadows = int(_first(query, "shadows", "0"))
+                output, white_balance_status = raw_development_preview(workspace, parts[2], exposure, white_balance, saturation, highlights, shadows)
             except (InvalidRequest, ResourceNotFound):
                 raise
             except (OSError, ValueError, WorkspaceError) as error:
                 raise ResourceNotFound("RAW development is unavailable for this file") from error
-            self._send_bytes(200, output, "image/png")
+            self._send_bytes(200, output, "image/png", {"X-RAW-White-Balance": white_balance_status})
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison":
             other_id = _first(query, "with_id", "")
@@ -905,10 +909,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, value: object) -> None:
         self._send_bytes(status, json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json")
 
-    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+    def _send_bytes(self, status: int, body: bytes, content_type: str, headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
