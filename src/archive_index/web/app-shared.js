@@ -79,6 +79,9 @@ class SharedImageCamera {
     this.zoom = 1;
     this.panX = 0;
     this.panY = 0;
+    this.appliedZoom = 1;
+    this.appliedPanX = 0;
+    this.appliedPanY = 0;
     this.dragging = false;
     this.dragStart = null;
     this.panStart = null;
@@ -127,12 +130,15 @@ class SharedImageCamera {
     const next = Math.max(1, Math.min(this.maxZoom, oldZoom * (event.deltaY < 0 ? 1.2 : 1 / 1.2)));
     if (next === oldZoom) return;
     const rect = entry.frame.getBoundingClientRect();
+    const imageRect = entry.image.getBoundingClientRect();
+    const centerX = imageRect.left + imageRect.width / 2 - this.appliedPanX - (rect.left + rect.width / 2);
+    const centerY = imageRect.top + imageRect.height / 2 - this.appliedPanY - (rect.top + rect.height / 2);
     const pointX = event.clientX - (rect.left + rect.width / 2);
     const pointY = event.clientY - (rect.top + rect.height / 2);
-    const contentX = (pointX - this.panX) / oldZoom;
-    const contentY = (pointY - this.panY) / oldZoom;
-    this.panX = pointX - contentX * next;
-    this.panY = pointY - contentY * next;
+    const contentX = (pointX - centerX - this.panX) / oldZoom;
+    const contentY = (pointY - centerY - this.panY) / oldZoom;
+    this.panX = pointX - centerX - contentX * next;
+    this.panY = pointY - centerY - contentY * next;
     if (next === 1) { this.panX = 0; this.panY = 0; }
     this.zoom = next;
     this.apply();
@@ -162,25 +168,49 @@ class SharedImageCamera {
   }
   apply() {
     const entries = this.frameEntries();
+    let minX = -Infinity;
     let maxX = Infinity;
+    let minY = -Infinity;
     let maxY = Infinity;
     for (const {image, frame} of entries) {
       const rect = frame.getBoundingClientRect();
       const imageRect = image.getBoundingClientRect();
-      const baseWidth = image.offsetWidth || imageRect.width / Math.max(this.zoom, 1);
-      const baseHeight = image.offsetHeight || imageRect.height / Math.max(this.zoom, 1);
-      maxX = Math.min(maxX, Math.max(0, (baseWidth * this.zoom - rect.width) / 2));
-      maxY = Math.min(maxY, Math.max(0, (baseHeight * this.zoom - rect.height) / 2));
+      const baseWidth = imageRect.width / this.appliedZoom;
+      const baseHeight = imageRect.height / this.appliedZoom;
+      const centerX = imageRect.left + imageRect.width / 2 - this.appliedPanX;
+      const centerY = imageRect.top + imageRect.height / 2 - this.appliedPanY;
+      const frameCenterX = rect.left + rect.width / 2;
+      const frameCenterY = rect.top + rect.height / 2;
+      const scaledWidth = baseWidth * this.zoom;
+      const scaledHeight = baseHeight * this.zoom;
+      if (scaledWidth >= rect.width) {
+        minX = Math.max(minX, rect.right - centerX - scaledWidth / 2);
+        maxX = Math.min(maxX, rect.left - centerX + scaledWidth / 2);
+      } else {
+        const centeredPan = frameCenterX - centerX;
+        minX = Math.max(minX, centeredPan);
+        maxX = Math.min(maxX, centeredPan);
+      }
+      if (scaledHeight >= rect.height) {
+        minY = Math.max(minY, rect.bottom - centerY - scaledHeight / 2);
+        maxY = Math.min(maxY, rect.top - centerY + scaledHeight / 2);
+      } else {
+        const centeredPan = frameCenterY - centerY;
+        minY = Math.max(minY, centeredPan);
+        maxY = Math.min(maxY, centeredPan);
+      }
     }
-    maxX = Number.isFinite(maxX) ? maxX : 0;
-    maxY = Number.isFinite(maxY) ? maxY : 0;
-    this.panX = Math.max(-maxX, Math.min(maxX, this.panX));
-    this.panY = Math.max(-maxY, Math.min(maxY, this.panY));
+    if (!entries.length) minX = maxX = minY = maxY = 0;
+    this.panX = Math.max(minX, Math.min(maxX, this.panX));
+    this.panY = Math.max(minY, Math.min(maxY, this.panY));
     for (const {image} of entries) {
       image.style.transform = `translate3d(${this.panX}px, ${this.panY}px, 0) scale(${this.zoom})`;
       image.style.userSelect = "none";
       image.draggable = false;
     }
+    this.appliedZoom = this.zoom;
+    this.appliedPanX = this.panX;
+    this.appliedPanY = this.panY;
     this.onChange({zoom: this.zoom, panX: this.panX, panY: this.panY, dragging: this.dragging});
   }
 }

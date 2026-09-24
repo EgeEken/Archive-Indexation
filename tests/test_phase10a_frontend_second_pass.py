@@ -52,8 +52,14 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         script = "const MAX_VIEWER_ZOOM=40;\n" + camera_source + r'''
         const listeners = new WeakMap();
         function node(left, width, height, parent) {
-          const value={style:{},offsetWidth:1200,offsetHeight:800,parent,
-            getBoundingClientRect:()=>({left,top:0,right:left+width,bottom:height,width,height}),
+          const value={style:{},offsetWidth:width,offsetHeight:height,parent,
+            getBoundingClientRect:()=>{
+              const match=value.style.transform?.match(/translate3d\(([-\d.]+)px, ([-\d.]+)px, 0\) scale\(([-\d.]+)\)/);
+              if(!match || value===viewport) return {left,top:0,right:left+width,bottom:height,width,height};
+              const x=Number(match[1]),y=Number(match[2]),z=Number(match[3]);
+              const w=width*z,h=height*z,cx=left+width/2+x,cy=height/2+y;
+              return {left:cx-w/2,top:cy-h/2,right:cx+w/2,bottom:cy+h/2,width:w,height:h};
+            },
             addEventListener(name,fn){listeners.set(value,{...(listeners.get(value)||{}),[name]:fn})},
             removeEventListener(name){const current=listeners.get(value)||{}; delete current[name]; listeners.set(value,current)}, closest(selector){return selector==='img'?value:null},
             contains(other){return other===value}, setPointerCapture(){}, hasPointerCapture(){return false}, releasePointerCapture(){}};

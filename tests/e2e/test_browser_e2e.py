@@ -409,6 +409,50 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertTrue(self.page.locator("#gallery").is_visible())
         self.assertEqual(self.page.locator("dialog[open]").count(), 0)
 
+    def test_fullscreen_camera_reaches_all_edges_for_landscape_and_portrait(self) -> None:
+        self._open_main()
+        for filename in ("alpha.jpg", "portrait.jpg"):
+            card = self.page.locator(".photo-card", has_text=filename).first
+            card.locator(".thumb").click()
+            self.page.locator("#viewer[open]").wait_for()
+            pane = self.page.locator("#viewer-media-pane")
+            image = self.page.locator("#viewer-media img.viewer-media")
+            image.wait_for()
+            self.page.wait_for_function("document.querySelector('#viewer-media img.viewer-media')?.complete")
+            fit = self.page.evaluate("""() => {
+              const frame=document.querySelector('#viewer-media-pane').getBoundingClientRect();
+              const image=document.querySelector('#viewer-media img.viewer-media').getBoundingClientRect();
+              return {frame:{left:frame.left,right:frame.right,top:frame.top,bottom:frame.bottom},image:{left:image.left,right:image.right,top:image.top,bottom:image.bottom}};
+            }""")
+            self.assertGreaterEqual(fit["image"]["left"], fit["frame"]["left"] - 1)
+            self.assertLessEqual(fit["image"]["right"], fit["frame"]["right"] + 1)
+            self.assertGreaterEqual(fit["image"]["top"], fit["frame"]["top"] - 1)
+            self.assertLessEqual(fit["image"]["bottom"], fit["frame"]["bottom"] + 1)
+            box = pane.bounding_box()
+            self.page.evaluate("""({x,y}) => {
+              const pane=document.querySelector('#viewer-media-pane');
+              for(let i=0;i<22;i++) pane.dispatchEvent(new WheelEvent('wheel',{deltaY:-120,clientX:x,clientY:y,bubbles:true,cancelable:true}));
+            }""", {"x": box["x"] + box["width"] / 2, "y": box["y"] + box["height"] / 2})
+            self.assertGreater(self.page.locator("#viewer-media img.viewer-media").evaluate("node => new DOMMatrix(getComputedStyle(node).transform).a"), 1)
+            image_box = image.bounding_box()
+            async_check = """() => {
+              const frame=document.querySelector('#viewer-media-pane').getBoundingClientRect();
+              const image=document.querySelector('#viewer-media img.viewer-media').getBoundingClientRect();
+              return {frame:{left:frame.left,right:frame.right,top:frame.top,bottom:frame.bottom},image:{left:image.left,right:image.right,top:image.top,bottom:image.bottom}};
+            }"""
+            center_x = image_box["x"] + image_box["width"] / 2
+            center_y = image_box["y"] + image_box["height"] / 2
+            for dx, dy, edge, boundary in ((10000, 0, "left", "left"), (-10000, 0, "right", "right"), (0, 10000, "top", "top"), (0, -10000, "bottom", "bottom")):
+                self.page.mouse.move(center_x, center_y)
+                self.page.mouse.down()
+                self.page.mouse.move(center_x + dx, center_y + dy, steps=2)
+                self.page.mouse.up()
+                bounds = self.page.evaluate(async_check)
+                camera = self.page.evaluate("() => {const i=document.querySelector('#viewer-media img.viewer-media'); return {transform:i.style.transform,frame:document.querySelector('#viewer-media-pane').getBoundingClientRect().toJSON(),image:i.getBoundingClientRect().toJSON()}}")
+                self.assertAlmostEqual(bounds["image"][edge], bounds["frame"][boundary], delta=2, msg=f"{filename}: {edge}; {bounds}; {camera}")
+            self.page.locator("#viewer-close").click()
+            self.page.locator("#viewer").wait_for(state="hidden")
+
     def test_file_management_and_representation_comparison_workflow(self) -> None:
         self._open_main()
         self.page.locator("#file-management-button").click()
