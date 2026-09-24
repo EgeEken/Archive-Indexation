@@ -121,6 +121,8 @@ class BrowserE2ETests(unittest.TestCase):
             (root / "alpha.jxl").write_bytes(imagecodecs.jpegxl_encode(np.asarray(image.convert("RGB")), lossless=True))
         (root / "alpha.arw").write_bytes(b"test-only raw fixture")
         cls._create_image(root / "nested" / "portrait.jpg", (80, 140), (70, 150, 220))
+        with Image.open(root / "nested" / "portrait.jpg") as image:
+            (root / "nested" / "portrait.jxl").write_bytes(imagecodecs.jpegxl_encode(np.asarray(image.convert("RGB")), lossless=True))
         cls._create_image(root / "nested" / "child" / "child.jpg", (140, 80), (80, 190, 110))
         cls._create_image(root / "group" / "group-a.jpg", (120, 80), (220, 180, 60))
         cls._create_image(root / "group" / "group-b.jpg", (120, 80), (220, 179, 60))
@@ -452,6 +454,36 @@ class BrowserE2ETests(unittest.TestCase):
                 self.assertAlmostEqual(bounds["image"][edge], bounds["frame"][boundary], delta=2, msg=f"{filename}: {edge}; {bounds}; {camera}")
             self.page.locator("#viewer-close").click()
             self.page.locator("#viewer").wait_for(state="hidden")
+
+    def test_portrait_representation_comparison_geometry_and_difference_mode(self) -> None:
+        self._open_main()
+        self.page.locator(".photo-card", has_text="portrait.jpg").first.locator(".info-button").click()
+        self.page.locator("#details[open]").wait_for()
+        row = self.page.locator("#details .representation-row", has_text="portrait.jxl").first
+        row.locator("[data-representation-view]").click()
+        self.page.locator(".comparison-slider").wait_for()
+        self.page.wait_for_function("[...document.querySelectorAll('.comparison-slider [data-comparison-image]')].every(image => image.complete && image.naturalWidth > 0)")
+        fit = self.page.evaluate("""() => {
+          const frame=document.querySelector('[data-comparison-frame]').getBoundingClientRect();
+          const images=[...document.querySelectorAll('.comparison-slider [data-comparison-image]')].map(image=>image.getBoundingClientRect());
+          return {frame:{left:frame.left,right:frame.right,top:frame.top,bottom:frame.bottom},images:images.map(image=>({left:image.left,right:image.right,top:image.top,bottom:image.bottom}))};
+        }""")
+        for first, second in zip(fit["images"][0].values(), fit["images"][1].values()):
+            self.assertAlmostEqual(first, second, delta=1)
+        self.assertEqual(self.page.locator('[data-compare-mode="difference"]').count(), 1)
+        self.page.locator('[data-compare-mode="difference"]').click()
+        difference = self.page.locator(".comparison-difference-image")
+        difference.wait_for()
+        self.page.wait_for_function("document.querySelector('.comparison-difference-image')?.complete")
+        self.assertTrue(self.page.evaluate("""() => {
+          const image=document.querySelector('.comparison-difference-image');
+          const canvas=document.createElement('canvas'); canvas.width=image.naturalWidth; canvas.height=image.naturalHeight;
+          const context=canvas.getContext('2d'); context.drawImage(image,0,0);
+          return context.getImageData(0,0,canvas.width,canvas.height).data.every((value,index)=>index%4===3 || value===0);
+        }"""))
+        self.page.locator('[data-compare-mode="slider"]').click()
+        self.page.locator(".comparison-slider").wait_for()
+        self.page.locator("[data-comparison-close]").click()
 
     def test_file_management_and_representation_comparison_workflow(self) -> None:
         self._open_main()

@@ -289,6 +289,9 @@
 .comparison-slider-base img, .comparison-wipe-top img { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center; user-select: none; -webkit-user-drag: none; }
 .comparison-divider { position:absolute; top:0; bottom:0; z-index:3; width:2px; padding:0; border:0; background:#e9f5ff; cursor:ew-resize; transform:translateX(-1px); }
 .comparison-divider span { display:block; width:1.1rem; height:2.2rem; margin-left:-.55rem; border:1px solid #e9f5ff; border-radius:.3rem; background:#32678e; }
+.comparison-difference { min-height:22rem; display:grid; place-items:center; overflow:hidden; background:#0d1115; touch-action:none; cursor:grab; }
+.comparison-difference-frame { position:relative; display:grid; place-items:center; max-width:100%; max-height:58vh; }
+.comparison-difference-image { display:block; max-width:100%; max-height:58vh; object-fit:contain; transform-origin:center; user-select:none; image-rendering:auto; }
 .comparison-wipe-label { position:absolute; z-index:4; top:.5rem; padding:.2rem .35rem; border-radius:.25rem; background:#101820cc; color:#eef7ff; font-size:.72rem; pointer-events:none; }
 .comparison-wipe-label-left { left:.5rem; }
 .comparison-wipe-label-right { right:.5rem; }

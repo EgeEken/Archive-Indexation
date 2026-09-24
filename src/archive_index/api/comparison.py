@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from io import BytesIO
 from math import log10
 
@@ -45,11 +46,20 @@ def comparison_data(workspace: Workspace, left_id: str, right_id: str, handle: s
             "pixel_identical": None,
             "byte_identical": bool(reference_row["sha256"] and compressed_row["sha256"] and reference_row["sha256"] == compressed_row["sha256"]),
         }
+        difference_data_url = None
         metrics["source_bytes"] = metrics["reference_bytes"]
         metrics["comparison_bytes"] = metrics["compressed_bytes"]
         metrics["comparison_percent"] = metrics["compressed_percent"]
         if reference.size == compressed.size:
-            mse = _mse(reference, compressed)
+            difference = _difference(reference, compressed)
+            try:
+                width, height = difference.size
+                mse = sum(ImageStat.Stat(difference).sum2) / (width * height * 3)
+                output = BytesIO()
+                difference.save(output, format="PNG", optimize=True)
+                difference_data_url = "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+            finally:
+                difference.close()
             metrics["mse"] = round(mse, 6)
             metrics["psnr"] = None if mse == 0 else round(10 * log10((255 * 255) / mse), 3)
             metrics["pixel_identical"] = mse == 0
@@ -61,6 +71,7 @@ def comparison_data(workspace: Workspace, left_id: str, right_id: str, handle: s
             "left": reference_data,
             "right": compressed_data,
             "metrics": metrics,
+            "difference_data_url": difference_data_url,
             "same_dimensions": reference.size == compressed.size,
             "metrics_note": None if reference.size == compressed.size else "MSE and PSNR are unavailable because dimensions differ.",
         }
@@ -90,17 +101,23 @@ def _decode(workspace: Workspace, row):
         raise ResourceNotFound("representation could not be decoded") from error
 
 
-def _mse(left: Image.Image, right: Image.Image) -> float:
+def _difference(left: Image.Image, right: Image.Image) -> Image.Image:
     left_rgb = left.convert("RGB")
     right_rgb = right.convert("RGB")
-    difference = ImageChops.difference(left_rgb, right_rgb)
+    try:
+        return ImageChops.difference(left_rgb, right_rgb)
+    finally:
+        left_rgb.close()
+        right_rgb.close()
+
+
+def _mse(left: Image.Image, right: Image.Image) -> float:
+    difference = _difference(left, right)
     try:
         width, height = difference.size
         return sum(ImageStat.Stat(difference).sum2) / (width * height * 3)
     finally:
         difference.close()
-        left_rgb.close()
-        right_rgb.close()
 
 
 def _orient(first, second):

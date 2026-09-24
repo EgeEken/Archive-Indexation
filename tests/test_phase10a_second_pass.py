@@ -4,6 +4,8 @@ import tempfile
 import sys
 import types
 import unittest
+import base64
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -336,6 +338,35 @@ class Phase10ASecondPassTests(unittest.TestCase):
                 connection.close()
             self.assertFalse(result["metrics"]["byte_identical"])
             self.assertTrue(result["metrics"]["pixel_identical"])
+
+    def test_comparison_difference_png_matches_actual_pair_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = np.zeros((12, 16, 3), dtype=np.uint8)
+            changed = original.copy()
+            changed[4, 7] = [120, 40, 8]
+            Image.fromarray(original).save(root / "preferred.png")
+            Image.fromarray(changed).save(root / "other.png")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                rows = connection.execute("SELECT id, logical_asset_id FROM physical_file ORDER BY relative_path").fetchall()
+                connection.execute("UPDATE physical_file SET logical_asset_id = ? WHERE id = ?", (rows[0]["logical_asset_id"], rows[1]["id"]))
+                connection.commit()
+                unequal = comparison_data(workspace, rows[0]["id"], rows[1]["id"], "workspace")
+                identical = comparison_data(workspace, rows[0]["id"], rows[0]["id"], "workspace")
+            finally:
+                connection.close()
+            diff_bytes = base64.b64decode(unequal["difference_data_url"].split(",", 1)[1])
+            with Image.open(BytesIO(diff_bytes)) as diff:
+                pixels = np.asarray(diff)
+            self.assertEqual(pixels.shape, (12, 16, 3))
+            self.assertTrue(np.array_equal(pixels[0, 0], [0, 0, 0]))
+            self.assertTrue(np.any(pixels[4, 7] > 0))
+            self.assertGreater(unequal["metrics"]["mse"], 0)
+            identical_pixels = np.asarray(Image.open(BytesIO(base64.b64decode(identical["difference_data_url"].split(",", 1)[1]))))
+            self.assertFalse(np.any(identical_pixels))
 
     def test_lar_iqa_preparation_uses_canonical_loader(self):
         provider = object.__new__(LARIQAProvider)
