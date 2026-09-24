@@ -85,6 +85,7 @@ function disposeRepresentationDialog(dialog) {
   dialog._comparisonData = null;
   dialog._comparisonDataKey = null;
   dialog._comparisonPairKey = null;
+  dialog._previewData = null;
   dialog._rawGeneration = (dialog._rawGeneration || 0) + 1;
   dialog._rawAbort?.abort();
   dialog._rawAbort = null;
@@ -156,19 +157,19 @@ function comparisonMetricsMarkup(metrics, comparedFile) {
 
 function comparisonLabel(file) { return `${escapeHtml(file.filename)} · ${escapeHtml(formatBytes(file.size_bytes))}`; }
 
-async function renderRepresentationComparison(asset, compressedId, referenceId, mode = "slider") {
+async function renderRepresentationComparison(asset, compressedId, referenceId, mode = "slider", suppliedData = null) {
   const dialog = $("representation-comparison");
   const result = dialog.querySelector("[data-comparison-result]");
   if (!result) return;
-  const pairKey = `${referenceId}:${compressedId}`;
+  const pairKey = suppliedData ? `preview:${suppliedData.profile_id || suppliedData.profile_name}` : `${referenceId}:${compressedId}`;
   const samePair = dialog._comparisonPairKey === pairKey;
   const previousCamera = samePair ? dialog._comparisonCamera : null;
   const cameraState = previousCamera ? {zoom: previousCamera.zoom, panX: previousCamera.panX, panY: previousCamera.panY} : null;
   const requestToken = (dialog._comparisonRequestToken || 0) + 1;
   dialog._comparisonRequestToken = requestToken;
   try {
-    const dataKey = `${compressedId}:${referenceId}`;
-    const data = dialog._comparisonDataKey === dataKey ? dialog._comparisonData : await api(`/api/files/${encodeURIComponent(compressedId)}/comparison?with_id=${encodeURIComponent(referenceId)}`);
+    const dataKey = suppliedData ? pairKey : `${compressedId}:${referenceId}`;
+    const data = suppliedData || (dialog._comparisonDataKey === dataKey ? dialog._comparisonData : await api(`/api/files/${encodeURIComponent(compressedId)}/comparison?with_id=${encodeURIComponent(referenceId)}`));
     if (dialog._comparisonRequestToken !== requestToken) return;
     dialog._comparisonData = data;
     dialog._comparisonDataKey = dataKey;
@@ -180,7 +181,7 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
     if (headerMetrics) headerMetrics.innerHTML = comparisonMetricsMarkup(metrics, compressed);
     const referenceLabel = comparisonLabel(reference);
     const compressedLabel = comparisonLabel(compressed);
-    const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-base"><img class="comparison-compressed" src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
+    const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-frame" data-comparison-frame><img class="comparison-slider-sizer" src="${escapeHtml(reference.preview_url)}" alt="" aria-hidden="true"><div class="comparison-slider-base"><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button></div><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
     dialog._comparisonCamera?.destroy();
     dialog._comparisonCamera = null;
     result.innerHTML = stage;
@@ -188,13 +189,13 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
     const camera = new SharedImageCamera({
       viewport,
       getFrames: () => mode === "slider"
-        ? [...result.querySelectorAll("[data-comparison-viewport] img")].map(image => ({image, frame: viewport}))
+        ? [...result.querySelectorAll("[data-comparison-image]")].map(image => ({image, frame: result.querySelector("[data-comparison-frame]") || viewport}))
         : [...result.querySelectorAll(".comparison-pane")].map(frame => ({image: frame.querySelector("img"), frame})),
       onChange: change => result.querySelectorAll("img").forEach(image => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }),
     });
     dialog._comparisonCamera = camera;
     if (cameraState) Object.assign(camera, cameraState);
-    camera.setImages([...result.querySelectorAll("img")]);
+    camera.setImages([...result.querySelectorAll("[data-comparison-image]")]);
     result.querySelectorAll("img").forEach(image => image.addEventListener("load", () => camera.apply(), {once: true}));
     const wipe = result.querySelector("[data-wipe-top]");
     const handle = result.querySelector("[data-wipe-handle]");
@@ -221,6 +222,61 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
   }
 }
 
+async function openCompressionProfilePreview(profile) {
+  if (!profile || !["jpeg-xl", "avif"].includes(profile.codec)) return;
+  const dialog = $("representation-comparison");
+  ensureRepresentationDialogLifecycle(dialog);
+  disposeRepresentationDialog(dialog);
+  dialog._profilePreviewToken = (dialog._profilePreviewToken || 0) + 1;
+  const token = dialog._profilePreviewToken;
+  dialog.innerHTML = `<div class="dialog-inner compression-profile-preview"><div class="dialog-header"><div><h2>Compression preset preview</h2><p class="muted" data-preview-status>Preparing preview…</p></div><button class="icon" type="button" data-comparison-close aria-label="Close compression preset preview">×</button></div><div class="profile-preview-tabs" role="tablist"></div><div class="compression-preview-info" data-preview-info></div><div class="comparison-header-metrics" data-comparison-metrics>Calculating comparison…</div><div class="comparison-toolbar"><div class="comparison-mode" role="group" aria-label="Comparison mode"><button class="secondary active" type="button" data-preview-mode="slider">Slider</button><button class="secondary" type="button" data-preview-mode="side">Side by side</button></div></div><div data-comparison-result></div></div>`;
+  dialog.showModal();
+  dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
+  const status = dialog.querySelector("[data-preview-status]");
+  const info = dialog.querySelector("[data-preview-info]");
+  const mode = {value: "slider"};
+  let manifest;
+  try {
+    manifest = profile.is_builtin
+      ? await fetch("/assets/compression-preview/manifest.json").then(response => response.json())
+      : null;
+    if (token !== dialog._profilePreviewToken) return;
+    const profiles = manifest?.profiles || [profile];
+    const tabs = dialog.querySelector("[role=tablist]");
+    tabs.innerHTML = profiles.map(item => `<button class="secondary${item.id === profile.id ? " active" : ""}" type="button" data-preview-profile="${escapeHtml(item.id)}">${escapeHtml(item.name)}</button>`).join("");
+    const loadProfile = async selected => {
+      const selectedProfile = fileManagement.profiles?.find(item => item.id === selected) || profile;
+      const entry = manifest?.profiles?.find(item => item.id === selected);
+      const data = entry || await api(`/api/file-management/profile-preview?profile_id=${encodeURIComponent(selected)}`);
+      if (token !== dialog._profilePreviewToken) return;
+      data.profile_id = selected;
+      data.reference.extension = ".jpg";
+      data.compressed.extension = data.codec === "jpeg-xl" ? ".jxl" : ".avif";
+      data.reference.preview_url = data.reference.url;
+      data.compressed.preview_url = data.compressed.url.startsWith("/api/") ? apiPath(data.compressed.url) : data.compressed.url;
+      dialog._previewData = data;
+      info.innerHTML = `<strong>${escapeHtml(data.profile_name || selectedProfile.name)}</strong><span>${data.settings?.quality != null ? `Quality ${escapeHtml(data.settings.quality)} · Effort ${escapeHtml(data.settings.effort ?? "—")}` : escapeHtml(selectedProfile.codec.toUpperCase())}</span>`;
+      status.textContent = "Reference and actual encoded output";
+      await renderRepresentationComparison(null, "", "", mode.value, data);
+    };
+    dialog.querySelectorAll("[data-preview-profile]").forEach(button => button.addEventListener("click", async () => {
+      dialog.querySelectorAll("[data-preview-profile]").forEach(item => item.classList.toggle("active", item === button));
+      await loadProfile(button.dataset.previewProfile);
+    }));
+    dialog.querySelectorAll("[data-preview-mode]").forEach(button => button.addEventListener("click", async () => {
+      mode.value = button.dataset.previewMode;
+      dialog.querySelectorAll("[data-preview-mode]").forEach(item => item.classList.toggle("active", item === button));
+      const current = dialog._comparisonData;
+      if (current) await renderRepresentationComparison(null, "", "", mode.value, current);
+    }));
+    await loadProfile(profile.id);
+  } catch (error) {
+    if (token !== dialog._profilePreviewToken) return;
+    status.textContent = "Preview unavailable";
+    dialog.querySelector("[data-comparison-result]").innerHTML = `<p class="error">Preview unavailable — ${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function rawExposureLabel(value) { return `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)} EV`; }
 
 function openRawInspection(asset, fileId) {
@@ -230,7 +286,7 @@ function openRawInspection(asset, fileId) {
   const dialog = $("representation-comparison");
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p><p class="muted raw-loading hidden" data-raw-loading>Loading preview…</p></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-label>+0.00 EV</output><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-label>+0.00 EV <span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></output><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
@@ -269,8 +325,6 @@ function openRawInspection(asset, fileId) {
       image.classList.remove("hidden");
     } catch (error) {
       if (error.name === "AbortError" || generation !== dialog._rawGeneration) return;
-      image.removeAttribute("src");
-      image.classList.add("hidden");
       errorNode.textContent = error.message || "RAW development is unavailable for this file.";
       errorNode.classList.remove("hidden");
     } finally {

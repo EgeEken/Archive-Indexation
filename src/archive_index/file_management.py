@@ -7,9 +7,10 @@ import hashlib
 import shutil
 import uuid
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from .workspace import Workspace, WorkspaceError
+from .media.capabilities import av1_capability
 
 BUILTIN_HIGH_QUALITY_PROFILE_ID = "builtin-jxl-high-quality"
 BUILTIN_BALANCED_PROFILE_ID = "builtin-jxl-balanced"
@@ -258,6 +259,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
         connection.close()
     operations = []
     conflicts = []
+    blockers: dict[str, dict[str, object]] = {}
     targets: dict[str, tuple[str, str]] = {}
     for row in rows:
         matching_rules = [candidate for candidate in ruleset["rules"] if candidate["enabled"] and _matches(row, candidate["match"])]
@@ -272,38 +274,54 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
             profile = profiles.get(profile_id)
             target = _target_path(row, action, profile) if operation in {"compress", "copy", "move"} else None
             item_conflicts = []
+            item_blockers = []
             if operation == "compress":
                 if profile is None:
-                    item_conflicts.append("compression profile is missing")
-                elif profile["codec"] in {"avif", "av1"}:
-                    item_conflicts.append(f"{profile['codec'].upper()} compression encoder is not installed")
+                    item_blockers.append("compression profile is missing")
+                elif profile["codec"] == "av1":
+                    capability = av1_capability()
+                    if not capability["available"]:
+                        item_blockers.append(capability["message"])
+                    else:
+                        item_blockers.append("AV1 Archival profile is pending; production encoding is not enabled.")
+                elif profile["codec"] == "avif":
+                    item_blockers.append("AVIF encoding is not available in the planning runtime.")
             if operation not in {"compress", "copy", "move", "delete"}:
                 item_conflicts.append(f"unsupported planned operation: {operation}")
             if operation in {"compress", "copy", "move"} and target is None:
                 item_conflicts.append("target path is missing")
-            compiled.append({"rule": rule, "action": action, "operation": operation, "profile": profile, "profile_id": profile_id, "target": target, "conflicts": item_conflicts})
+            compiled.append({"rule": rule, "action": action, "operation": operation, "profile": profile, "profile_id": profile_id, "target": target, "conflicts": item_conflicts, "blockers": item_blockers})
 
         _validate_action_combination(compiled)
         for item in compiled:
             item_conflicts = list(item["conflicts"])
+            item_blockers = list(item["blockers"])
             operation = item["operation"]
             target = item["target"]
+            source_replacement = operation == "compress" and item["action"].get("source_disposition") == "replace" and item["action"].get("compress_in_place", True)
+            rename_on_conflict = item["action"].get("rename_on_conflict", True) is not False
+            renamed_from = None
+            replaces_source_in_place = False
             if target is not None:
-                key = target.casefold()
-                if key == source.casefold():
-                    item_conflicts.append({
-                        "compress": "Compression output path is the same as the source file.",
-                        "copy": "Copy destination is the same as the source file.",
-                        "move": "Move destination is the same as the source file.",
-                    }.get(operation, "Destination is the same as the source file."))
-                elif key in targets:
-                    item_conflicts.append("Another planned output already uses this destination.")
-                else:
-                    existing = _workspace_target_status(workspace, target, row["sha256"])
-                    if existing == "conflict":
-                        item_conflicts.append("A different file already exists at this destination.")
-                if key not in targets:
-                    targets[key] = (row["id"], source)
+                target, destination_status, renamed_from, replaces_source_in_place, target_conflict = _resolve_target(
+                    workspace,
+                    target,
+                    source,
+                    row["sha256"],
+                    operation,
+                    source_replacement,
+                    rename_on_conflict,
+                    targets,
+                )
+                if target_conflict:
+                    item_conflicts.append(target_conflict)
+                targets.setdefault(target.casefold(), (row["id"], source))
+            else:
+                destination_status = None
+            for blocker in item_blockers:
+                key = f"{item['profile_id']}:{blocker}"
+                entry = blockers.setdefault(key, {"profile_id": item["profile_id"], "profile_name": item["profile"]["name"] if item["profile"] else None, "reason": blocker, "affected_count": 0})
+                entry["affected_count"] += 1
             operation_row = {
                 "physical_file_id": row["id"],
                 "logical_asset_id": row["logical_asset_id"],
@@ -318,8 +336,12 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                 "estimated_output_bytes": _estimated_output_bytes(row["size_bytes"] or 0, item["profile"]),
                 "estimated_storage_delta_bytes": _storage_delta(row["size_bytes"] or 0, item["profile"], operation, item["action"]),
                 "source_disposition": item["action"].get("source_disposition", "keep"),
-                "destination_status": _workspace_target_status(workspace, target, row["sha256"]) if target else None,
+                "destination_status": destination_status,
+                "renamed_from": renamed_from,
+                "renamed_to_avoid_conflict": renamed_from is not None,
+                "replaces_source_in_place": replaces_source_in_place,
                 "conflicts": item_conflicts,
+                "blockers": item_blockers,
                 "requires_confirmation": True,
             }
             operations.append(operation_row)
@@ -333,11 +355,14 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                 "reason": reason,
             } for reason in item_conflicts)
     summary = _plan_summary(workspace, rows, operations, conflicts)
+    summary["blocker_count"] = sum(int(item["affected_count"]) for item in blockers.values())
+    summary["capability_blockers"] = list(blockers.values())
     return {
         "available": True,
         "ruleset_id": ruleset_id,
         "operations": operations,
         "conflicts": conflicts,
+        "blockers": list(blockers.values()),
         "summary": summary,
         "executor": {"available": False, "message": "Execution is unavailable until the safety executor is enabled."},
     }
@@ -418,10 +443,10 @@ def _workspace_target_status(workspace: Workspace, relative_path: str | None, so
     if not relative_path:
         return None
     try:
-        path = workspace.absolute_path(relative_path)
+        path = _case_insensitive_path(workspace, relative_path)
     except WorkspaceError:
         return "conflict"
-    if not path.is_file():
+    if path is None or not path.is_file():
         return None
     if not source_sha256:
         return "conflict"
@@ -430,6 +455,68 @@ def _workspace_target_status(workspace: Workspace, relative_path: str | None, so
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return "already_satisfied" if digest.hexdigest() == source_sha256 else "conflict"
+
+
+def _case_insensitive_path(workspace: Workspace, relative_path: str) -> Path | None:
+    current = workspace.root
+    for part in PurePosixPath(relative_path).parts:
+        if part in {"", "."}:
+            continue
+        if not current.is_dir():
+            return None
+        match = next((child for child in current.iterdir() if child.name.casefold() == part.casefold()), None)
+        current = match if match is not None else current / part
+    return current if current.exists() else None
+
+
+def _resolve_target(
+    workspace: Workspace,
+    target: str,
+    source: str,
+    source_sha256: str | None,
+    operation: str,
+    source_replacement: bool,
+    rename_on_conflict: bool,
+    planned_targets: dict[str, tuple[str, str]],
+) -> tuple[str, str | None, str | None, bool, str | None]:
+    source_key = source.casefold()
+    target_key = target.casefold()
+    if target_key == source_key:
+        if source_replacement:
+            return target, "replace_source", None, True, None
+        if operation == "move":
+            return target, "already_satisfied", None, False, None
+        if operation == "copy":
+            return target, "already_satisfied", None, False, None
+        if rename_on_conflict:
+            renamed = _next_target(target, workspace, planned_targets)
+            return renamed, "renamed", target, False, None
+        return target, "conflict", None, False, "A file already exists at this destination."
+
+    existing = _workspace_target_status(workspace, target, source_sha256)
+    planned = target_key in planned_targets
+    if existing == "already_satisfied" and not planned:
+        return target, existing, None, False, None
+    if not planned and existing is None:
+        return target, None, None, False, None
+    if rename_on_conflict:
+        renamed = _next_target(target, workspace, planned_targets)
+        return renamed, "renamed", target, False, None
+    reason = "Another planned output already uses this destination." if planned else "A file already exists at this destination."
+    return target, "conflict", None, False, reason
+
+
+def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str]]) -> str:
+    path = PurePosixPath(target)
+    suffix = path.suffix
+    stem = path.name[:-len(suffix)] if suffix else path.name
+    number = 1
+    while True:
+        candidate = str(path.with_name(f"{stem} ({number}){suffix}")).replace("\\", "/")
+        key = candidate.casefold()
+        if key not in planned_targets and _workspace_target_status(workspace, candidate, None) is None:
+            return candidate
+        number += 1
 
 
 def _validate_action_combination(compiled) -> None:
@@ -499,7 +586,8 @@ def _plan_summary(workspace, rows, operations, conflicts):
     return {
         "candidate_count": len(operations),
         "conflict_count": len(conflicts),
-        "safe_count": sum(not operation["conflicts"] for operation in operations),
+        "safe_count": sum(not operation["conflicts"] and not operation.get("blockers") for operation in operations),
+        "blocked_count": sum(bool(operation.get("blockers")) for operation in operations),
         "delete": groups["delete"],
         "copy": groups["copy"],
         "move": groups["move"],
@@ -567,7 +655,10 @@ def _representation_origin(row) -> str:
 
 
 def _profile(row):
-    return {**dict(row), "settings": _json(row["settings_json"])}
+    profile = {**dict(row), "settings": _json(row["settings_json"])}
+    if profile["codec"] == "av1":
+        profile["capability"] = av1_capability()
+    return profile
 
 
 def _ruleset(row):
@@ -590,10 +681,13 @@ def _empty_plan(reason: str):
         "ruleset_id": None,
         "operations": [],
         "conflicts": [],
+        "blockers": [],
         "summary": {
             "candidate_count": 0,
             "conflict_count": 0,
             "safe_count": 0,
+            "blocked_count": 0,
+            "capability_blockers": [],
             "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
             "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
             "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
@@ -621,12 +715,12 @@ def _ensure_builtins(workspace: Workspace) -> None:
     cleanup_rules = [
         {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "copy", "destination_dir": "raws", "preserve_relative_structure": True}},
-        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False}},
-        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True}},
+        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "copy", "destination_dir": "raws", "preserve_relative_structure": True, "rename_on_conflict": True}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": True, "rename_on_conflict": True}},
+        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "rename_on_conflict": True}},
         {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True}},
+        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "rename_on_conflict": True}},
     ]
     selected_rules = [
         {"enabled": True, "match": {"selection_state": "rejected"}, "action": {"operation": "delete"}},

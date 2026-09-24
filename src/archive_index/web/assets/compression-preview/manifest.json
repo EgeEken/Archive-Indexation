@@ -1,0 +1,78 @@
+{
+  "profiles": [
+    {
+      "codec": "jpeg-xl",
+      "compressed": {
+        "filename": "reference.high-quality.jxl",
+        "size_bytes": 1987443,
+        "url": "/assets/compression-preview/jxl-high-quality.webp"
+      },
+      "effort": 7,
+      "id": "builtin-jxl-high-quality",
+      "metrics": {
+        "compressed_bytes": 1987443,
+        "compressed_percent": 15.82,
+        "compression_ratio": 6.321,
+        "mse": 9.244727,
+        "reference_bytes": 12561761
+      },
+      "name": "JXL High Quality",
+      "quality": 80,
+      "reference": {
+        "filename": "reference.jpg",
+        "size_bytes": 12561761,
+        "url": "/assets/compression-preview/reference.jpg"
+      }
+    },
+    {
+      "codec": "jpeg-xl",
+      "compressed": {
+        "filename": "reference.balanced.jxl",
+        "size_bytes": 1232189,
+        "url": "/assets/compression-preview/jxl-balanced.webp"
+      },
+      "effort": 7,
+      "id": "builtin-jxl-balanced",
+      "metrics": {
+        "compressed_bytes": 1232189,
+        "compressed_percent": 9.81,
+        "compression_ratio": 10.195,
+        "mse": 16.425328,
+        "reference_bytes": 12561761
+      },
+      "name": "JXL Balanced",
+      "quality": 60,
+      "reference": {
+        "filename": "reference.jpg",
+        "size_bytes": 12561761,
+        "url": "/assets/compression-preview/reference.jpg"
+      }
+    },
+    {
+      "codec": "jpeg-xl",
+      "compressed": {
+        "filename": "reference.high-compression.jxl",
+        "size_bytes": 919507,
+        "url": "/assets/compression-preview/jxl-high-compression.webp"
+      },
+      "effort": 7,
+      "id": "builtin-jxl-high-compression",
+      "metrics": {
+        "compressed_bytes": 919507,
+        "compressed_percent": 7.32,
+        "compression_ratio": 13.661,
+        "mse": 24.008241,
+        "reference_bytes": 12561761
+      },
+      "name": "JXL High Compression",
+      "quality": 40,
+      "reference": {
+        "filename": "reference.jpg",
+        "size_bytes": 12561761,
+        "url": "/assets/compression-preview/reference.jpg"
+      }
+    }
+  ],
+  "reference_sha256": "e6ed612e51170d488dca3fdc5978a152c68c4a9173e972351719d3f59b96c0b6",
+  "version": "compression-preview-v1"
+}

@@ -9,7 +9,8 @@ import numpy as np
 from PIL import Image
 
 from archive_index.api.comparison import _mse, comparison_data
-from archive_index.file_management import build_dry_run_plan, list_presets, list_profiles, list_rulesets, save_ruleset
+from archive_index.file_management import build_dry_run_plan, list_presets, list_profiles, list_rulesets, save_profile, save_ruleset
+from archive_index.file_management_previews import bundled_preview_manifest
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
@@ -18,6 +19,70 @@ from archive_index.workspace import Workspace
 
 
 class Phase10ASecondPassTests(unittest.TestCase):
+    def test_bundled_profile_previews_have_real_metrics_and_assets(self):
+        manifest = bundled_preview_manifest()
+        self.assertEqual(manifest["version"], "compression-preview-v1")
+        self.assertEqual(len(manifest["profiles"]), 3)
+        for profile in manifest["profiles"]:
+            self.assertGreater(profile["compressed"]["size_bytes"], 0)
+            self.assertGreaterEqual(profile["metrics"]["mse"], 0)
+            self.assertTrue((Path(__file__).parents[1] / "src" / "archive_index" / "web" / profile["compressed"]["url"].removeprefix("/")).is_file())
+
+    def test_builtin_copy_rules_preserve_subfolders_and_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace.create(Path(directory))
+            cleanup = next(item for item in list_rulesets(workspace) if item["id"] == "builtin-archive-cleanup")
+            copies = [rule["action"] for rule in cleanup["rules"] if rule["action"].get("operation") == "copy"]
+            self.assertEqual([action["preserve_relative_structure"] for action in copies], [True, True])
+            self.assertTrue(all(action["rename_on_conflict"] for action in copies))
+
+    def test_copy_collision_uses_windows_suffix_and_can_be_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "file.jpg").write_bytes(b"source")
+            (root / "out").mkdir()
+            (root / "out" / "File.JPG").write_bytes(b"other")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            ruleset = save_ruleset(workspace, name="Copy", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "destination_dir": "out", "rename_on_conflict": True}}])
+            operation = build_dry_run_plan(workspace, ruleset["id"])["operations"][0]
+            self.assertEqual(operation["target_relative_path"], "out/file (1).jpg")
+            self.assertTrue(operation["renamed_to_avoid_conflict"])
+            blocked = save_ruleset(workspace, name="Copy blocked", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "destination_dir": "out", "rename_on_conflict": False}}])
+            operation = build_dry_run_plan(workspace, blocked["id"])["operations"][0]
+            self.assertTrue(any("already exists" in conflict for conflict in operation["conflicts"]))
+
+    def test_compression_same_path_is_replace_or_rename_not_unconditional_conflict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ODA8_7608.MP4").write_bytes(b"video")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            profile = save_profile(workspace, name="AV1 test", codec="av1", container="mp4", settings={})
+            replacement = save_ruleset(workspace, name="Replace", rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace", "compress_in_place": True}}])
+            operation = build_dry_run_plan(workspace, replacement["id"])["operations"][0]
+            self.assertTrue(operation["replaces_source_in_place"])
+            self.assertFalse(any("same" in conflict.lower() for conflict in operation["conflicts"]))
+            keep = save_ruleset(workspace, name="Keep", rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep", "compress_in_place": True, "rename_on_conflict": True}}])
+            operation = build_dry_run_plan(workspace, keep["id"])["operations"][0]
+            self.assertEqual(operation["target_relative_path"], "ODA8_7608 (1).mp4")
+            blocked = save_ruleset(workspace, name="Keep blocked", rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep", "compress_in_place": True, "rename_on_conflict": False}}])
+            operation = build_dry_run_plan(workspace, blocked["id"])["operations"][0]
+            self.assertTrue(any("already exists" in conflict for conflict in operation["conflicts"]))
+
+    def test_av1_blocker_is_grouped_once_and_capability_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.mp4").write_bytes(b"one")
+            (root / "two.mp4").write_bytes(b"two")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            profile = next(item for item in list_profiles(workspace) if item["codec"] == "av1")
+            ruleset = save_ruleset(workspace, name="AV1", rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"]}}])
+            plan = build_dry_run_plan(workspace, ruleset["id"])
+            self.assertEqual(len(plan["blockers"]), 1)
+            self.assertEqual(plan["blockers"][0]["affected_count"], 2)
+            self.assertFalse(any("not installed" in conflict["reason"] for conflict in plan["conflicts"]))
     def test_mse_is_true_per_channel_pixel_mean(self):
         left = Image.fromarray(np.array([[[0, 0, 0], [255, 255, 255]]], dtype=np.uint8))
         right = Image.fromarray(np.array([[[0, 0, 0], [255, 0, 0]]], dtype=np.uint8))

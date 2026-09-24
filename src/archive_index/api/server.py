@@ -50,6 +50,7 @@ from ..file_management import (
     save_ruleset,
     set_active_ruleset,
 )
+from ..file_management_previews import cached_preview_file, custom_profile_preview
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
 from .comparison import comparison_data, comparison_preview
@@ -129,6 +130,17 @@ _UI_RESOURCES = {
     "app-visualizations.js",
     "app-bootstrap.js",
     "world.json",
+    "assets/compression-preview/reference.jpg",
+    "assets/compression-preview/manifest.json",
+    "assets/compression-preview/jxl-high-quality.webp",
+    "assets/compression-preview/jxl-balanced.webp",
+    "assets/compression-preview/jxl-high-compression.webp",
+}
+_UI_BINARY_RESOURCES = {
+    "assets/compression-preview/reference.jpg",
+    "assets/compression-preview/jxl-high-quality.webp",
+    "assets/compression-preview/jxl-balanced.webp",
+    "assets/compression-preview/jxl-high-compression.webp",
 }
 _folder_picker_lock = threading.Lock()
 
@@ -283,8 +295,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 return
             if request.path.removeprefix("/") in _UI_RESOURCES:
                 name = request.path.removeprefix("/")
-                content_type = "text/css; charset=utf-8" if name == "app.css" else "application/json; charset=utf-8" if name == "world.json" else "text/javascript; charset=utf-8"
-                self._send_bytes(200, _ui_resource(name).encode("utf-8"), content_type)
+                if name in _UI_BINARY_RESOURCES:
+                    content_type = "image/jpeg" if name.endswith(".jpg") else "image/webp"
+                    self._send_bytes(200, _ui_resource_bytes(name), content_type)
+                else:
+                    content_type = "text/css; charset=utf-8" if name == "app.css" else "application/json; charset=utf-8" if name.endswith(".json") else "text/javascript; charset=utf-8"
+                    self._send_bytes(200, _ui_resource(name).encode("utf-8"), content_type)
                 return
             if request.path == "/api/health":
                 self._send_json(200, {"status": "ok"})
@@ -340,6 +356,12 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, visualization_data(workspace, query, handle, filter_assets=_browser_filtered_assets, kind="vector"))
             elif request.path == "/api/file-management/profiles":
                 self._send_json(200, {"profiles": list_profiles(workspace)})
+            elif request.path == "/api/file-management/profile-preview":
+                profile_id = _first(query, "profile_id", "")
+                profile = next((item for item in list_profiles(workspace) if item["id"] == profile_id), None)
+                if profile is None:
+                    raise ResourceNotFound("compression profile not found")
+                self._send_json(200, custom_profile_preview(workspace, profile))
             elif request.path == "/api/file-management/rulesets":
                 self._send_json(200, {"rulesets": list_rulesets(workspace)})
             elif request.path == "/api/file-management/presets":
@@ -678,6 +700,9 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison-preview":
             self._send_bytes(200, comparison_preview(workspace, parts[2]), "image/png")
             return
+        if len(parts) == 4 and parts[:3] == ["api", "file-management", "profile-preview"]:
+            self._send_file(cached_preview_file(workspace, parts[3]), "image/webp")
+            return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "raw-development-preview":
             try:
                 exposure = float(_first(query, "exposure_ev", "0"))
@@ -943,6 +968,12 @@ def _ui_resource(name: str) -> str:
     if name not in _UI_RESOURCES:
         raise ResourceNotFound("resource not found")
     return files("archive_index.web").joinpath(name).read_text(encoding="utf-8")
+
+
+def _ui_resource_bytes(name: str) -> bytes:
+    if name not in _UI_RESOURCES:
+        raise ResourceNotFound("resource not found")
+    return files("archive_index.web").joinpath(*name.split("/")).read_bytes()
 
 
 def _pick_workspace_path() -> str:

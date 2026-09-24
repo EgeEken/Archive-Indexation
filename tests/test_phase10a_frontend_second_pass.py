@@ -106,6 +106,17 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertNotIn("Available space", management)
         self.assertIn("storageDelta ?", management)
 
+    def test_profile_previews_and_planner_safety_controls(self):
+        for marker in ("data-profile-preview", "Preview ${escapeHtml(profile.name)} compression", "profile.is_builtin ?", "profile-preview", "compression-preview/manifest.json", "renameOnConflict", "Rename in case of conflict", "data-rule-help"):
+            self.assertIn(marker, self.management + self.details + self.html)
+        self.assertIn("compression-preview-v1", (self.root / "assets" / "compression-preview" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("comparison-slider-frame", self.details)
+        self.assertIn("comparison-slider-sizer", self.details)
+        self.assertIn("raw-loading-inline", self.details + (self.root / "app.css").read_text(encoding="utf-8"))
+        self.assertIn("replaces_source_in_place", self.file_management_backend)
+        self.assertIn("_next_target", self.file_management_backend)
+        self.assertIn("capability_blockers", self.file_management_backend)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,7 @@ archive-index = "archive_index.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"archive_index.web" = ["index.html", "app.css", "app.js", "app-visualizations.js", "app-file-management.js", "world.json"]
+"archive_index.web" = ["index.html", "app.css", "app.js", "app-visualizations.js", "app-file-management.js", "world.json", "assets/compression-preview/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
