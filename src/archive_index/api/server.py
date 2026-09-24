@@ -396,7 +396,18 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             elif request.path == "/api/groups":
                 self._send_json(200, _groups(workspace, query, handle))
             elif request.path == "/api/groups/locate":
-                self._send_json(200, _locate_group(workspace, query))
+                if _first(query, "layout", "") or (_first(query, "q", "").strip() and _first(query, "semantic", "1") != "0"):
+                    group_id = _first(query, "group_id", "")
+                    offset = 0
+                    while True:
+                        data = _browser_assets(workspace, {**query, "view": ["groups"], "offset": [str(offset)], "limit": ["180"]}, handle)
+                        found = next((index for index, group in enumerate(data["groups"]) if group["group_id"] == group_id), None)
+                        if found is not None or not data["has_next"]:
+                            self._send_json(200, {"found": found is not None, "page": (offset + found) // 10 + 1 if found is not None else 1})
+                            break
+                        offset += 180
+                else:
+                    self._send_json(200, _locate_group(workspace, query))
             elif request.path == "/api/recommendations":
                 self._send_json(200, _recommendations(workspace))
             else:

@@ -46,7 +46,7 @@ document.addEventListener("keydown", (event) => {
 });
 setupFilters();
 if (state.workspace) {
-  loadWorkspace().then(() => setInterval(() => { loadJobs(); loadProblemsBadge(); }, 1500)).catch((error) => showToast(`Workspace request failed: ${error.message}`));
+  loadWorkspace().then(() => setInterval(() => { if (!document.querySelector("dialog[open]")) { loadJobs(); loadProblemsBadge(); } }, 1500)).catch((error) => showToast(`Workspace request failed: ${error.message}`));
 } else { loadHome().catch((error) => showToast(`Workspace list failed: ${error.message}`)); }
 
 async function revealFile(file_id, options = {}) {

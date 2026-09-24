@@ -103,7 +103,10 @@ function scheduleSearchPoll(generation) {
   state.searchPollCount++;
   state.searchPoll = setTimeout(() => {
     state.searchPoll = null;
-    if (generation === state.searchGeneration && !$("workspace-view").classList.contains("hidden")) loadCurrentView();
+    if (generation === state.searchGeneration && !$("workspace-view").classList.contains("hidden")) {
+      if (document.querySelector("dialog[open]")) scheduleSearchPoll(generation);
+      else loadCurrentView();
+    }
   }, delay);
 }
 

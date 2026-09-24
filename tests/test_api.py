@@ -250,7 +250,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(b"selection-button select", js)
         self.assertNotIn(b">Clear<", js)
         self.assertIn(b"viewer-smooth", html)
-        self.assertIn(b"const contentX = (pointX - this.panX) / oldZoom", js)
+        self.assertIn(b"const contentX = (pointX - centerX - this.panX) / oldZoom", js)
         self.assertIn(b"getFrames", js)
         self.assertIn(b'"viewer-media-pane"', js)
         self.assertIn(b"setPointerCapture", js)
@@ -626,7 +626,8 @@ class ApiTests(unittest.TestCase):
         status, video_groups = _get_json(self.base_url, "/api/groups?media_type=video")
         self.assertEqual((status, video_groups["total"], video_groups["groups"]), (200, 0, []))
         group_id = groups["groups"][0]["group_id"]
-        status, location = _get_json(self.base_url, f"/api/groups/locate?group_id={group_id}")
+        with patch("archive_index.api.server._browser_assets", side_effect=AssertionError("group locate rebuilt browser pages")):
+            status, location = _get_json(self.base_url, f"/api/groups/locate?group_id={group_id}")
         self.assertEqual((status, location["found"], location["page"]), (200, True, 1))
 
         status, representatives = _get_json(self.base_url, "/api/assets?representatives=1")

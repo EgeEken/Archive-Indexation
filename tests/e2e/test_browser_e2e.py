@@ -728,6 +728,15 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_timeout(250)
         self.assertTrue(self.page.locator("#groups-view").is_visible())
 
+    def test_modal_pauses_background_job_polling(self) -> None:
+        self._open_main()
+        job_requests = []
+        self.page.on("request", lambda request: job_requests.append(request.url) if "/api/jobs?" in request.url else None)
+        self.page.locator(".photo-card").first.click(position={"x": 30, "y": 30})
+        self.page.locator("#viewer[open]").wait_for()
+        self.page.wait_for_timeout(1700)
+        self.assertEqual(job_requests, [])
+
     def test_large_gallery_keeps_loading_runway_bounded_and_loads_forward_windows(self) -> None:
         total = 2400
         synthetic = None
