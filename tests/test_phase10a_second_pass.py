@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import tempfile
+import sys
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
 
 from archive_index.api.comparison import _mse, comparison_data
 from archive_index.file_management import build_dry_run_plan, list_presets, list_profiles, list_rulesets, save_profile, save_ruleset
-from archive_index.file_management_previews import bundled_preview_manifest
+from archive_index.file_management_previews import _encode, bundled_preview_manifest
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
@@ -24,9 +26,47 @@ class Phase10ASecondPassTests(unittest.TestCase):
         self.assertEqual(manifest["version"], "compression-preview-v1")
         self.assertEqual(len(manifest["profiles"]), 3)
         for profile in manifest["profiles"]:
+            self.assertEqual(set(profile["settings"]), {"quality", "effort"})
+            self.assertNotIn("quality", profile)
+            self.assertNotIn("effort", profile)
             self.assertGreater(profile["compressed"]["size_bytes"], 0)
             self.assertGreaterEqual(profile["metrics"]["mse"], 0)
             self.assertTrue((Path(__file__).parents[1] / "src" / "archive_index" / "web" / profile["compressed"]["url"].removeprefix("/")).is_file())
+
+    def test_avif_preview_maps_quality_to_imagecodecs_level(self):
+        try:
+            import imagecodecs
+        except ImportError:
+            self.skipTest("imagecodecs is not installed")
+        image = Image.new("RGB", (8, 8), (80, 120, 160))
+        try:
+            encoder = Mock(return_value=b"encoded")
+            fake_imagecodecs = types.SimpleNamespace(avif_encode=encoder)
+            with patch.dict(sys.modules, {"imagecodecs": fake_imagecodecs}):
+                _encode(image, {"codec": "avif", "settings": {"quality": 23, "effort": 4}})
+            self.assertEqual(encoder.call_args.kwargs, {"level": 23, "speed": 4})
+        finally:
+            image.close()
+
+    def test_avif_quality_changes_actual_encoded_output(self):
+        try:
+            import imagecodecs
+        except ImportError:
+            self.skipTest("imagecodecs is not installed")
+        try:
+            imagecodecs.avif_encode
+        except AttributeError:
+            self.skipTest("AVIF encoding is not available")
+        pixels = np.zeros((64, 64, 3), dtype=np.uint8)
+        pixels[..., 0] = np.arange(64, dtype=np.uint8)[:, None]
+        pixels[..., 1] = np.arange(64, dtype=np.uint8)[None, :]
+        image = Image.fromarray(pixels)
+        try:
+            low = _encode(image, {"codec": "avif", "settings": {"quality": 20, "effort": 7}})
+            high = _encode(image, {"codec": "avif", "settings": {"quality": 80, "effort": 7}})
+        finally:
+            image.close()
+        self.assertNotEqual(low, high)
 
     def test_builtin_copy_rules_preserve_subfolders_and_rename(self):
         with tempfile.TemporaryDirectory() as directory:

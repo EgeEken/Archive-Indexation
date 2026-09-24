@@ -286,18 +286,18 @@ function openRawInspection(asset, fileId) {
   const dialog = $("representation-comparison");
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-label>+0.00 EV <span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></output><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><label class="raw-exposure-control"><span>Exposure</span><span class="raw-exposure-readout"><output data-raw-exposure-label><span data-raw-exposure-value>+0.00 EV</span></output><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></span><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
   const image = dialog.querySelector("[data-raw-image]");
   const loading = dialog.querySelector("[data-raw-loading]");
   const errorNode = dialog.querySelector("[data-raw-error]");
-  const label = dialog.querySelector("[data-raw-exposure-label]");
+  const valueNode = dialog.querySelector("[data-raw-exposure-value]");
   const input = dialog.querySelector("[data-raw-exposure]");
   const updateExposureControl = () => {
     const value = Number(input.value);
-    label.textContent = rawExposureLabel(value);
+    valueNode.textContent = rawExposureLabel(value);
     input.style.setProperty("--range-progress", `${((value + 5) / 10) * 100}%`);
   };
   const camera = new SharedImageCamera({viewport: stage, getFrames: () => [{image, frame: stage}], onChange: change => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }});

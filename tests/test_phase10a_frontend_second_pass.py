@@ -79,7 +79,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
 
     def test_comparison_and_raw_interaction_contract(self):
         css = (self.root / "app.css").read_text(encoding="utf-8")
-        for marker in ("comparison-slider-base", "clipPath", "pixelated", "data-raw-exposure", "raw-development-preview", "data-comparison-metrics"):
+        for marker in ("comparison-slider-base", "clipPath", "pixelated", "data-raw-exposure", "data-raw-exposure-value", "raw-development-preview", "data-comparison-metrics"):
             self.assertIn(marker, self.details + css)
         self.assertNotIn("data-comparison-target", self.details)
         self.assertNotIn("PSNR", self.details)

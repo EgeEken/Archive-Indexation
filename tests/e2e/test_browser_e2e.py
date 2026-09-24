@@ -42,22 +42,30 @@ class BrowserE2ETests(unittest.TestCase):
         cls.setup_root = root / "setup-workspace"
         cls.offline_root = root / "offline-workspace"
         cls.raw_offline_root = root / "raw-offline-workspace"
+        cls.raw_online_root = root / "raw-online-workspace"
         cls._create_main_fixtures(cls.main_root)
         cls._create_setup_fixtures(cls.setup_root)
         cls._create_image(cls.offline_root / "initial.jpg", (120, 80), (70, 140, 220))
         cls._create_image(cls.raw_offline_root / "initial.jpg", (120, 80), (70, 140, 220))
         (cls.raw_offline_root / "initial.arw").write_bytes(b"offline raw fixture")
+        cls._create_image(cls.raw_online_root / "initial.jpg", (120, 80), (70, 140, 220))
+        (cls.raw_online_root / "initial.arw").write_bytes(b"online raw fixture")
         cls.main_workspace = cls._build_workspace(cls.main_root, semantic=True)
         cls.offline_workspace = cls._build_workspace(cls.offline_root, semantic=False)
         cls.raw_offline_workspace = cls._build_workspace(cls.raw_offline_root, semantic=False)
+        cls.raw_online_workspace = cls._build_workspace(cls.raw_online_root, semantic=False)
+        with cls.raw_online_workspace.transaction() as connection:
+            connection.execute("UPDATE physical_file SET is_online = 1 WHERE relative_path = 'initial.arw'")
         cls.main_handle = workspace_id(cls.main_workspace)
         cls.offline_handle = workspace_id(cls.offline_workspace)
         cls.raw_offline_handle = workspace_id(cls.raw_offline_workspace)
+        cls.raw_online_handle = workspace_id(cls.raw_online_workspace)
         cls.registry_path = root / "registry.json"
         registry = WorkspaceRegistry(cls.registry_path)
         registry.add(cls.main_workspace)
         registry.add(cls.offline_workspace)
         registry.add(cls.raw_offline_workspace)
+        registry.add(cls.raw_online_workspace)
 
         cls.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=cls.registry_path)
         cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -499,6 +507,41 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(self.page.locator("[data-raw-exposure]").count(), 0)
         self.assertEqual(self.page.locator("[data-compare-mode]").count(), 0)
         self.assertFalse(any("raw-development-preview" in url for url in requests))
+
+    def test_raw_loading_indicator_stays_attached_across_latest_request(self) -> None:
+        self.page.add_init_script(
+            """
+            (() => {
+              const originalFetch = window.fetch.bind(window);
+              window.__rawResolvers = [];
+              window.fetch = (input, init) => {
+                if (!String(input).includes("raw-development-preview")) return originalFetch(input, init);
+                return new Promise(resolve => window.__rawResolvers.push(resolve));
+              };
+              window.__resolveRaw = index => window.__rawResolvers[index](new Response(new Blob([], {type: "image/jpeg"}), {status: 200}));
+            })();
+            """
+        )
+        self.page.goto(f"{self.base_url}/?workspace={self.raw_online_handle}", wait_until="domcontentloaded")
+        self.page.locator(".photo-card", has_text="initial.jpg").first.wait_for()
+        self.page.locator(".photo-card", has_text="initial.jpg").first.locator(".info-button").click()
+        self.page.locator("#details[open]").wait_for()
+        self.page.locator("#details .representation-row", has_text="initial.arw").first.locator("[data-representation-view]").click()
+        self.page.locator("#representation-comparison[open]").wait_for()
+        loading = self.page.locator("[data-raw-loading]")
+        self.assertEqual(loading.count(), 1)
+        self.assertEqual(loading.evaluate("node => node.parentElement.contains(node)"), True)
+        self.assertTrue(loading.is_visible())
+
+        exposure = self.page.locator("[data-raw-exposure]")
+        exposure.evaluate("node => { node.value = '1'; node.dispatchEvent(new Event('input', {bubbles: true})); }")
+        self.page.wait_for_function("window.__rawResolvers.length === 2")
+        self.page.evaluate("window.__resolveRaw(0)")
+        self.assertTrue(loading.is_visible())
+        self.page.evaluate("window.__resolveRaw(1)")
+        self.page.wait_for_function("document.querySelector('[data-raw-loading]').classList.contains('hidden')")
+        self.assertFalse(loading.is_visible())
+        self.assertIn("+1.00 EV", self.page.locator("[data-raw-exposure-value]").inner_text())
 
     def test_similar_weaker_results_navigation_and_close_variants(self) -> None:
         self._open_main()

@@ -7,7 +7,6 @@
         "size_bytes": 1987443,
         "url": "/assets/compression-preview/jxl-high-quality.webp"
       },
-      "effort": 7,
       "id": "builtin-jxl-high-quality",
       "metrics": {
         "compressed_bytes": 1987443,
@@ -17,11 +16,14 @@
         "reference_bytes": 12561761
       },
       "name": "JXL High Quality",
-      "quality": 80,
       "reference": {
         "filename": "reference.jpg",
         "size_bytes": 12561761,
         "url": "/assets/compression-preview/reference.jpg"
+      },
+      "settings": {
+        "effort": 7,
+        "quality": 80
       }
     },
     {
@@ -31,7 +33,6 @@
         "size_bytes": 1232189,
         "url": "/assets/compression-preview/jxl-balanced.webp"
       },
-      "effort": 7,
       "id": "builtin-jxl-balanced",
       "metrics": {
         "compressed_bytes": 1232189,
@@ -41,11 +42,14 @@
         "reference_bytes": 12561761
       },
       "name": "JXL Balanced",
-      "quality": 60,
       "reference": {
         "filename": "reference.jpg",
         "size_bytes": 12561761,
         "url": "/assets/compression-preview/reference.jpg"
+      },
+      "settings": {
+        "effort": 7,
+        "quality": 60
       }
     },
     {
@@ -55,7 +59,6 @@
         "size_bytes": 919507,
         "url": "/assets/compression-preview/jxl-high-compression.webp"
       },
-      "effort": 7,
       "id": "builtin-jxl-high-compression",
       "metrics": {
         "compressed_bytes": 919507,
@@ -65,11 +68,14 @@
         "reference_bytes": 12561761
       },
       "name": "JXL High Compression",
-      "quality": 40,
       "reference": {
         "filename": "reference.jpg",
         "size_bytes": 12561761,
         "url": "/assets/compression-preview/reference.jpg"
+      },
+      "settings": {
+        "effort": 7,
+        "quality": 40
       }
     }
   ],

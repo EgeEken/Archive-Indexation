@@ -14,6 +14,8 @@ from PIL import Image, ImageChops, ImageStat
 
 from archive_index.file_management import quality_to_distance
 
+REFERENCE_FILENAME = "reference.jpg"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -22,6 +24,7 @@ def main() -> None:
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     reference_bytes = args.reference.read_bytes()
+    (args.output / REFERENCE_FILENAME).write_bytes(reference_bytes)
     reference = Image.open(BytesIO(reference_bytes)).convert("RGB")
     try:
         entries = []
@@ -36,11 +39,10 @@ def main() -> None:
                 entries.append({
                     "id": f"builtin-jxl-{slug}",
                     "name": name,
-                    "quality": quality,
-                    "effort": 7,
+                    "settings": {"quality": quality, "effort": 7},
                     "codec": "jpeg-xl",
-                    "reference": {"filename": args.reference.name, "size_bytes": len(reference_bytes), "url": "/assets/compression-preview/reference.jpg"},
-                    "compressed": {"filename": f"{args.reference.stem}.{slug}.jxl", "size_bytes": len(encoded), "url": f"/assets/compression-preview/jxl-{slug}.webp"},
+                    "reference": {"filename": REFERENCE_FILENAME, "size_bytes": len(reference_bytes), "url": "/assets/compression-preview/reference.jpg"},
+                    "compressed": {"filename": f"reference.{slug}.jxl", "size_bytes": len(encoded), "url": f"/assets/compression-preview/jxl-{slug}.webp"},
                     "metrics": {
                         "reference_bytes": len(reference_bytes),
                         "compressed_bytes": len(encoded),

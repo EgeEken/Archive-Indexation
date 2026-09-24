@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from io import BytesIO
 from pathlib import Path
 
@@ -39,15 +41,17 @@ def custom_profile_preview(workspace: Workspace, profile: dict[str, object]) -> 
     cache_dir = workspace.index_directory / "compression-previews"
     cache_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = cache_dir / f"{key}.json"
-    if manifest_path.is_file():
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    output_path = cache_dir / f"{key}.webp"
+    if manifest_path.is_file() and output_path.is_file():
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
     reference = load_full_image(reference_path)
     decoded = None
     try:
         encoded = _encode(reference, profile)
         decoded = _decode(encoded, profile["codec"])
-        output_name = f"{key}.webp"
-        output_path = cache_dir / output_name
         _save_lossless_webp(decoded, output_path)
         metrics = _metrics(reference, decoded, len(reference_bytes), len(encoded))
     finally:
@@ -64,7 +68,7 @@ def custom_profile_preview(workspace: Workspace, profile: dict[str, object]) -> 
         "compressed": {"filename": f"{profile['name']}.{profile['container']}", "size_bytes": len(encoded), "url": f"/api/file-management/profile-preview/{key}"},
         "metrics": metrics,
     }
-    manifest_path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+    _atomic_write_text(manifest_path, json.dumps(result, sort_keys=True))
     cached = sorted(cache_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
     for stale in cached[16:]:
         stale.unlink(missing_ok=True)
@@ -96,8 +100,16 @@ def _encode(image: Image.Image, profile: dict[str, object]) -> bytes:
         import imagecodecs
 
         settings = profile.get("settings") or {}
-        return imagecodecs.avif_encode(array, speed=int(settings.get("effort", 7)))
-    except (AttributeError, ImportError, RuntimeError, ValueError) as error:
+        quality = int(settings.get("quality", 60))
+        if not 0 <= quality <= 100:
+            raise ValueError("AVIF quality must be between 0 and 100.")
+        effort = int(settings.get("effort", 7))
+        if not 0 <= effort <= 10:
+            raise ValueError("AVIF effort must be between 0 and 10.")
+        return imagecodecs.avif_encode(array, level=quality, speed=effort)
+    except ValueError:
+        raise
+    except (AttributeError, ImportError, RuntimeError, TypeError) as error:
         raise RuntimeError("AVIF encoder is not available in this runtime.") from error
 
 
@@ -116,7 +128,35 @@ def _decode(encoded: bytes, codec: str) -> Image.Image:
 def _save_lossless_webp(image: Image.Image, path: Path) -> None:
     output = BytesIO()
     image.save(output, format="WEBP", lossless=True, method=6)
-    path.write_bytes(output.getvalue())
+    _atomic_write_bytes(path, output.getvalue(), _validate_webp)
+
+
+def _atomic_write_bytes(path: Path, data: bytes, validator=None) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if validator is not None:
+            validator(temporary)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _validate_webp(path: Path) -> None:
+    with Image.open(path) as image:
+        image.verify()
 
 
 def _metrics(reference: Image.Image, decoded: Image.Image, reference_bytes: int, compressed_bytes: int) -> dict[str, object]:
