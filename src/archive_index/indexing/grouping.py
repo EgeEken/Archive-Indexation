@@ -213,7 +213,7 @@ def extract_visual_features(
             stage="visual feature extraction",
         )
     if timings is not None:
-        timings.add("features.total", time.perf_counter() - started)
+        timings.add("features.total", time.perf_counter() - started, len(rows))
     return result
 
 

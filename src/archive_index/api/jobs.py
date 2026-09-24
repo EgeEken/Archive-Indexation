@@ -25,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 
 PIPELINE_STAGES = (
     "scan", "media_index", "reconciliation", "media_thumbnails", "media_quality",
-    "raw_quality", "video_quality", "embeddings", "visual_features", "grouping", "recommendations",
+    "raw_quality", "video_quality", "embeddings", "semantic_projection", "visual_features", "grouping", "recommendations",
 )
 PLANNER_STAGE_KEYS = {
     "scan": ("scan", "hashing"),
@@ -36,8 +36,9 @@ PLANNER_STAGE_KEYS = {
     "raw_quality": ("raw_quality",),
     "video_quality": ("video_quality",),
     "embeddings": ("embedding_initialization", "image_embeddings", "video_embeddings", "semantic_search"),
-    "visual_features": ("grouping",),
-    "grouping": (),
+    "semantic_projection": ("semantic_projection",),
+    "visual_features": ("visual_features",),
+    "grouping": ("strict_grouping",),
     "recommendations": ("recommendations",),
 }
 
@@ -132,6 +133,18 @@ def _advance_indexing_stage(host, handle: str, job_id: str, kind: str) -> None:
         context.job_ids.append(job_id)
 
 
+def _advance_inline_indexing_stage(host, handle: str, kind: str) -> None:
+    with host._active_lock:
+        context = host._indexing_runs.get(handle)
+        if context is None:
+            return
+        now = monotonic()
+        context.completed_stage_seconds += max(0.0, now - context.stage_started_monotonic)
+        context.current_job_id = None
+        context.current_kind = kind
+        context.stage_started_monotonic = now
+
+
 def indexing_runtime_status(host, handle: str, jobs: list[dict[str, object]]) -> dict[str, object] | None:
     with host._active_lock:
         context = host._indexing_runs.get(handle)
@@ -141,7 +154,7 @@ def indexing_runtime_status(host, handle: str, jobs: list[dict[str, object]]) ->
         current = next((job for job_id in reversed(context.job_ids) if (job := next((candidate for candidate in jobs if candidate["id"] == job_id), None)) and job["status"] in {"pending", "running"}), None)
         current_kind = current["kind"] if current else context.current_kind
         stage_elapsed = max(0.0, now - context.stage_started_monotonic)
-        current_remaining = context.planner_estimates.get(current_kind, 0.0)
+        current_remaining = context.planner_estimates.get(current_kind, 0.0) if current or current_kind == "semantic_projection" else 0.0
         remaining_source = "planner"
         if current:
             substage = current.get("substage") or {}
@@ -332,8 +345,12 @@ def run_indexing(
             return
         if shared_video_quality is not None:
             shared_video_quality.finish()
+        _advance_inline_indexing_stage(host, handle, "semantic_projection")
+        projection_started = monotonic()
         with timings.measure("semantic_projection.total"):
             projection_result = build_semantic_projection(workspace)
+        projection_assets = int(projection_result.get("asset_count", 0) or 0)
+        timings.add("semantic_projection.rate_sample", monotonic() - projection_started, projection_assets)
         if projection_result.get("status") == "failed":
             LOGGER.warning("semantic projection unavailable after indexing: %s", projection_result.get("reason"))
         feature_job_id = JobStore(workspace).create("visual_features")
@@ -351,9 +368,16 @@ def run_indexing(
         job_ids.append(group_job_id)
         _advance_indexing_stage(host, handle, group_job_id, "grouping")
         current_job_id = group_job_id
+        connection = workspace.connect()
+        try:
+            grouping_asset_count = connection.execute("SELECT COUNT(DISTINCT logical_asset_id) FROM physical_file WHERE media_type = 'image' AND in_scope = 1 AND is_online = 1").fetchone()[0]
+        finally:
+            connection.close()
+        grouping_started = monotonic()
         with timings.measure("grouping.total"):
             if build_groups(workspace, job_id=group_job_id, cancel_event=cancel_event).cancelled:
                 return
+        timings.add("strict_grouping.rate_sample", monotonic() - grouping_started, grouping_asset_count)
         recommendation_job_id = JobStore(workspace).create("recommendations")
         with host._active_lock:
             host._cancel_events[(handle, recommendation_job_id)] = cancel_event

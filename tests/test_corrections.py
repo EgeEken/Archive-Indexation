@@ -67,11 +67,66 @@ class CorrectionTests(unittest.TestCase):
             "eta_seconds_by_feature": {
                 "scan": 2, "hashing": 3, "metadata": 4, "semantic_search": 5,
                 "image_embeddings": 6, "video_embeddings": 7, "grouping": 8,
+                "semantic_projection": 9, "visual_features": 10, "strict_grouping": 11,
             },
         })
         self.assertEqual(estimates["scan"], 5)
         self.assertEqual(estimates["embeddings"], 18)
-        self.assertEqual(estimates["visual_features"], 8)
+        self.assertEqual(estimates["semantic_projection"], 9)
+        self.assertEqual(estimates["visual_features"], 10)
+        self.assertEqual(estimates["grouping"], 11)
+
+    def test_full_index_runtime_keeps_future_pipeline_stages_in_projection(self):
+        stage_estimates = {
+            "scan": 10, "media_index": 20, "reconciliation": 5, "media_thumbnails": 15,
+            "media_quality": 25, "raw_quality": 12, "video_quality": 40, "embeddings": 50,
+            "semantic_projection": 8, "visual_features": 18, "grouping": 6, "recommendations": 4,
+        }
+        context = IndexingRunContext(
+            mode="indexing", started_at="2026-09-24T10:00:00+00:00", started_monotonic=100,
+            planner_estimates=stage_estimates, job_ids=["scan"], current_job_id="scan",
+            current_kind="scan", stage_started_monotonic=100,
+        )
+        host = SimpleNamespace(_active_lock=threading.Lock(), _indexing_runs={"test": context})
+        pipeline_total = sum(stage_estimates.values())
+        with patch("archive_index.api.jobs.monotonic", return_value=100):
+            initial = indexing_runtime_status(host, "test", [{"id":"scan", "kind":"scan", "status":"running", "total_items":10,"completed_items":0}])
+        self.assertEqual(initial["initial_estimated_seconds"], pipeline_total)
+        self.assertEqual(initial["projected_total_seconds"], pipeline_total)
+        context.completed_stage_seconds = 10
+        context.current_kind = "media_index"
+        context.current_job_id = "media"
+        context.job_ids.append("media")
+        context.stage_started_monotonic = 110
+        with patch("archive_index.api.jobs.monotonic", return_value=110):
+            after_metadata = indexing_runtime_status(host, "test", [{"id":"media", "kind":"media_index", "status":"running", "total_items":100,"completed_items":0}])
+        self.assertGreaterEqual(after_metadata["projected_total_seconds"], pipeline_total - stage_estimates["scan"] - 1)
+        self.assertEqual(after_metadata["current_remaining_seconds"], stage_estimates["media_index"])
+        self.assertGreater(after_metadata["projected_total_seconds"], after_metadata["elapsed_seconds"] + stage_estimates["media_index"])
+        self.assertEqual(stage_estimates["semantic_projection"], 8)
+        self.assertGreater(stage_estimates["video_quality"] + stage_estimates["embeddings"], 0)
+        context.current_kind = "semantic_projection"
+        context.current_job_id = None
+        context.stage_started_monotonic = 120
+        with patch("archive_index.api.jobs.monotonic", return_value=120):
+            during_projection = indexing_runtime_status(host, "test", [{"id":"media", "kind":"media_index", "status":"complete", "total_items":100,"completed_items":100}])
+        self.assertEqual(during_projection["current_remaining_seconds"], stage_estimates["semantic_projection"])
+
+    def test_projection_estimate_is_zero_when_semantic_search_is_disabled(self):
+        from archive_index.planning import _pending_counts
+        pending = _pending_counts(
+            {"files": 12, "categories": {"jpeg": 12}},
+            {"semantic_search_enabled": False},
+            {"metadata_pending": 0, "rendered_images": 12, "raw_images": 0, "videos": 0,
+             "quality_images_pending": 0, "quality_raw_pending": 0, "quality_video_pending": 0,
+             "quality_video_samples_pending": 0, "embedding_images_pending": 0,
+             "embedding_video_samples_pending": 0, "video_decode_assets_pending": 0,
+             "video_decode_samples_pending": 0,
+             "video_duration_known": True, "thumbnail_images_pending": 0,
+             "thumbnail_raw_pending": 0, "thumbnail_video_pending": 0,
+             "grouping_images_pending": 0, "recommendation_assets_pending": 0},
+        )
+        self.assertEqual(pending["semantic_projection_assets"], 0)
 
     def test_indexing_runtime_prefers_live_eta_and_preserves_elapsed_floor(self):
         context = IndexingRunContext(

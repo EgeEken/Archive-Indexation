@@ -25,9 +25,13 @@ FALLBACK_RATES = {
     "quality.image": 0.28,
     "quality.raw": 0.35,
     "quality.video_sample": 0.45,
+    "video.extraction_total": 0.40,
     "embedding.image": 0.25,
     "embedding.video_sample": 0.30,
     "grouping.image": 0.06,
+    "features.total": 0.06,
+    "strict_grouping.rate_sample": 0.008,
+    "semantic_projection.rate_sample": 0.001,
     "recommendations.asset": 0.015,
 }
 FIXED_SECONDS = {
@@ -128,14 +132,15 @@ def _pending_counts(totals, configuration, counts):
     quality_images = counts["quality_images_pending"] if counts is not None else rendered if configuration.get("rendered_quality_provider") == "lar-iqa" else 0
     quality_raw = counts["quality_raw_pending"] if counts is not None else raw if configuration.get("raw_quality_provider") == "lar-iqa" else 0
     quality_videos = counts["quality_video_pending"] if counts is not None else videos if configuration.get("video_quality_enabled", False) else 0
-    quality_video_samples = counts["video_samples_pending"] if counts is not None else videos * VIDEO_FALLBACK_SAMPLES
+    quality_video_samples = counts["quality_video_samples_pending"] if counts is not None else videos * VIDEO_FALLBACK_SAMPLES
     if not configuration.get("video_quality_enabled", False):
         quality_video_samples = 0
     semantic_images = counts["embedding_images_pending"] if counts is not None else rendered + raw
     semantic_videos = counts["embedding_video_samples_pending"] if counts is not None else videos * VIDEO_FALLBACK_SAMPLES
     if not configuration.get("semantic_search_enabled", False):
         semantic_images = semantic_videos = 0
-    video_samples = max(quality_video_samples, semantic_videos)
+    video_samples = counts["video_decode_samples_pending"] if counts is not None else max(quality_video_samples, semantic_videos)
+    semantic_assets = rendered + raw + (videos if configuration.get("semantic_search_enabled", False) and configuration.get("include_videos_in_semantic_search", False) else 0)
     return {
         "files": totals["files"] if counts is None else counts["metadata_pending"],
         "metadata": totals["files"] if counts is None else counts["metadata_pending"],
@@ -147,6 +152,10 @@ def _pending_counts(totals, configuration, counts):
         "quality_videos": quality_videos,
         "video_samples": video_samples,
         "quality_video_samples": quality_video_samples,
+        "semantic_video_samples": semantic_videos,
+        "video_decode_samples": video_samples,
+        "video_decode_assets": counts["video_decode_assets_pending"] if counts is not None else videos if video_samples else 0,
+        "semantic_projection_assets": counts["semantic_projection_assets"] if counts is not None and configuration.get("semantic_search_enabled", False) else semantic_assets if configuration.get("semantic_search_enabled", False) else 0,
         "semantic_images": semantic_images,
         "semantic_videos": semantic_videos,
         "video_duration_known": counts is not None and counts["video_duration_known"],
@@ -157,6 +166,7 @@ def _pending_counts(totals, configuration, counts):
 
 def _estimate_seconds(pending, workspace=None):
     rate = lambda name: _historical_rate(workspace, name) if workspace is not None else FALLBACK_RATES[name]
+    projection_seconds = _semantic_projection_seconds(workspace, pending["semantic_projection_assets"])
     return {
         "scan": FIXED_SECONDS["scan"] + pending["files"] * rate("scan.discovery"),
         "hashing": pending["files"] * rate("scan.hashing"),
@@ -165,14 +175,40 @@ def _estimate_seconds(pending, workspace=None):
         "reconciliation": FIXED_SECONDS["reconciliation"] + pending["files"] * rate("reconciliation"),
         "rendered_quality": pending["quality_images"] * rate("quality.image"),
         "raw_quality": pending["quality_raw"] * rate("quality.raw"),
-        "video_quality": pending["quality_videos"] * 0.6 + pending["quality_video_samples"] * rate("quality.video_sample"),
+        "video_quality": pending["video_decode_assets"] * 0.6 + pending["video_decode_samples"] * rate("video.extraction_total") + pending["quality_video_samples"] * rate("quality.video_sample"),
         "embedding_initialization": FIXED_SECONDS["embedding_initialization"] if pending["semantic_images"] + pending["semantic_videos"] else 0,
         "image_embeddings": pending["semantic_images"] * rate("embedding.image"),
         "video_embeddings": pending["semantic_videos"] * rate("embedding.video_sample"),
-        "grouping": FIXED_SECONDS["grouping"] + pending["grouping_images"] * rate("grouping.image") if pending["grouping_images"] else 0,
+        "semantic_projection": projection_seconds,
+        "visual_features": pending["grouping_images"] * rate("features.total"),
+        "strict_grouping": FIXED_SECONDS["grouping"] + pending["grouping_images"] * rate("strict_grouping.rate_sample") if pending["grouping_images"] else 0,
         "recommendations": FIXED_SECONDS["recommendations"] + pending["recommendation_assets"] * rate("recommendations.asset") if pending["recommendation_assets"] else 0,
         "semantic_search": 0,
     }
+
+
+def _semantic_projection_seconds(workspace, asset_count: int) -> float:
+    if not asset_count:
+        return 0.0
+    if workspace is not None:
+        connection = workspace.connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT er.id AS embedding_run_id, pr.id AS projection_run_id, pr.source_embedding_run_id, pr.asset_count
+                FROM workspace_embedding AS we
+                LEFT JOIN embedding_run AS er ON er.id = we.active_run_id
+                LEFT JOIN workspace_semantic_projection AS wsp ON wsp.id = 1
+                LEFT JOIN semantic_projection_run AS pr ON pr.id = wsp.active_run_id
+                WHERE we.id = 1
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is not None and row["embedding_run_id"] and row["projection_run_id"] and row["source_embedding_run_id"] == row["embedding_run_id"] and row["asset_count"] == asset_count:
+            return 0.25
+        return 0.5 + asset_count * _historical_rate(workspace, "semantic_projection.rate_sample")
+    return 0.5 + asset_count * FALLBACK_RATES["semantic_projection.rate_sample"]
 
 
 def _historical_rate(workspace, name: str) -> float:
@@ -237,19 +273,26 @@ def _indexed_work(workspace, configuration):
             raw_only += 1
             thumbnails.append(("raw", raw[0]))
             quality.append(("raw", raw[0]))
-    video_samples = 0
+    video_samples_by_id = {}
     video_duration_known = True
     for kind, row in quality:
         if kind != "video":
             continue
         try:
-            video_samples += _sample_count(float(row["duration_seconds"]), configuration["video_sampling_fps"], configuration["video_sampling_min_frames"], configuration["video_sampling_max_frames"])
+            video_samples_by_id[row["id"]] = _sample_count(float(row["duration_seconds"]), configuration["video_sampling_fps"], configuration["video_sampling_min_frames"], configuration["video_sampling_max_frames"])
         except (TypeError, ValueError):
-            video_samples += VIDEO_FALLBACK_SAMPLES
+            video_samples_by_id[row["id"]] = VIDEO_FALLBACK_SAMPLES
             video_duration_known = False
     quality_images = [row for kind, row in quality if kind == "image" and configuration.get("rendered_quality_provider") == "lar-iqa"]
     quality_raw = [row for kind, row in quality if kind == "raw" and configuration.get("raw_quality_provider") == "lar-iqa"]
     quality_videos = [row for kind, row in quality if kind == "video" and configuration.get("video_quality_enabled", False)]
+    semantic_videos = [row for kind, row in quality if kind == "video" and configuration.get("semantic_search_enabled", False) and configuration.get("include_videos_in_semantic_search", False)]
+    quality_video_pending = {row["id"] for row in quality_videos if row["quality_status"] != "complete"}
+    embedding_video_pending = {row["id"] for row in semantic_videos if row["embedding_status"] != "complete"}
+    video_decode_pending = quality_video_pending | embedding_video_pending
+    quality_video_samples_pending = sum(video_samples_by_id.get(file_id, 0) for file_id in quality_video_pending)
+    embedding_video_samples_pending = sum(video_samples_by_id.get(file_id, 0) for file_id in embedding_video_pending)
+    video_decode_samples_pending = sum(video_samples_by_id.get(file_id, 0) for file_id in video_decode_pending)
     thumbnail_pending = [row for _, row in thumbnails if row["thumbnail_status"] not in {"complete", "not_requested"}]
     return {
         "indexed_reusable_files": sum(row["metadata_status"] == "complete" and row["thumbnail_status"] in {"complete", "not_requested"} for row in rows),
@@ -270,18 +313,18 @@ def _indexed_work(workspace, configuration):
         "raw_images": raw_images,
         "raw_only_images": raw_only,
         "videos": videos,
-        "video_samples_pending": video_samples if configuration.get("video_quality_enabled", False) else 0,
+        "video_samples_pending": quality_video_samples_pending,
+        "quality_video_samples_pending": quality_video_samples_pending,
+        "embedding_video_samples_pending": embedding_video_samples_pending,
+        "video_decode_samples_pending": video_decode_samples_pending,
+        "video_decode_assets_pending": len(video_decode_pending),
+        "semantic_projection_assets": rendered_images + raw_images + (videos if configuration.get("semantic_search_enabled", False) and configuration.get("include_videos_in_semantic_search", False) else 0),
         "video_duration_known": video_duration_known,
         "embedding_images_pending": sum(
             row["embedding_status"] != "complete"
             for kind, row in quality
             if kind in {"image", "raw"}
         ),
-        "embedding_video_samples_pending": video_samples
-        if configuration.get("semantic_search_enabled", False)
-        and configuration.get("include_videos_in_semantic_search", False)
-        and any(row["embedding_status"] != "complete" for kind, row in quality if kind == "video")
-        else 0,
         "grouping_images_pending": sum(row["feature_ready"] is None for row in rows if row["media_type"] == "image"),
         "recommendation_assets_pending": rendered_images + raw_images + videos,
     }

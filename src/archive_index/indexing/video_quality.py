@@ -670,7 +670,7 @@ def _process_video(
                     extract_kwargs["timings"] = timings
                 extracted = extract_video_frames(*extract_args, **extract_kwargs)
                 if timings is not None:
-                    timings.add("video.extraction_total", perf_counter() - extraction_start)
+                    timings.add("video.extraction_total", perf_counter() - extraction_start, len(pending_samples))
             except VideoExtractionCancelled:
                 _mark_cancelled(workspace, row["id"], run["id"])
                 return "cancelled"
