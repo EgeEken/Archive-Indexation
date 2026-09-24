@@ -680,6 +680,100 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#viewer-close").click()
         self.page.locator("#groups-view").wait_for(state="visible")
 
+    def test_show_image_group_uses_direct_locator_and_does_not_restore_gallery_late(self) -> None:
+        self._open_main()
+        self.page.evaluate("document.body.style.minHeight = '1800px'")
+        self.page.evaluate("state.scrollPositions.gallery = 180")
+        self.page.evaluate("window.scrollTo(0, 180)")
+        self.page.locator(".photo-card", has_text="group-a.jpg").click(position={"x": 30, "y": 30})
+        self.page.locator("#viewer-grouping").wait_for(state="visible")
+        requests = []
+        self.page.on("request", lambda request: requests.append(request.url) if "/api/groups/locate" in request.url else None)
+        self.page.evaluate("""() => {
+          const fetchOriginal = window.fetch.bind(window);
+          window.__releaseGroupLocate = null;
+          window.fetch = (...args) => String(args[0]).includes('/api/groups/locate?')
+            ? new Promise(resolve => { window.__releaseGroupLocate = () => fetchOriginal(...args).then(resolve); })
+            : fetchOriginal(...args);
+        }""")
+        self.page.locator("#viewer-grouping").click()
+        self.page.locator("#viewer").wait_for(state="hidden", timeout=250)
+        self.page.evaluate("window.__releaseGroupLocate?.()")
+        self.page.locator("#groups-view").wait_for(state="visible")
+        self.page.locator(".group-row.focused-group").wait_for()
+        self.assertTrue(any("/api/groups/locate" in url for url in requests))
+        self.page.wait_for_timeout(650)
+        self.assertTrue(self.page.locator("#groups-view").is_visible())
+        self.page.locator("#gallery-view-toggle").click()
+        self.page.locator("#gallery").wait_for(state="visible")
+        self.assertEqual(self.page.evaluate("new URLSearchParams(location.search).get('view')"), "gallery")
+
+    def test_viewer_closes_before_delayed_gallery_return_and_stale_result_is_ignored(self) -> None:
+        self._open_main()
+        self.page.locator(".photo-card").first.click(position={"x": 30, "y": 30})
+        self.page.locator("#viewer[open]").wait_for()
+        self.page.evaluate("""() => {
+          const fetchOriginal = window.fetch.bind(window);
+          window.__releaseBrowserReturn = null;
+          window.fetch = (...args) => String(args[0]).includes('/api/browser?')
+            ? new Promise(resolve => { window.__releaseBrowserReturn = () => fetchOriginal(...args).then(resolve); })
+            : fetchOriginal(...args);
+          state.windowStart = 600;
+        }""")
+        self.page.locator("#viewer-close").click()
+        self.page.locator("#viewer").wait_for(state="hidden", timeout=250)
+        self.page.locator("#groups-view-toggle").click()
+        self.page.locator("#groups-view").wait_for(state="visible")
+        self.page.evaluate("window.__releaseBrowserReturn?.()")
+        self.page.wait_for_timeout(250)
+        self.assertTrue(self.page.locator("#groups-view").is_visible())
+
+    def test_large_gallery_keeps_loading_runway_bounded_and_loads_forward_windows(self) -> None:
+        total = 2400
+        synthetic = None
+
+        def browser_response(route):
+            nonlocal synthetic
+            response = route.fetch()
+            data = response.json()
+            if synthetic is None:
+                synthetic = []
+                while len(synthetic) < total:
+                    for item in data["items"]:
+                        clone = dict(item)
+                        index = len(synthetic)
+                        clone.update(asset_id=f"synthetic-{index}", filename=f"synthetic-{index:04}.jpg")
+                        synthetic.append(clone)
+                        if len(synthetic) == total:
+                            break
+            query = dict(part.split("=", 1) for part in route.request.url.split("?", 1)[1].split("&") if "=" in part)
+            offset, limit = int(query.get("offset", 0)), int(query.get("limit", 60))
+            data.update(items=synthetic[offset:offset + limit], total=total, media_shown=total, media_total=total,
+                        workspace_total=total, has_next=offset + limit < total)
+            route.fulfill(response=response, json=data)
+
+        self.page.route("**/api/browser?*", browser_response)
+        self._open_main()
+        self.page.wait_for_function("() => document.querySelectorAll('#gallery .photo-card').length > 0")
+        last_seen = -1
+        for _ in range(4):
+            self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            self.page.wait_for_function("""previous => {
+              const cards = [...document.querySelectorAll('#gallery .photo-card')];
+              const index = Number(cards.at(-1)?.querySelector('.filename')?.textContent.match(/synthetic-(\\d+)/)?.[1] ?? -1);
+              return index > previous;
+            }""", arg=last_seen, timeout=8000)
+            filename = self.page.locator("#gallery .photo-card .filename").last.inner_text()
+            last_seen = int(re.search(r"synthetic-(\d+)", filename).group(1))
+            self.page.wait_for_function("""() => {
+              const gallery = document.querySelector('#gallery');
+              const spacers = [...gallery.querySelectorAll('.window-spacer')];
+              const bottom = spacers.at(-1);
+              return bottom && parseFloat(bottom.style.height) <= 2 * Number(getComputedStyle(gallery).getPropertyValue('--card-height').replace('px','')) + 24;
+            }""", timeout=8000)
+        self.assertLessEqual(self.page.locator("#gallery .photo-card").count(), 180)
+        self.assertTrue(self.page.locator("#gallery .loading-state").is_visible())
+
     def test_unavailable_visualizations_are_hidden_and_url_falls_back(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}", wait_until="domcontentloaded")
         self.page.locator("#workspace-view").wait_for(state="visible")

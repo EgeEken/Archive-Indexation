@@ -12,7 +12,8 @@ function ensureViewerCamera() {
       if (change.dragging != null) state.dragging = change.dragging;
       if (change.clickSuppressed) {
         state.viewerClickSuppressed = true;
-        setTimeout(() => { state.viewerClickSuppressed = false; }, 0);
+        clearTimeout(state.viewerClickSuppressTimer);
+        state.viewerClickSuppressTimer = setTimeout(() => { state.viewerClickSuppressed = false; }, 500);
       }
       $("viewer-media-pane").classList.toggle("zoomed", state.viewerZoom > 1);
       $("viewer-media-pane").classList.toggle("dragging", state.dragging);
@@ -196,20 +197,28 @@ function stopViewerMedia() {
   });
 }
 
-function closeDialog(dialog) {
+function closeDialog(dialog, options = {}) {
   if (dialog.id === "viewer") {
-    if (state.viewerCloseInFlight) return;
-    state.viewerCloseInFlight = true;
-    prepareViewerReturn().catch(error => showToast("Viewer return failed: " + error.message)).finally(() => {
-      state.viewerCloseInFlight = false;
-      finishCloseDialog(dialog);
+    const item = state.viewerItems[state.viewerIndex];
+    const intent = options.restore === false || !item ? null : {
+      assetId: item.asset_id,
+      context: state.viewerContext,
+      absoluteIndex: state.viewerStart + state.viewerIndex,
+      pageStart: Math.floor((state.viewerStart + state.viewerIndex) / state.viewerPageSize) * state.viewerPageSize,
+      viewMode: state.viewMode,
+      filterKey: String(filterParams()),
+    };
+    const token = ++state.viewerReturnToken;
+    finishCloseDialog(dialog, options);
+    if (intent) prepareViewerReturn(intent, token).catch(error => {
+      if (token === state.viewerReturnToken) showToast("Viewer return failed: " + error.message);
     });
     return;
   }
   finishCloseDialog(dialog);
 }
 
-function finishCloseDialog(dialog) {
+function finishCloseDialog(dialog, options = {}) {
   if (dialog.id === "viewer") {
     stopViewerMedia();
     state.similar = null;
@@ -221,36 +230,38 @@ function finishCloseDialog(dialog) {
   if (dialog.open) dialog.close();
   if (!["viewer", "details", "representation-comparison", "file-management-dialog", "problems-dialog", "offline-dialog", "remove-workspace-dialog"].some((id) => $(id).open)) document.body.classList.remove("modal-open");
   if (dialog.id === "viewer") {
-    highlightViewerReturn(state.viewerReturnAssetId);
     state.viewerReturnAssetId = null;
     if (state.viewDirty) {
       state.viewDirty = false;
-      loadCurrentView();
+      if (options.restore !== false) loadCurrentView();
     }
   }
 }
 
-async function prepareViewerReturn() {
-  const item = state.viewerItems[state.viewerIndex];
-  if (!item) return;
-  state.viewerReturnAssetId = item.asset_id;
-  if (state.viewerContext === "gallery") {
-    const absolute = state.viewerStart + state.viewerIndex;
-    const params = filterParams();
-    params.set("offset", String(Math.floor(absolute / state.viewerPageSize) * state.viewerPageSize));
-    params.set("limit", String(state.viewerPageSize));
-    const data = await api("/api/browser?" + params);
-    if (data.items.length) {
-      state.items = data.items;
-      state.total = data.total;
-      state.windowStart = Number(params.get("offset"));
-      state.windowHasNext = Boolean(data.has_next);
-      renderGalleryWindow({...data, items: state.items}, state.windowStart, state.windowColumns, state.windowHeight);
-      syncUrl();
+async function prepareViewerReturn(intent, token) {
+  const isCurrent = () => token === state.viewerReturnToken && intent.viewMode === state.viewMode && intent.filterKey === String(filterParams());
+  if (!isCurrent()) return;
+  if (intent.context === "gallery") {
+    if (intent.pageStart !== state.windowStart) {
+      const params = filterParams();
+      params.set("offset", String(intent.pageStart));
+      params.set("limit", String(state.viewerPageSize));
+      const data = await api("/api/browser?" + params);
+      if (!isCurrent()) return;
+      if (data.items.length) {
+        state.items = data.items;
+        state.total = data.total;
+        state.windowStart = intent.pageStart;
+        state.windowHasNext = Boolean(data.has_next);
+        renderGalleryWindow({...data, items: state.items}, state.windowStart, state.windowColumns, state.windowHeight);
+        syncUrl();
+      }
     }
-  } else if (state.viewerContext === "group") {
-    document.querySelector(".group-member[data-asset-id=\"" + CSS.escape(item.asset_id) + "\"]")?.scrollIntoView({block: "center", behavior: "instant"});
+  } else if (intent.context === "group") {
+    if (!isCurrent()) return;
+    document.querySelector(".group-member[data-asset-id=\"" + CSS.escape(intent.assetId) + "\"]")?.scrollIntoView({block: "center", behavior: "instant"});
   }
+  if (isCurrent()) highlightViewerReturn(intent.assetId);
 }
 
 function highlightViewerReturn(assetId) {

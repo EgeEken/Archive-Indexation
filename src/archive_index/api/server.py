@@ -1865,8 +1865,9 @@ def _locate_group(workspace: Workspace, query: Mapping[str, list[str]]) -> dict[
         ).fetchone():
             return {"found": False}
         condition, condition_params, order = _group_query_parts(active["active_run_id"], filters)
-        rows = connection.execute(
+        row = connection.execute(
             f"""
+            WITH positioned AS (
             SELECT sg.group_id,
                    (SELECT MAX(pf.quality_score) FROM physical_file AS pf
                     WHERE pf.logical_asset_id = sg.representative_logical_asset_id AND pf.in_scope = 1) AS representative_quality_score,
@@ -1876,12 +1877,14 @@ def _locate_group(workspace: Workspace, query: Mapping[str, list[str]]) -> dict[
             FROM strict_group AS sg
             WHERE sg.run_id = ? {condition}
             GROUP BY sg.group_id
+            )
+            SELECT group_id, representative_quality_score, representative_filename, position
+            FROM positioned WHERE group_id = ?
             """,
-            [active["active_run_id"], *condition_params],
-        ).fetchall()
+            [active["active_run_id"], *condition_params, group_id],
+        ).fetchone()
     finally:
         connection.close()
-    row = next((candidate for candidate in rows if candidate["group_id"] == group_id), None)
     if row is None:
         return {"found": False, "hidden_by_filters": True}
     position = row["position"]

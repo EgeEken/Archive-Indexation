@@ -110,7 +110,8 @@ function scheduleSearchPoll(generation) {
 function renderGalleryWindow(data, offset, columns, height) {
   const loading = state.galleryLoading || state.semanticPending || ["loading", "searching"].includes(data.search.state);
   const before = Math.floor(offset / columns) * height;
-  const after = Math.max(0, Math.ceil(Math.max(0, (data.total || 0) - offset - data.items.length) / columns) * height);
+  const remainingRows = Math.ceil(Math.max(0, (data.total || 0) - offset - data.items.length) / columns);
+  const after = data.has_next ? Math.min(2, remainingRows) * height : 0;
   const spinner = loading || data.has_next ? `<div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span>${loading ? "Loading media…" : "Loading more media…"}</div>` : "";
   $("gallery").style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
   $("gallery").innerHTML = data.items.length

@@ -15,6 +15,7 @@ function renderSemanticControls() {
 }
 
 function refreshBrowser() {
+  state.groupLocateToken++;
   state.renderKeys = {}; state.browserAbort?.abort(); clearTimeout(state.searchPoll); state.searchGeneration++; state.searchPollCount = 0;
   state.galleryRequestInFlight = false;
   state.assetRequest++; state.groupRequest++;
@@ -115,6 +116,7 @@ function setViewMode(mode, load = true) {
   const started = performance.now();
   mode = viewModeAvailable(mode) ? mode : "gallery";
   const previousMode = state.viewMode;
+  if (previousMode !== mode) { state.viewerReturnToken++; state.groupLocateToken++; }
   if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","file-management-button","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
   if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
@@ -196,12 +198,17 @@ async function locateCurrentGroup() {
   const started = performance.now();
   const item = state.viewerItems[state.viewerIndex];
   if (!item || !state.viewerGroupId) return;
+  const groupId = state.viewerGroupId;
+  const sourceMode = state.viewMode;
+  const filterKey = String(filterParams("groups"));
+  const token = ++state.groupLocateToken;
   const params = filterParams("groups");
-  params.set("group_id", state.viewerGroupId);
-  const target = await api(`/api/browser/locate?${params}`);
-  closeDialog($("viewer"));
+  params.set("group_id", groupId);
+  closeDialog($("viewer"), {restore: false});
+  const target = await api(`/api/groups/locate?${params}`);
+  if (token !== state.groupLocateToken || state.viewMode !== sourceMode || filterKey !== String(filterParams("groups"))) return;
   state.groupPage = target.found ? target.page : 1;
-  state.focusGroup = state.viewerGroupId;
+  state.focusGroup = groupId;
   setViewMode("groups");
   performance.measure("navigation:locate",{start:started});
   console.debug(`navigation:locate ${(performance.now()-started).toFixed(1)} ms`);
