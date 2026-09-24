@@ -20,6 +20,7 @@ const state = {
   viewerPageSize: 60,
   viewerFilterKey: null,
   viewerReturnAssetId: null,
+  viewerSourceScrollY: 0,
   viewerReturnToken: 0,
   viewerClickSuppressTimer: null,
   viewDirty: false,

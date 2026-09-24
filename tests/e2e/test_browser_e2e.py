@@ -682,11 +682,12 @@ class BrowserE2ETests(unittest.TestCase):
 
     def test_show_image_group_uses_direct_locator_and_does_not_restore_gallery_late(self) -> None:
         self._open_main()
-        self.page.evaluate("document.body.style.minHeight = '1800px'")
-        self.page.evaluate("state.scrollPositions.gallery = 180")
+        self.page.evaluate("document.documentElement.style.minHeight = '1800px'")
         self.page.evaluate("window.scrollTo(0, 180)")
-        self.page.locator(".photo-card", has_text="group-a.jpg").click(position={"x": 30, "y": 30})
+        self.assertGreater(self.page.evaluate("window.scrollY"), 80)
+        self.page.locator(".photo-card", has_text="group-a.jpg").evaluate("node => node.click()")
         self.page.locator("#viewer-grouping").wait_for(state="visible")
+        self.assertGreater(self.page.evaluate("state.viewerSourceScrollY"), 80)
         requests = []
         self.page.on("request", lambda request: requests.append(request.url) if "/api/groups/locate" in request.url else None)
         self.page.evaluate("""() => {
@@ -701,12 +702,14 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.evaluate("window.__releaseGroupLocate?.()")
         self.page.locator("#groups-view").wait_for(state="visible")
         self.page.locator(".group-row.focused-group").wait_for()
+        self.assertGreater(self.page.evaluate("state.scrollPositions.gallery"), 80)
         self.assertTrue(any("/api/groups/locate" in url for url in requests))
         self.page.wait_for_timeout(650)
         self.assertTrue(self.page.locator("#groups-view").is_visible())
         self.page.locator("#gallery-view-toggle").click()
         self.page.locator("#gallery").wait_for(state="visible")
         self.assertEqual(self.page.evaluate("new URLSearchParams(location.search).get('view')"), "gallery")
+        self.assertGreater(self.page.evaluate("window.scrollY"), 80)
 
     def test_viewer_closes_before_delayed_gallery_return_and_stale_result_is_ignored(self) -> None:
         self._open_main()

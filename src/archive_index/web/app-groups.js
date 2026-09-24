@@ -112,13 +112,13 @@ function renderFolderTree() {
   $("folder-summary").textContent=folderSummary();
 }
 
-function setViewMode(mode, load = true) {
+function setViewMode(mode, load = true, options = {}) {
   const started = performance.now();
   mode = viewModeAvailable(mode) ? mode : "gallery";
   const previousMode = state.viewMode;
   if (previousMode !== mode) { state.viewerReturnToken++; state.groupLocateToken++; }
   if(state.workspace) {$('setup-view').classList.add("hidden");$('setup-header-summary').classList.add("hidden");$('workspace-view').classList.remove("hidden");["index","file-management-button","configure-workspace","workspace-crumb"].forEach(id=>$(id).classList.remove("hidden"));}
-  if (load) {state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
+  if (load) {if (!options.preserveScroll) state.scrollPositions[state.viewMode] = window.scrollY; state.browserAbort?.abort(); clearTimeout(state.searchPoll);}
   state.viewMode = ["groups", "geo", "timeline", "vector"].includes(mode) ? mode : "gallery";
   document.body.classList.toggle("visualization-active", ["geo", "timeline", "vector"].includes(state.viewMode));
   $("gallery").classList.toggle("hidden", mode !== "gallery");
@@ -209,7 +209,8 @@ async function locateCurrentGroup() {
   if (token !== state.groupLocateToken || state.viewMode !== sourceMode || filterKey !== String(filterParams("groups"))) return;
   state.groupPage = target.found ? target.page : 1;
   state.focusGroup = groupId;
-  setViewMode("groups");
+  state.scrollPositions[sourceMode] = state.viewerSourceScrollY;
+  setViewMode("groups", true, {preserveScroll: true});
   performance.measure("navigation:locate",{start:started});
   console.debug(`navigation:locate ${(performance.now()-started).toFixed(1)} ms`);
 }

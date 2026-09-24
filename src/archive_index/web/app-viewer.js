@@ -34,6 +34,7 @@ function visibleStrictGroupId(item) {
 }
 
 function showViewer(index, items = state.items, context = { mode: "gallery" }) {
+  if (!$("viewer").open) state.viewerSourceScrollY = window.scrollY;
   if (context.mode === "visualization") {
     state.viewerSequenceIds = [...new Set(context.assetIds || items.map(item => item.asset_id))];
     state.viewerItems = Array(state.viewerSequenceIds.length).fill(null);
