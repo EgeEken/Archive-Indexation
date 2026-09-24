@@ -98,6 +98,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         management = self.management
         self.assertIn("Current free disk space", management)
         self.assertIn("Estimated free disk space after plan", management)
+        self.assertIn("Temporary space upper bound", management)
         self.assertIn("formatDiskSpace", management + (self.root / "app-setup.js").read_text(encoding="utf-8"))
         self.assertIn("rule-options-compress", management)
         self.assertIn("rule-options-copy", management)

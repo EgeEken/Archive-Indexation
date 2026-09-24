@@ -4,6 +4,7 @@ import tempfile
 import sys
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -12,7 +13,7 @@ from PIL import Image
 
 from archive_index.api.comparison import _mse, comparison_data
 from archive_index.file_management import build_dry_run_plan, list_presets, list_profiles, list_rulesets, save_profile, save_ruleset
-from archive_index.file_management_previews import _encode, bundled_preview_manifest
+from archive_index.file_management_previews import _encode, bundled_preview_manifest, custom_profile_preview
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
@@ -68,6 +69,19 @@ class Phase10ASecondPassTests(unittest.TestCase):
             image.close()
         self.assertNotEqual(low, high)
 
+    def test_custom_preview_cache_writes_complete_files_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace.create(Path(directory))
+            profile = {"id": "custom-jxl", "name": "Custom", "codec": "jpeg-xl", "container": "jxl", "settings": {"quality": 60, "effort": 7}}
+            with patch("archive_index.file_management_previews.load_full_image", side_effect=lambda _: Image.new("RGB", (8, 8), (80, 120, 160))), patch("archive_index.file_management_previews._encode", return_value=b"encoded"), patch("archive_index.file_management_previews._decode", side_effect=lambda *_: Image.new("RGB", (8, 8), (80, 120, 160))):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    results = list(executor.map(lambda _: custom_profile_preview(workspace, profile), range(4)))
+            self.assertEqual({result["profile_id"] for result in results}, {"custom-jxl"})
+            cache = workspace.index_directory / "compression-previews"
+            self.assertEqual(len(list(cache.glob("*.json"))), 1)
+            self.assertEqual(len(list(cache.glob("*.webp"))), 1)
+            self.assertFalse(list(cache.glob("*.tmp")))
+
     def test_builtin_copy_rules_preserve_subfolders_and_rename(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace.create(Path(directory))
@@ -91,6 +105,63 @@ class Phase10ASecondPassTests(unittest.TestCase):
             blocked = save_ruleset(workspace, name="Copy blocked", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "destination_dir": "out", "rename_on_conflict": False}}])
             operation = build_dry_run_plan(workspace, blocked["id"])["operations"][0]
             self.assertTrue(any("already exists" in conflict for conflict in operation["conflicts"]))
+
+    def test_planned_same_content_target_is_coalesced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.jpg").write_bytes(b"same")
+            (root / "two.jpg").write_bytes(b"same")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            ruleset = save_ruleset(workspace, name="Coalesce", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": "out/file.jpg"}}])
+            operations = build_dry_run_plan(workspace, ruleset["id"])["operations"]
+            self.assertEqual([item["target_relative_path"] for item in operations], ["out/file.jpg", "out/file.jpg"])
+            self.assertTrue(operations[1]["coalesced_by_planned_target"])
+            self.assertEqual(operations[1]["destination_status"], "already_satisfied")
+
+    def test_planned_different_content_target_renames_or_conflicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.jpg").write_bytes(b"one")
+            (root / "two.jpg").write_bytes(b"two")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            renamed = save_ruleset(workspace, name="Rename", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": "out/file.jpg", "rename_on_conflict": True}}])
+            operations = build_dry_run_plan(workspace, renamed["id"])["operations"]
+            self.assertEqual([item["target_relative_path"] for item in operations], ["out/file.jpg", "out/file (1).jpg"])
+            blocked = save_ruleset(workspace, name="Blocked", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": "out/file.jpg", "rename_on_conflict": False}}])
+            operations = build_dry_run_plan(workspace, blocked["id"])["operations"]
+            self.assertTrue(any("planned output" in conflict for conflict in operations[1]["conflicts"]))
+
+    def test_executable_summary_excludes_blocked_and_conflicted_operations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            safe = root / "safe.jpg"
+            safe.write_bytes(b"safe")
+            (root / "blocked.mp4").write_bytes(b"blocked")
+            conflicted = root / "conflicted.png"
+            conflicted.write_bytes(b"conflicted")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            av1 = next(item for item in list_profiles(workspace) if item["codec"] == "av1")
+            ruleset = save_ruleset(workspace, name="Mixed", rules=[
+                {"match": {"format": "jpeg"}, "action": {"operation": "delete"}},
+                {"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": av1["id"], "source_disposition": "replace"}},
+                {"match": {"format": "png"}, "action": {"operation": "copy", "target_template": "copies/{filename}"}},
+                {"match": {"format": "png"}, "action": {"operation": "delete"}},
+            ])
+            plan = build_dry_run_plan(workspace, ruleset["id"])
+            summary = plan["summary"]
+            self.assertEqual(summary["candidate_count"], 4)
+            self.assertEqual(summary["executable_count"], 1)
+            self.assertGreaterEqual(summary["blocked_count"], 1)
+            self.assertGreaterEqual(summary["conflicted_count"], 1)
+            self.assertEqual(summary["estimated_storage_delta_bytes"], -safe.stat().st_size)
+            self.assertEqual(summary["executable_storage_delta_bytes"], -safe.stat().st_size)
+            self.assertNotEqual(summary["candidate_storage_delta_bytes"], summary["executable_storage_delta_bytes"])
+            self.assertEqual(summary["temporary_space_upper_bound_bytes"], 0)
+            self.assertEqual(summary["compress"]["file_count"], 0)
+            self.assertEqual(summary["compress"]["candidate_file_count"], 1)
 
     def test_compression_same_path_is_replace_or_rename_not_unconditional_conflict(self):
         with tempfile.TemporaryDirectory() as directory:

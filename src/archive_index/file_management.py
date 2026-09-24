@@ -260,7 +260,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
     operations = []
     conflicts = []
     blockers: dict[str, dict[str, object]] = {}
-    targets: dict[str, tuple[str, str]] = {}
+    targets: dict[str, tuple[str, str, str | None]] = {}
     for row in rows:
         matching_rules = [candidate for candidate in ruleset["rules"] if candidate["enabled"] and _matches(row, candidate["match"])]
         if not matching_rules:
@@ -303,7 +303,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
             renamed_from = None
             replaces_source_in_place = False
             if target is not None:
-                target, destination_status, renamed_from, replaces_source_in_place, target_conflict = _resolve_target(
+                target, destination_status, renamed_from, replaces_source_in_place, target_conflict, coalesced = _resolve_target(
                     workspace,
                     target,
                     source,
@@ -315,9 +315,10 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                 )
                 if target_conflict:
                     item_conflicts.append(target_conflict)
-                targets.setdefault(target.casefold(), (row["id"], source))
+                targets.setdefault(target.casefold(), (row["id"], source, row["sha256"]))
             else:
                 destination_status = None
+                coalesced = False
             for blocker in item_blockers:
                 key = f"{item['profile_id']}:{blocker}"
                 entry = blockers.setdefault(key, {"profile_id": item["profile_id"], "profile_name": item["profile"]["name"] if item["profile"] else None, "reason": blocker, "affected_count": 0})
@@ -340,6 +341,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                 "renamed_from": renamed_from,
                 "renamed_to_avoid_conflict": renamed_from is not None,
                 "replaces_source_in_place": replaces_source_in_place,
+                "coalesced_by_planned_target": coalesced,
                 "conflicts": item_conflicts,
                 "blockers": item_blockers,
                 "requires_confirmation": True,
@@ -477,36 +479,38 @@ def _resolve_target(
     operation: str,
     source_replacement: bool,
     rename_on_conflict: bool,
-    planned_targets: dict[str, tuple[str, str]],
-) -> tuple[str, str | None, str | None, bool, str | None]:
+    planned_targets: dict[str, tuple[str, str, str | None]],
+) -> tuple[str, str | None, str | None, bool, str | None, bool]:
     source_key = source.casefold()
     target_key = target.casefold()
+    planned = planned_targets.get(target_key)
+    if planned is not None and planned[2] and source_sha256 and planned[2] == source_sha256:
+        return target, "already_satisfied", None, False, None, True
     if target_key == source_key:
         if source_replacement:
-            return target, "replace_source", None, True, None
+            return target, "replace_source", None, True, None, False
         if operation == "move":
-            return target, "already_satisfied", None, False, None
+            return target, "already_satisfied", None, False, None, False
         if operation == "copy":
-            return target, "already_satisfied", None, False, None
+            return target, "already_satisfied", None, False, None, False
         if rename_on_conflict:
             renamed = _next_target(target, workspace, planned_targets)
-            return renamed, "renamed", target, False, None
-        return target, "conflict", None, False, "A file already exists at this destination."
+            return renamed, "renamed", target, False, None, False
+        return target, "conflict", None, False, "A file already exists at this destination.", False
 
     existing = _workspace_target_status(workspace, target, source_sha256)
-    planned = target_key in planned_targets
-    if existing == "already_satisfied" and not planned:
-        return target, existing, None, False, None
-    if not planned and existing is None:
-        return target, None, None, False, None
+    if existing == "already_satisfied" and planned is None:
+        return target, existing, None, False, None, False
+    if planned is None and existing is None:
+        return target, None, None, False, None, False
     if rename_on_conflict:
         renamed = _next_target(target, workspace, planned_targets)
-        return renamed, "renamed", target, False, None
-    reason = "Another planned output already uses this destination." if planned else "A file already exists at this destination."
-    return target, "conflict", None, False, reason
+        return renamed, "renamed", target, False, None, False
+    reason = "Another planned output already uses this destination." if planned is not None else "A file already exists at this destination."
+    return target, "conflict", None, False, reason, False
 
 
-def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str]]) -> str:
+def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str, str | None]]) -> str:
     path = PurePosixPath(target)
     suffix = path.suffix
     stem = path.name[:-len(suffix)] if suffix else path.name
@@ -538,29 +542,39 @@ def _validate_action_combination(compiled) -> None:
 
 
 def _plan_summary(workspace, rows, operations, conflicts):
-    groups = {
-        "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
-        "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
-        "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
-        "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
-    }
-    for operation in operations:
-        group = groups[operation["operation"]]
-        size = int(operation["bytes"] or 0)
-        group["file_count"] += 1
-        group["estimated_storage_delta_bytes"] += int(operation.get("estimated_storage_delta_bytes") or 0)
-        if operation["operation"] == "delete":
-            group["bytes"] += size
-            group["source_bytes"] += size
-        elif operation["operation"] == "copy":
-            group["bytes_added"] += size
-        elif operation["operation"] == "move":
-            group["bytes_moved"] += size
-        else:
-            group["source_bytes"] += size
-            estimated = int(operation.get("estimated_output_bytes") or _estimated_output_bytes(size, None))
-            group["estimated_output_bytes"] += estimated
-            group["estimated_bytes_saved"] += max(0, size - estimated) if operation.get("source_disposition") == "replace" else 0
+    def summarize(items):
+        groups = {
+            "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
+            "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
+            "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
+            "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
+        }
+        for operation in items:
+            group = groups[operation["operation"]]
+            size = int(operation["bytes"] or 0)
+            group["file_count"] += 1
+            group["estimated_storage_delta_bytes"] += int(operation.get("estimated_storage_delta_bytes") or 0)
+            if operation["operation"] == "delete":
+                group["bytes"] += size
+                group["source_bytes"] += size
+            elif operation["operation"] == "copy":
+                group["bytes_added"] += size
+            elif operation["operation"] == "move":
+                group["bytes_moved"] += size
+            else:
+                group["source_bytes"] += size
+                estimated = int(operation.get("estimated_output_bytes") or _estimated_output_bytes(size, None))
+                group["estimated_output_bytes"] += estimated
+                group["estimated_bytes_saved"] += max(0, size - estimated) if operation.get("source_disposition") == "replace" else 0
+        return groups
+
+    candidate_groups = summarize(operations)
+    executable_operations = [operation for operation in operations if not operation["conflicts"] and not operation.get("blockers")]
+    groups = summarize(executable_operations)
+    for name, group in groups.items():
+        group["candidate_file_count"] = candidate_groups[name]["file_count"]
+        group["candidate_storage_delta_bytes"] = candidate_groups[name]["estimated_storage_delta_bytes"]
+
     surviving = 0
     connection = workspace.connect()
     try:
@@ -573,7 +587,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
         if not members:
             continue
         member_operations = {
-            row["id"]: [operation for operation in operations if operation["physical_file_id"] == row["id"]]
+                row["id"]: [operation for operation in executable_operations if operation["physical_file_id"] == row["id"]]
             for row in members
         }
         if any(
@@ -582,20 +596,25 @@ def _plan_summary(workspace, rows, operations, conflicts):
             for row in members
         ):
             surviving += 1
+    candidate_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in candidate_groups.values())
     storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
     return {
         "candidate_count": len(operations),
+        "executable_count": len(executable_operations),
         "conflict_count": len(conflicts),
-        "safe_count": sum(not operation["conflicts"] and not operation.get("blockers") for operation in operations),
+        "conflicted_count": sum(bool(operation["conflicts"]) for operation in operations),
+        "safe_count": len(executable_operations),
         "blocked_count": sum(bool(operation.get("blockers")) for operation in operations),
         "delete": groups["delete"],
         "copy": groups["copy"],
         "move": groups["move"],
         "compress": groups["compress"],
+        "candidate_storage_delta_bytes": candidate_storage_delta,
+        "executable_storage_delta_bytes": storage_delta,
         "estimated_storage_delta_bytes": storage_delta,
         "estimated_net_bytes_freed": max(0, -storage_delta),
         "estimated_net_bytes_added": max(0, storage_delta),
-        "peak_temporary_bytes": sum(int(operation.get("estimated_output_bytes") or 0) for operation in operations if operation["operation"] == "compress"),
+        "temporary_space_upper_bound_bytes": sum(int(operation.get("estimated_output_bytes") or 0) for operation in executable_operations if operation["operation"] == "compress"),
         "available_space_bytes": _available_space(workspace),
         "assets_with_no_surviving_representation": max(0, len(assets) - surviving),
     }
@@ -684,7 +703,9 @@ def _empty_plan(reason: str):
         "blockers": [],
         "summary": {
             "candidate_count": 0,
+            "executable_count": 0,
             "conflict_count": 0,
+            "conflicted_count": 0,
             "safe_count": 0,
             "blocked_count": 0,
             "capability_blockers": [],
@@ -692,10 +713,12 @@ def _empty_plan(reason: str):
             "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
             "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
             "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
+            "candidate_storage_delta_bytes": 0,
+            "executable_storage_delta_bytes": 0,
             "estimated_storage_delta_bytes": 0,
             "estimated_net_bytes_freed": 0,
             "estimated_net_bytes_added": 0,
-            "peak_temporary_bytes": 0,
+            "temporary_space_upper_bound_bytes": 0,
             "available_space_bytes": None,
             "assets_with_no_surviving_representation": 0,
         },

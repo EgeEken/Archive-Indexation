@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 from io import BytesIO
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .workspace import Workspace
 PREVIEW_VERSION = "compression-preview-v1"
 REFERENCE_RESOURCE = "assets/compression-preview/reference.jpg"
 BUILTIN_PREVIEW_MANIFEST = "assets/compression-preview/manifest.json"
+_PREVIEW_CACHE_LOCK = threading.Lock()
 
 
 def bundled_preview_manifest() -> dict[str, object]:
@@ -26,6 +28,11 @@ def bundled_preview_manifest() -> dict[str, object]:
 
 
 def custom_profile_preview(workspace: Workspace, profile: dict[str, object]) -> dict[str, object]:
+    with _PREVIEW_CACHE_LOCK:
+        return _custom_profile_preview(workspace, profile)
+
+
+def _custom_profile_preview(workspace: Workspace, profile: dict[str, object]) -> dict[str, object]:
     if profile.get("codec") not in {"jpeg-xl", "avif"}:
         raise ValueError("preview is available only for image compression profiles")
     settings = profile.get("settings") or {}
