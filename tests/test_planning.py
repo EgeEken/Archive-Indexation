@@ -83,6 +83,29 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(plan["quality_raw_candidate_count"], 0)
             self.assertEqual(plan["quality_image_count"], 1)
 
+    def test_cached_reindex_estimate_skips_completed_metadata_and_thumbnails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "archive"
+            root.mkdir()
+            for index in range(20):
+                (root / f"image-{index:02}.jpg").write_bytes(b"fixture")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            reconcile_workspace(workspace)
+            configuration = workspace.configuration()
+            configuration.update(rendered_quality_provider="off", raw_quality_provider="off", semantic_search_enabled=False)
+            cold = plan_from_analysis(analyze_folder(root), configuration, workspace)
+            with workspace.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO component_state(physical_file_id, component, status, completed_at) "
+                    "SELECT id, component, 'complete', 'test' FROM physical_file "
+                    "CROSS JOIN (SELECT 'metadata' AS component UNION ALL SELECT 'thumbnail')"
+                )
+            cached = plan_from_analysis(analyze_folder(root), configuration, workspace)
+            self.assertGreater(cold["estimated_seconds"], cached["estimated_seconds"] * 2)
+            self.assertEqual(cached["metadata_pending_count"], 0)
+            self.assertEqual(cached["thumbnail_pending_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
