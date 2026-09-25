@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import shutil
 import threading
 import time
@@ -291,9 +292,19 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             operation = str(action.get("operation", "compress"))
             profile_id = action.get("profile_id")
             profile = profiles.get(profile_id)
-            target = _target_path(row, action, profile) if operation in {"compress", "copy", "move"} else None
+            target_validation_error = None
+            if operation in {"compress", "copy", "move"}:
+                try:
+                    target = _target_path(workspace, row, action, profile)
+                except WorkspaceError as error:
+                    target = None
+                    target_validation_error = str(error)
+            else:
+                target = None
             item_conflicts = []
             item_blockers = []
+            if target_validation_error:
+                item_conflicts.append(target_validation_error)
             if operation == "compress":
                 if profile is None:
                     item_blockers.append("compression profile is missing")
@@ -307,7 +318,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                     item_blockers.append("AVIF encoding is not available in the planning runtime.")
             if operation not in {"compress", "copy", "move", "delete"}:
                 item_conflicts.append(f"unsupported planned operation: {operation}")
-            if operation in {"compress", "copy", "move"} and target is None:
+            if operation in {"compress", "copy", "move"} and target is None and target_validation_error is None:
                 item_conflicts.append("target path is missing")
             compiled.append({"rule": rule, "action": action, "operation": operation, "profile": profile, "profile_id": profile_id, "target": target, "conflicts": item_conflicts, "blockers": item_blockers})
 
@@ -488,22 +499,26 @@ def _matches(row, match: dict[str, object]) -> bool:
     return True
 
 
-def _target_path(row, action, profile):
+def _target_path(workspace: Workspace, row, action, profile):
     source = PurePosixPath(row["relative_path"])
     container = profile["container"] if profile else ""
     if action.get("destination_dir") is not None:
-        destination = str(action.get("destination_dir") or "").strip().strip("/")
+        destination = str(action.get("destination_dir") or "").replace("\\", "/")
+        if destination.endswith("/"):
+            destination = destination.rstrip("/") or "/"
         if action.get("operation") == "compress" and action.get("compress_in_place", True):
             destination = "/".join(part for part in (destination, str(source.parent) if str(source.parent) != "." else "") if part)
         elif action.get("operation") in {"copy", "move"} and action.get("preserve_relative_structure"):
             destination = "/".join(part for part in (destination, str(source.parent) if str(source.parent) != "." else "") if part)
         filename = f"{source.stem}.{container}" if action.get("operation") == "compress" else row["filename"]
-        return "/".join(part for part in (destination, filename) if part) or None
+        target = "/".join(part for part in (destination, filename) if part) or None
+        return _normalize_target_path(workspace, target)
     template = action.get("target_template")
     if not template:
         if profile is None:
             return None
-        template = "{relative_dir}/{stem}.{container}"
+        relative_dir = str(source.parent) if str(source.parent) != "." else ""
+        template = f"{relative_dir + '/' if relative_dir else ''}{{stem}}.{{container}}"
     values = {
         "filename": row["filename"],
         "stem": source.stem,
@@ -515,7 +530,37 @@ def _target_path(row, action, profile):
         target = str(template).format(**values).replace("\\", "/")
     except (KeyError, ValueError):
         return None
-    return target.lstrip("/") or None
+    return _normalize_target_path(workspace, target)
+
+
+def _normalize_target_path(workspace: Workspace, target: str | None) -> str | None:
+    if target is None:
+        return None
+    raw = str(target)
+    if not raw or raw.strip() != raw or "\x00" in raw:
+        raise WorkspaceError("Destination is malformed or empty.")
+    normalized = raw.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise WorkspaceError("Destination must be workspace-relative; absolute, drive, UNC, and root-relative paths are not allowed.")
+    parts = normalized.split("/")
+    if any(part == ".." for part in parts):
+        raise WorkspaceError("Destination escapes the workspace.")
+    if any(part in {"", "."} for part in parts):
+        raise WorkspaceError("Destination is malformed.")
+    if any(part.casefold() == ".archive-index" for part in parts):
+        raise WorkspaceError("Destination may not use the application state directory.")
+    normalized = "/".join(parts)
+    candidate = (workspace.root / Path(normalized)).resolve(strict=False)
+    workspace_root = workspace.root.resolve(strict=False)
+    try:
+        candidate.relative_to(workspace_root)
+    except ValueError as error:
+        raise WorkspaceError("Destination escapes the workspace.") from error
+    try:
+        candidate.relative_to(workspace.index_directory.resolve(strict=False))
+    except ValueError:
+        return normalized
+    raise WorkspaceError("Destination may not use the application state directory.")
 
 
 def _workspace_file_exists(workspace: Workspace, relative_path: str) -> bool:

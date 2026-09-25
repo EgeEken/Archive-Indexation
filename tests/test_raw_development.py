@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from archive_index.api.raw_development import clear_raw_development_cache, raw_development_preview
+from archive_index.api import raw_development as raw_module
 from archive_index.api.errors import ResourceNotFound
 from archive_index.workspace import Workspace
 from archive_index.indexing.scanner import scan
@@ -217,12 +218,39 @@ class RawDevelopmentTests(unittest.TestCase):
             fake_rawpy = SimpleNamespace(ColorSpace=SimpleNamespace(sRGB="sRGB"), imread=lambda _: _FakeRaw())
             _FakeRaw.calls = []
             with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
-                for settings in ({}, {"white_balance": 1}, {"saturation": 101}, {"highlights": 1}, {"shadows": 1}):
+                for settings in ({}, {"white_balance": 5}, {"saturation": 105}, {"highlights": -5}, {"shadows": 5}):
                     raw_development_preview(workspace, physical_id, 0, **settings)
                 raw_development_preview(workspace, physical_id, 0)
                 with self.assertRaises(ValueError):
+                    raw_development_preview(workspace, physical_id, 0.25)
+                with self.assertRaises(ValueError):
+                    raw_development_preview(workspace, physical_id, 0, white_balance=1)
+                with self.assertRaises(ValueError):
+                    raw_development_preview(workspace, physical_id, 0, saturation=101)
+                with self.assertRaises(ValueError):
+                    raw_development_preview(workspace, physical_id, 0, highlights=1)
+                with self.assertRaises(ValueError):
+                    raw_development_preview(workspace, physical_id, 0, shadows=1)
+                with self.assertRaises(ValueError):
                     raw_development_preview(workspace, physical_id, 0, saturation=151)
             self.assertEqual(len(_FakeRaw.calls), 5)
+
+    def test_raw_cache_obeys_byte_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "camera.arw").write_bytes(b"raw source")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                physical_id = connection.execute("SELECT id FROM physical_file WHERE extension = '.arw'").fetchone()[0]
+            finally:
+                connection.close()
+            with patch.object(raw_module, "MAX_CACHE_BYTES", 100), patch.object(raw_module, "_decode_and_resize", return_value=(b"x" * 80, "Camera/as-shot WB")):
+                raw_development_preview(workspace, physical_id, 0)
+                raw_development_preview(workspace, physical_id, 0.5)
+                self.assertEqual(len(raw_module._cache), 1)
+                self.assertLessEqual(raw_module._cache_bytes, 100)
 
 
 if __name__ == "__main__":

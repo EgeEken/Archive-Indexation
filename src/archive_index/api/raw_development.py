@@ -15,19 +15,25 @@ from .errors import ResourceNotFound
 
 MAX_LONG_EDGE = 2560
 MAX_CACHE_ENTRIES = 16
+MAX_CACHE_BYTES = 64 * 1024 * 1024
 MIN_EXPOSURE_EV = -5.0
 MAX_EXPOSURE_EV = 5.0
+EXPOSURE_STEP_EV = 0.5
+CONTROL_STEP = 5
 RAW_EXP_MIN_EV = -2.0
 RAW_EXP_MAX_EV = 3.0
 _cache: OrderedDict[tuple[str, int, int, float, int, int, int, int], tuple[bytes, str]] = OrderedDict()
+_cache_bytes = 0
 _cache_lock = RLock()
 
 
 def raw_development_preview(workspace: Workspace, physical_id: str, exposure_ev: float, white_balance: int = 0, saturation: int = 100, highlights: int = 0, shadows: int = 0) -> tuple[bytes, str]:
-    if not isfinite(exposure_ev) or not MIN_EXPOSURE_EV <= exposure_ev <= MAX_EXPOSURE_EV or abs(exposure_ev * 4 - round(exposure_ev * 4)) > 1e-6:
-        raise ValueError("exposure_ev must be between -5 and 5 in 0.25 EV steps")
-    if not -100 <= white_balance <= 100 or not 50 <= saturation <= 150 or not -100 <= highlights <= 100 or not -100 <= shadows <= 100:
-        raise ValueError("RAW development controls are outside their supported range")
+    global _cache_bytes
+    exposure_ev = _canonical_control(exposure_ev, MIN_EXPOSURE_EV, MAX_EXPOSURE_EV, EXPOSURE_STEP_EV, "exposure_ev")
+    white_balance = _canonical_control(white_balance, -100, 100, CONTROL_STEP, "white_balance")
+    saturation = _canonical_control(saturation, 50, 150, CONTROL_STEP, "saturation")
+    highlights = _canonical_control(highlights, -100, 100, CONTROL_STEP, "highlights")
+    shadows = _canonical_control(shadows, -100, 100, CONTROL_STEP, "shadows")
     connection = workspace.connect()
     try:
         row = connection.execute(
@@ -51,11 +57,28 @@ def raw_development_preview(workspace: Workspace, physical_id: str, exposure_ev:
             return cached
     output = _decode_and_resize(source, exposure_ev, white_balance, saturation, highlights, shadows)
     with _cache_lock:
+        previous = _cache.pop(key, None)
+        if previous is not None:
+            _cache_bytes -= len(previous[0])
         _cache[key] = output
         _cache.move_to_end(key)
-        while len(_cache) > MAX_CACHE_ENTRIES:
-            _cache.popitem(last=False)
+        _cache_bytes += len(output[0])
+        while _cache and (len(_cache) > MAX_CACHE_ENTRIES or _cache_bytes > MAX_CACHE_BYTES):
+            _, evicted = _cache.popitem(last=False)
+            _cache_bytes -= len(evicted[0])
     return output
+
+
+def _canonical_control(value: float, minimum: float, maximum: float, step: float, name: str) -> float | int:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} is outside its supported range") from error
+    if not isfinite(numeric) or not minimum <= numeric <= maximum or abs(numeric / step - round(numeric / step)) > 1e-6:
+        step_label = f"{step:g}"
+        raise ValueError(f"{name} must be between {minimum:g} and {maximum:g} in {step_label}-unit steps")
+    canonical = round(numeric / step) * step
+    return int(canonical) if step >= 1 else round(canonical, 3)
 
 
 def _decode_and_resize(source, exposure_ev: float, white_balance: int, saturation: int, highlights: int, shadows: int) -> tuple[bytes, str]:
@@ -120,5 +143,7 @@ def _adjust_preview(image: Image.Image, saturation: int, highlights: int, shadow
 
 
 def clear_raw_development_cache() -> None:
+    global _cache_bytes
     with _cache_lock:
         _cache.clear()
+        _cache_bytes = 0
