@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import sys
 import types
+import threading
+import time
 import unittest
 import base64
 from io import BytesIO
@@ -14,7 +16,7 @@ import numpy as np
 from PIL import Image
 
 from archive_index.api.comparison import _mse, comparison_data
-from archive_index.file_management import build_dry_run_plan, list_presets, list_profiles, list_rulesets, save_profile, save_ruleset
+from archive_index.file_management import build_dry_run_plan, cancel_plan_analysis, list_presets, list_profiles, list_rulesets, plan_analysis_status, save_profile, save_ruleset, start_plan_analysis
 from archive_index.file_management_previews import _encode, bundled_preview_manifest, custom_profile_preview
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.reconciliation import reconcile_workspace
@@ -24,6 +26,62 @@ from archive_index.workspace import Workspace
 
 
 class Phase10ASecondPassTests(unittest.TestCase):
+    def test_planner_scales_without_reenumerating_the_same_destination_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace.create(Path(directory))
+            now = "2026-09-25T00:00:00+00:00"
+            count = 2500
+            with workspace.transaction() as connection:
+                connection.executemany(
+                    "INSERT INTO logical_asset(id, media_type, selection_state, created_at, updated_at) VALUES (?, 'image', 'selected', ?, ?)",
+                    ((f"asset-{index}", now, now) for index in range(count)),
+                )
+                connection.executemany(
+                    "INSERT INTO physical_file(id, logical_asset_id, relative_path, filename, extension, media_type, role, size_bytes, is_online, in_scope, created_at, updated_at) VALUES (?, ?, ?, ?, '.jpg', 'image', 'source_original', 1024, 1, 1, ?, ?)",
+                    ((f"file-{index}", f"asset-{index}", f"photos/{index:04}.jpg", f"{index:04}.jpg", now, now) for index in range(count)),
+                )
+            ruleset = save_ruleset(workspace, name="Copy all", rules=[{
+                "match": {"format": "jpeg"},
+                "action": {"operation": "copy", "destination_dir": "sorted", "preserve_relative_structure": False},
+            }])
+            original_iterdir = Path.iterdir
+            directory_reads = 0
+            phases = set()
+
+            def counted_iterdir(path):
+                nonlocal directory_reads
+                directory_reads += 1
+                return original_iterdir(path)
+
+            with patch.object(Path, "iterdir", counted_iterdir):
+                plan = build_dry_run_plan(workspace, ruleset["id"], progress=lambda phase, completed, total: phases.add(phase))
+            self.assertEqual(plan["summary"]["copy"]["file_count"], count)
+            self.assertEqual(plan["summary"]["candidate_count"], count)
+            self.assertLess(directory_reads, 5)
+            self.assertTrue({"Loading indexed files", "Matching rules", "Resolving targets", "Checking destination conflicts", "Summarizing plan"} <= phases)
+
+    def test_planner_session_reports_and_honors_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace.create(Path(directory))
+            started = threading.Event()
+
+            def wait_for_cancel(workspace, ruleset_id, *, progress, cancelled):
+                progress("Matching rules", 0, 1)
+                started.set()
+                while not cancelled.wait(.01):
+                    pass
+                raise InterruptedError("Plan analysis was cancelled.")
+
+            with patch("archive_index.file_management.build_dry_run_plan", side_effect=wait_for_cancel):
+                session_id = start_plan_analysis(workspace)
+                self.assertTrue(started.wait(2))
+                self.assertEqual(plan_analysis_status(workspace, session_id)["phase"], "Matching rules")
+                self.assertTrue(cancel_plan_analysis(workspace, session_id))
+                deadline = time.monotonic() + 2
+                while plan_analysis_status(workspace, session_id)["status"] == "running" and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(plan_analysis_status(workspace, session_id)["status"], "cancelled")
+
     def test_bundled_profile_previews_have_real_metrics_and_assets(self):
         manifest = bundled_preview_manifest()
         self.assertEqual(manifest["version"], "compression-preview-v1")

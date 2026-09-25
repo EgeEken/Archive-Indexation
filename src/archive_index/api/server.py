@@ -41,13 +41,16 @@ from ..planning import _historical_rate, analyze_folder, plan_from_analysis
 from ..workspace import Workspace, WorkspaceError
 from ..file_management import (
     build_dry_run_plan,
+    cancel_plan_analysis,
     delete_ruleset,
     list_profiles,
     list_presets,
     list_rulesets,
+    plan_analysis_status,
     save_profile,
     save_preset,
     save_ruleset,
+    start_plan_analysis,
     set_active_ruleset,
 )
 from ..file_management_previews import cached_preview_file, custom_profile_preview
@@ -374,6 +377,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"presets": list_presets(workspace)})
             elif request.path == "/api/file-management/plan":
                 self._send_json(200, build_dry_run_plan(workspace, _first(query, "ruleset_id", "") or None))
+            elif request.path == "/api/file-management/plan/status":
+                self._send_json(200, plan_analysis_status(workspace, _first(query, "session_id", "")))
             elif request.path == "/api/exports/selected.zip":
                 archive, _, _ = selected_zip(workspace)
                 try:
@@ -461,6 +466,19 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 except Exception as error:
                     raise InvalidRequest(f"Model installation failed: {error}") from error
                 self._send_json(200, {"installed": True, "path": str(path)})
+                return
+            if request.path == "/api/file-management/plan/start":
+                body = self._json_body()
+                _, workspace = self._workspace(query)
+                session_id = start_plan_analysis(workspace, body.get("ruleset_id"))
+                self._send_json(202, {"session_id": session_id})
+                return
+            if request.path == "/api/file-management/plan/cancel":
+                body = self._json_body()
+                _, workspace = self._workspace(query)
+                session_id = str(body.get("session_id") or "")
+                cancelled = cancel_plan_analysis(workspace, session_id)
+                self._send_json(202 if cancelled else 200, {"session_id": session_id, "cancelled": cancelled})
                 return
             if request.path == "/api/workspaces/apply":
                 body = self._json_body()

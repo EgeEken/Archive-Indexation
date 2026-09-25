@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -25,6 +27,8 @@ BUILTIN_PROFILE_IDS = {
     BUILTIN_AV1_PROFILE_ID,
 }
 BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
+_plan_runs = {}
+_plan_runs_lock = threading.Lock()
 
 
 def quality_to_distance(quality: float) -> float:
@@ -38,8 +42,9 @@ def distance_to_quality(distance: float) -> float:
     return round(max(0.0, min(100.0, 100.0 - float(distance) * 40.0 / 1.5)), 2)
 
 
-def list_profiles(workspace: Workspace) -> list[dict[str, object]]:
-    _ensure_builtins(workspace)
+def list_profiles(workspace: Workspace, *, seed: bool = True) -> list[dict[str, object]]:
+    if seed:
+        _ensure_builtins(workspace)
     connection = workspace.connect()
     try:
         rows = connection.execute(
@@ -90,8 +95,9 @@ def save_profile(
     return next(profile for profile in list_profiles(workspace) if profile["id"] == profile_id)
 
 
-def list_rulesets(workspace: Workspace) -> list[dict[str, object]]:
-    _ensure_builtins(workspace)
+def list_rulesets(workspace: Workspace, *, seed: bool = True) -> list[dict[str, object]]:
+    if seed:
+        _ensure_builtins(workspace)
     connection = workspace.connect()
     try:
         rulesets = connection.execute(
@@ -226,9 +232,16 @@ def set_active_ruleset(workspace: Workspace, ruleset_id: str | None) -> None:
         )
 
 
-def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> dict[str, object]:
+def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, progress=None, cancelled=None) -> dict[str, object]:
+    def report(phase, completed=0, total=0):
+        if progress:
+            progress(phase, completed, total)
+        if cancelled and cancelled.is_set():
+            raise InterruptedError("Plan analysis was cancelled.")
+
+    report("Loading indexed files")
     _ensure_builtins(workspace)
-    rulesets = list_rulesets(workspace)
+    rulesets = list_rulesets(workspace, seed=False)
     if ruleset_id is None:
         connection = workspace.connect()
         try:
@@ -241,7 +254,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
     ruleset = next((item for item in rulesets if item["id"] == ruleset_id), None)
     if ruleset is None:
         return _empty_plan("No file-management ruleset is active.")
-    profiles = {profile["id"]: profile for profile in list_profiles(workspace)}
+    profiles = {profile["id"]: profile for profile in list_profiles(workspace, seed=False)}
     connection = workspace.connect()
     try:
         rows = connection.execute(
@@ -261,9 +274,15 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
     conflicts = []
     blockers: dict[str, dict[str, object]] = {}
     targets: dict[str, tuple[str, str, str | None]] = {}
-    for row in rows:
+    directory_entries: dict[Path, dict[str, Path]] = {}
+    target_statuses: dict[tuple[str, str | None], str | None] = {}
+    target_hashes: dict[str, str] = {}
+    total_rows = len(rows)
+    for row_index, row in enumerate(rows):
+        report("Matching rules", row_index, total_rows)
         matching_rules = [candidate for candidate in ruleset["rules"] if candidate["enabled"] and _matches(row, candidate["match"])]
         if not matching_rules:
+            report("Resolving targets", row_index + 1, total_rows)
             continue
         source = row["relative_path"]
         compiled = []
@@ -293,6 +312,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
             compiled.append({"rule": rule, "action": action, "operation": operation, "profile": profile, "profile_id": profile_id, "target": target, "conflicts": item_conflicts, "blockers": item_blockers})
 
         _validate_action_combination(compiled)
+        report("Checking destination conflicts", row_index, total_rows)
         for item in compiled:
             item_conflicts = list(item["conflicts"])
             item_blockers = list(item["blockers"])
@@ -312,6 +332,9 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                     source_replacement,
                     rename_on_conflict,
                     targets,
+                    directory_entries,
+                    target_statuses,
+                    target_hashes,
                 )
                 if target_conflict:
                     item_conflicts.append(target_conflict)
@@ -356,6 +379,8 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
                 "operation": operation,
                 "reason": reason,
             } for reason in item_conflicts)
+        report("Resolving targets", row_index + 1, total_rows)
+    report("Summarizing plan", total_rows, total_rows)
     summary = _plan_summary(workspace, rows, operations, conflicts)
     summary["blocker_count"] = sum(int(item["affected_count"]) for item in blockers.values())
     summary["capability_blockers"] = list(blockers.values())
@@ -368,6 +393,65 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None) -> d
         "summary": summary,
         "executor": {"available": False, "message": "Execution is unavailable until the safety executor is enabled."},
     }
+
+
+def start_plan_analysis(workspace: Workspace, ruleset_id: str | None = None) -> str:
+    session_id = str(uuid.uuid4())
+    cancellation = threading.Event()
+    session = {
+        "workspace": str(workspace.root),
+        "status": "running",
+        "phase": "Loading indexed files",
+        "completed": 0,
+        "total": 0,
+        "started": time.monotonic(),
+        "cancellation": cancellation,
+        "result": None,
+        "error": None,
+    }
+    with _plan_runs_lock:
+        for existing in _plan_runs.values():
+            if existing["workspace"] == session["workspace"] and existing["status"] == "running":
+                existing["cancellation"].set()
+        _plan_runs[session_id] = session
+        finished = [key for key, value in _plan_runs.items() if value["status"] != "running"]
+        while len(_plan_runs) > 8 and finished:
+            del _plan_runs[finished.pop(0)]
+
+    def run():
+        def update(phase, completed, total):
+            session.update(phase=phase, completed=completed, total=total)
+        try:
+            result = build_dry_run_plan(workspace, ruleset_id, progress=update, cancelled=cancellation)
+            session.update(status="complete", result=result)
+        except InterruptedError:
+            session.update(status="cancelled")
+        except Exception as error:
+            session.update(status="failed", error=str(error))
+        finally:
+            session["elapsed_seconds"] = time.monotonic() - session["started"]
+
+    threading.Thread(target=run, daemon=True, name="file-plan-analysis").start()
+    return session_id
+
+
+def plan_analysis_status(workspace: Workspace, session_id: str) -> dict[str, object]:
+    with _plan_runs_lock:
+        session = _plan_runs.get(session_id)
+        if session is None or session["workspace"] != str(workspace.root):
+            raise ValueError("Plan analysis session was not found.")
+        return {key: value for key, value in session.items() if key not in {"workspace", "started", "cancellation"}} | {
+            "elapsed_seconds": session.get("elapsed_seconds", time.monotonic() - session["started"]),
+        }
+
+
+def cancel_plan_analysis(workspace: Workspace, session_id: str) -> bool:
+    with _plan_runs_lock:
+        session = _plan_runs.get(session_id)
+        if session is None or session["workspace"] != str(workspace.root) or session["status"] != "running":
+            return False
+        session["cancellation"].set()
+        return True
 
 
 def _matches(row, match: dict[str, object]) -> bool:
@@ -441,32 +525,51 @@ def _workspace_file_exists(workspace: Workspace, relative_path: str) -> bool:
         return True
 
 
-def _workspace_target_status(workspace: Workspace, relative_path: str | None, source_sha256: str | None) -> str | None:
+def _workspace_target_status(workspace: Workspace, relative_path: str | None, source_sha256: str | None, directory_entries=None, target_statuses=None, target_hashes=None) -> str | None:
     if not relative_path:
         return None
+    cache_key = (relative_path.casefold(), source_sha256)
+    if target_statuses is not None and cache_key in target_statuses:
+        return target_statuses[cache_key]
     try:
-        path = _case_insensitive_path(workspace, relative_path)
+        path = _case_insensitive_path(workspace, relative_path, directory_entries)
     except WorkspaceError:
         return "conflict"
     if path is None or not path.is_file():
-        return None
-    if not source_sha256:
-        return "conflict"
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return "already_satisfied" if digest.hexdigest() == source_sha256 else "conflict"
+        status = None
+    elif not source_sha256:
+        status = "conflict"
+    else:
+        target_key = str(path).casefold()
+        digest = target_hashes.get(target_key) if target_hashes is not None else None
+        if digest is None:
+            hasher = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    hasher.update(chunk)
+            digest = hasher.hexdigest()
+            if target_hashes is not None:
+                target_hashes[target_key] = digest
+        status = "already_satisfied" if digest == source_sha256 else "conflict"
+    if target_statuses is not None:
+        target_statuses[cache_key] = status
+    return status
 
 
-def _case_insensitive_path(workspace: Workspace, relative_path: str) -> Path | None:
+def _case_insensitive_path(workspace: Workspace, relative_path: str, directory_entries=None) -> Path | None:
     current = workspace.root
     for part in PurePosixPath(relative_path).parts:
         if part in {"", "."}:
             continue
         if not current.is_dir():
             return None
-        match = next((child for child in current.iterdir() if child.name.casefold() == part.casefold()), None)
+        entries = None
+        if directory_entries is not None:
+            entries = directory_entries.get(current)
+            if entries is None:
+                entries = {child.name.casefold(): child for child in current.iterdir()}
+                directory_entries[current] = entries
+        match = entries.get(part.casefold()) if entries is not None else next((child for child in current.iterdir() if child.name.casefold() == part.casefold()), None)
         current = match if match is not None else current / part
     return current if current.exists() else None
 
@@ -480,6 +583,9 @@ def _resolve_target(
     source_replacement: bool,
     rename_on_conflict: bool,
     planned_targets: dict[str, tuple[str, str, str | None]],
+    directory_entries=None,
+    target_statuses=None,
+    target_hashes=None,
 ) -> tuple[str, str | None, str | None, bool, str | None, bool]:
     source_key = source.casefold()
     target_key = target.casefold()
@@ -494,23 +600,23 @@ def _resolve_target(
         if operation == "copy":
             return target, "already_satisfied", None, False, None, False
         if rename_on_conflict:
-            renamed = _next_target(target, workspace, planned_targets)
+            renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
             return renamed, "renamed", target, False, None, False
         return target, "conflict", None, False, "A file already exists at this destination.", False
 
-    existing = _workspace_target_status(workspace, target, source_sha256)
+    existing = _workspace_target_status(workspace, target, source_sha256, directory_entries, target_statuses, target_hashes)
     if existing == "already_satisfied" and planned is None:
         return target, existing, None, False, None, False
     if planned is None and existing is None:
         return target, None, None, False, None, False
     if rename_on_conflict:
-        renamed = _next_target(target, workspace, planned_targets)
+        renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
         return renamed, "renamed", target, False, None, False
     reason = "Another planned output already uses this destination." if planned is not None else "A file already exists at this destination."
     return target, "conflict", None, False, reason, False
 
 
-def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str, str | None]]) -> str:
+def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str, str | None]], directory_entries=None, target_statuses=None, target_hashes=None) -> str:
     path = PurePosixPath(target)
     suffix = path.suffix
     stem = path.name[:-len(suffix)] if suffix else path.name
@@ -518,7 +624,7 @@ def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, t
     while True:
         candidate = str(path.with_name(f"{stem} ({number}){suffix}")).replace("\\", "/")
         key = candidate.casefold()
-        if key not in planned_targets and _workspace_target_status(workspace, candidate, None) is None:
+        if key not in planned_targets and _workspace_target_status(workspace, candidate, None, directory_entries, target_statuses, target_hashes) is None:
             return candidate
         number += 1
 
@@ -575,27 +681,23 @@ def _plan_summary(workspace, rows, operations, conflicts):
         group["candidate_file_count"] = candidate_groups[name]["file_count"]
         group["candidate_storage_delta_bytes"] = candidate_groups[name]["estimated_storage_delta_bytes"]
 
-    surviving = 0
     connection = workspace.connect()
     try:
         assets = connection.execute("SELECT id FROM logical_asset").fetchall()
         files = connection.execute("SELECT id, logical_asset_id FROM physical_file WHERE in_scope = 1 AND is_online = 1").fetchall()
     finally:
         connection.close()
-    for asset in assets:
-        members = [row for row in files if row["logical_asset_id"] == asset["id"]]
-        if not members:
-            continue
-        member_operations = {
-                row["id"]: [operation for operation in executable_operations if operation["physical_file_id"] == row["id"]]
-            for row in members
-        }
-        if any(
-            not any(operation["operation"] == "delete" for operation in member_operations[row["id"]])
-            or any(operation["operation"] in {"copy", "move", "compress"} for operation in member_operations[row["id"]])
-            for row in members
-        ):
-            surviving += 1
+    operations_by_file = {}
+    for operation in executable_operations:
+        operations_by_file.setdefault(operation["physical_file_id"], []).append(operation)
+    surviving_assets = set()
+    for row in files:
+        member_operations = operations_by_file.get(row["id"], ())
+        has_delete = any(operation["operation"] == "delete" for operation in member_operations)
+        has_replacement = any(operation["operation"] in {"copy", "move", "compress"} for operation in member_operations)
+        if not has_delete or has_replacement:
+            surviving_assets.add(row["logical_asset_id"])
+    surviving = len(surviving_assets)
     candidate_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in candidate_groups.values())
     storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
     return {

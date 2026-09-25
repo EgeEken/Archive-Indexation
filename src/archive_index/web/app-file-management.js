@@ -1,4 +1,4 @@
-let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false};
+let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false, planSession: null, planToken: 0, planTimer: null};
 
 const assetSelectors = [["all", "All"], ["selected", "Selected"], ["undecided", "Undecided"], ["rejected", "Rejected"]];
 const representationSelectors = [["all", "All"], ["raw", "RAW"], ["conventional-image", "JPEG/PNG"], ["jpeg", "JPEG"], ["png", "PNG"], ["jxl", "JXL"], ["avif", "AVIF"], ["webp", "WebP"], ["video", "Video"]];
@@ -6,6 +6,32 @@ const operationSelectors = [["copy", "Copy"], ["move", "Move"], ["compress", "Co
 
 function fileManagementOptionList(values, selected) { return values.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`).join(""); }
 function fileManagementStatus(message = "", error = false) { const node = $("file-management-status"); if (!node) return; node.textContent = message; node.classList.toggle("error", error); node.classList.toggle("hidden", !message); }
+function renderPlanProgress(session) {
+  const panel = $("file-management-plan-progress");
+  panel.classList.toggle("hidden", !session || ["complete", "failed", "cancelled"].includes(session.status));
+  if (!session) return;
+  $("file-management-plan-progress").querySelector("[data-plan-phase]").textContent = session.phase || "Preparing plan";
+  const progress = panel.querySelector("[data-plan-progress]");
+  progress.max = Math.max(1, Number(session.total || 0));
+  progress.value = Math.min(progress.max, Number(session.completed || 0));
+  const count = session.total ? `${Number(session.completed || 0).toLocaleString()} / ${Number(session.total).toLocaleString()} files` : "Preparing indexed files";
+  panel.querySelector("[data-plan-progress-detail]").textContent = `${count} · ${Number(session.elapsed_seconds || 0).toFixed(1)} s elapsed`;
+}
+async function cancelFileManagementPlan(showCancelled = false) {
+  const sessionId = fileManagement.planSession;
+  fileManagement.planToken++;
+  clearTimeout(fileManagement.planTimer);
+  fileManagement.planSession = null;
+  if (sessionId) {
+    try { await api("/api/file-management/plan/cancel", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({session_id: sessionId})}); } catch {}
+  }
+  if (showCancelled) {
+    renderPlanProgress({status: "cancelled"});
+    $("file-management-plan-progress").classList.remove("hidden");
+    $("file-management-plan-progress").querySelector("[data-plan-phase]").textContent = "Analysis cancelled";
+    $("file-management-plan-progress").querySelector("[data-plan-progress-detail]").textContent = "No changes were made.";
+  } else renderPlanProgress(null);
+}
 function currentRuleset() { return fileManagement.rulesets.find(item => item.id === fileManagement.current) || null; }
 function newId() { return globalThis.crypto?.randomUUID?.() || `rule-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 
@@ -142,8 +168,25 @@ async function saveDraftRuleset(name = "Custom Ruleset", {forceNew = false} = {}
 }
 
 async function loadFileManagementPlan() {
-  try { if (fileManagement.dirty) await saveDraftRuleset("Custom Ruleset"); const data = await api(`/api/file-management/plan?ruleset_id=${encodeURIComponent(fileManagement.current || "")}`); renderFileManagementPlan(data); }
-  catch (error) { fileManagementStatus(`Plan analysis failed: ${error.message}`, true); }
+  await cancelFileManagementPlan();
+  const token = fileManagement.planToken;
+  renderPlanProgress({status: "running", phase: "Loading indexed files", completed: 0, total: 0, elapsed_seconds: 0});
+  try {
+    if (fileManagement.dirty) await saveDraftRuleset("Custom Ruleset");
+    if (token !== fileManagement.planToken || !$("file-management-dialog").open) return;
+    const started = await api("/api/file-management/plan/start", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ruleset_id: fileManagement.current})});
+    if (token !== fileManagement.planToken) return;
+    fileManagement.planSession = started.session_id;
+    while (token === fileManagement.planToken && $("file-management-dialog").open) {
+      const session = await api(`/api/file-management/plan/status?session_id=${encodeURIComponent(started.session_id)}`);
+      if (token !== fileManagement.planToken) return;
+      renderPlanProgress(session);
+      if (session.status === "complete") { fileManagement.planSession = null; renderFileManagementPlan(session.result); return; }
+      if (session.status === "failed") { fileManagementStatus(`Plan analysis failed: ${session.error}`, true); return; }
+      if (session.status === "cancelled") { renderPlanProgress({...session, status: "running"}); $("file-management-plan-progress").querySelector("[data-plan-phase]").textContent = "Analysis cancelled"; return; }
+      await new Promise(resolve => { fileManagement.planTimer = setTimeout(resolve, 200); });
+    }
+  } catch (error) { if (token === fileManagement.planToken) fileManagementStatus(`Plan analysis failed: ${error.message}`, true); }
 }
 
 function renderFileManagementPlan(data) {
@@ -166,11 +209,13 @@ function editProfile(id) { const profile = fileManagement.profiles.find(item => 
 
 $("file-management-button").addEventListener("click", async () => { try { await refreshFileManagementEditor(); $("file-management-dialog").showModal(); } catch (error) { fileManagementStatus(`File Management failed: ${error.message}`, true); } });
 $("file-management-close").addEventListener("click", () => $("file-management-dialog").close());
+$("file-management-dialog").addEventListener("close", () => { void cancelFileManagementPlan(); });
 document.querySelectorAll("[data-file-management-tab]").forEach(button => button.addEventListener("click", () => setFileManagementTab(button.dataset.fileManagementTab)));
 $("file-management-ruleset-select").addEventListener("change", event => { if (event.target.value === "custom-draft") return; selectRuleset(event.target.value); });
 $("file-management-add-rule").addEventListener("click", () => { fileManagement.draft.push(ruleToUi({})); markRulesDirty(); renderFileManagementRules(); });
 $("file-management-new-ruleset").addEventListener("click", () => { fileManagement.current = null; fileManagement.draft = []; fileManagement.dirty = true; $("file-management-ruleset-kind").textContent = "Custom Ruleset"; $("file-management-rename").classList.add("hidden"); $("file-management-delete").classList.add("hidden"); renderRulesetSelector(); renderFileManagementRules(); });
 $("file-management-analyze").addEventListener("click", () => { setFileManagementTab("plan"); });
+$("file-management-plan-progress").querySelector("[data-plan-cancel]").addEventListener("click", () => { void cancelFileManagementPlan(true); });
 $("file-management-save-as").addEventListener("click", async () => { const name = window.prompt("Save ruleset as", "Custom Ruleset"); if (!name) return; try { await saveDraftRuleset(name, {forceNew: true}); } catch (error) { fileManagementStatus(`Ruleset save failed: ${error.message}`, true); } });
 $("file-management-rename").addEventListener("click", async () => { const name = window.prompt("Rename ruleset", currentRuleset()?.name || "Custom Ruleset"); if (!name) return; try { await saveDraftRuleset(name); } catch (error) { fileManagementStatus(`Rename failed: ${error.message}`, true); } });
 $("file-management-delete").addEventListener("click", async () => { const ruleset = currentRuleset(); if (!ruleset || ruleset.is_builtin || !window.confirm(`Delete ${ruleset.name}?`)) return; try { await api("/api/file-management/rulesets/delete", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: ruleset.id})}); await refreshFileManagementEditor(); } catch (error) { fileManagementStatus(`Delete failed: ${error.message}`, true); } });
