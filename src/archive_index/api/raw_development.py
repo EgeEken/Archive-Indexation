@@ -22,7 +22,7 @@ EXPOSURE_STEP_EV = 0.5
 CONTROL_STEP = 5
 RAW_EXP_MIN_EV = -2.0
 RAW_EXP_MAX_EV = 3.0
-_cache: OrderedDict[tuple[str, int, int, float, int, int, int, int], tuple[bytes, str]] = OrderedDict()
+_cache: OrderedDict[tuple[str, str, int, int, float, int, int, int, int], tuple[bytes, str]] = OrderedDict()
 _cache_bytes = 0
 _cache_lock = RLock()
 
@@ -49,7 +49,7 @@ def raw_development_preview(workspace: Workspace, physical_id: str, exposure_ev:
         stat = source.stat()
     except (OSError, WorkspaceError) as error:
         raise ResourceNotFound("RAW development is unavailable for this file") from error
-    key = (physical_id, stat.st_size, stat.st_mtime_ns, round(exposure_ev, 2), white_balance, saturation, highlights, shadows)
+    key = (str(workspace.root.resolve()), physical_id, stat.st_size, stat.st_mtime_ns, round(exposure_ev, 2), white_balance, saturation, highlights, shadows)
     with _cache_lock:
         cached = _cache.get(key)
         if cached is not None:

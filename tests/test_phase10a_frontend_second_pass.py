@@ -110,10 +110,34 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         start = self.details.index("function comparisonMseColor")
         end = self.details.index("function disposeRepresentationDialog", start)
         script = self.details[start:end] + "\nconsole.log(JSON.stringify([comparisonMseColor(10), comparisonMseColor(101)]));\n"
-        result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True, check=True)
+        result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True, encoding="utf-8", check=True)
         low, high = json.loads(result.stdout)
         self.assertNotEqual(low, high)
         self.assertEqual(high, "rgb(232,110,110)")
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_comparison_headers_round_mse_and_hide_pixel_maximum(self):
+        start = self.details.index("function comparisonMseColor")
+        end = self.details.index("function comparisonLabel", start)
+        script = "function escapeHtml(value) { return String(value); }\nfunction formatBytes(value) { return `${value} bytes`; }\n" + self.details[start:end] + "\nconst metrics = value => comparisonMetricsMarkup({reference_bytes: 1000, compressed_bytes: 500, compressed_percent: 50, mse: value, byte_identical: false, pixel_identical: false}, {extension: '.jxl'});\nconsole.log(JSON.stringify([metrics(6.589), metrics(9.244727), metrics(16.425328), metrics(24.008241)]));\n"
+        result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True, encoding="utf-8", check=True)
+        rendered = json.loads(result.stdout)
+        self.assertTrue(all("MSE " in value for value in rendered))
+        self.assertIn("MSE 7", rendered[0])
+        self.assertIn("MSE 9", rendered[1])
+        self.assertIn("MSE 16", rendered[2])
+        self.assertIn("MSE 24", rendered[3])
+        self.assertTrue(all("Global MSE" not in value and "Max pixel MSE" not in value for value in rendered))
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_difference_legend_uses_one_locale_aware_formatter(self):
+        start = self.details.index("const comparisonLegendNumberFormat")
+        end = self.details.index("function comparisonViewMarkup", start)
+        script = "function escapeHtml(value) { return String(value); }\n" + self.details[start:end] + "\nconsole.log(differenceLegendMarkup({max_pixel_mse: 1000}));\n"
+        result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertIn('aria-label="Absolute pixel MSE scale"', result.stdout)
+        self.assertEqual(result.stdout.count("difference-legend-tick"), 5)
+        self.assertNotIn("comparisonNumber", self.details)
 
     def test_file_management_layout_uses_binary_disk_labels_and_conditional_rows(self):
         management = self.management

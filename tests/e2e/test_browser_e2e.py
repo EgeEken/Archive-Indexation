@@ -598,7 +598,10 @@ class BrowserE2ETests(unittest.TestCase):
           return context.getImageData(0,0,canvas.width,canvas.height).data.every((value,index)=>index%4===3 || value===0);
         }"""))
         self.assertEqual(self.page.locator(".difference-legend-tick").count(), 5)
-        self.assertIn("Global MSE", self.page.locator("[data-comparison-metrics]").inner_text())
+        metrics_text = self.page.locator("[data-comparison-metrics]").inner_text()
+        self.assertRegex(metrics_text, r"\bMSE \d+\b")
+        self.assertNotIn("Global MSE", metrics_text)
+        self.assertNotIn("Max pixel MSE", metrics_text)
         self.assertEqual(len(difference_requests), 1)
         legend_geometry = self.page.evaluate("""() => {
           const layout=document.querySelector('.comparison-difference-layout');
@@ -642,6 +645,10 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.wait_for_function("[...document.querySelectorAll('.comparison-slider [data-comparison-image]')].every(image => image.complete && image.naturalWidth > 0)")
         self.page.wait_for_function("!document.querySelector('[data-comparison-metrics]')?.innerText.includes('Calculating comparison')")
         self.assertIn("Quality 60 · Effort 7", self.page.locator("#representation-comparison").inner_text())
+        preview_metrics = self.page.locator("[data-comparison-metrics]").inner_text()
+        self.assertIn("MSE 16", preview_metrics)
+        self.assertNotIn("Global MSE", preview_metrics)
+        self.assertNotIn("Max pixel MSE", preview_metrics)
         self.assertTrue(any(url.endswith("/assets/compression-preview/manifest.json") for url in preview_requests))
         self.assertFalse(any("/api/file-management/profile-preview" in url for url in preview_requests))
         frame = self.page.locator("[data-comparison-frame]")

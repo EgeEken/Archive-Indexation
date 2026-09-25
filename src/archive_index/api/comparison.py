@@ -20,7 +20,8 @@ MAX_COMPARISON_CACHE_ENTRIES = 8
 MAX_COMPARISON_CACHE_BYTES = 48 * 1024 * 1024
 MAX_DIFFERENCE_CACHE_ENTRIES = 4
 MAX_DIFFERENCE_CACHE_BYTES = 32 * 1024 * 1024
-DIFFERENCE_ALGORITHM_VERSION = "difference-log-v1"
+DIFFERENCE_ALGORITHM_VERSION = "difference-log-v2-fast-png"
+DIFFERENCE_PNG_COMPRESS_LEVEL = 1
 _comparison_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
 _comparison_cache_bytes = 0
 _difference_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
@@ -73,7 +74,6 @@ def comparison_data(workspace: Workspace, left_id: str, right_id: str, handle: s
             "mse": None,
             "global_mse": None,
             "psnr": None,
-            "max_pixel_mse": None,
             "pixel_identical": None,
             "byte_identical": bool(reference_row["sha256"] and compressed_row["sha256"] and reference_row["sha256"] == compressed_row["sha256"]),
         }
@@ -82,11 +82,10 @@ def comparison_data(workspace: Workspace, left_id: str, right_id: str, handle: s
         metrics["comparison_percent"] = metrics["compressed_percent"]
         metrics_started = perf_counter()
         if reference.size == compressed.size:
-            mse, max_pixel_mse = _comparison_metrics(reference, compressed)
+            mse = _mse(reference, compressed)
             metrics_ms = round((perf_counter() - metrics_started) * 1000, 3)
             metrics["mse"] = round(mse, 6)
             metrics["global_mse"] = round(mse, 6)
-            metrics["max_pixel_mse"] = round(max_pixel_mse, 6)
             metrics["psnr"] = None if mse == 0 else round(10 * log10((255 * 255) / mse), 3)
             metrics["pixel_identical"] = mse == 0
         else:
@@ -126,8 +125,6 @@ def comparison_difference(workspace: Workspace, left_id: str, right_id: str) -> 
     if first_row["logical_asset_id"] != second_row["logical_asset_id"]:
         raise ResourceNotFound("representations must belong to the same logical asset")
     reference_row, compressed_row = _orient(first_row, second_row)
-    if reference_row["width"] != compressed_row["width"] or reference_row["height"] != compressed_row["height"]:
-        raise ValueError("Difference is unavailable because representation dimensions differ.")
     workspace_identity = _workspace_identity(workspace)
     cache_key = _difference_cache_key(workspace_identity, reference_row, compressed_row)
     cache_lookup_started = perf_counter()
@@ -155,14 +152,14 @@ def comparison_difference(workspace: Workspace, left_id: str, right_id: str) -> 
     compressed = _decode(workspace, compressed_row)
     compressed_decode_ms = round((perf_counter() - decode_started) * 1000, 3)
     try:
+        if reference.size != compressed.size:
+            raise ValueError("Difference is unavailable because representation dimensions differ.")
         compute_started = perf_counter()
         difference, mse, max_pixel_mse = _difference_map(reference, compressed)
         difference_compute_ms = round((perf_counter() - compute_started) * 1000, 3)
         try:
             encode_started = perf_counter()
-            output = BytesIO()
-            difference.save(output, format="PNG", optimize=True)
-            body = output.getvalue()
+            body = _encode_difference(difference)
             difference_encode_ms = round((perf_counter() - encode_started) * 1000, 3)
         finally:
             difference.close()
@@ -230,18 +227,6 @@ def _mse(left: Image.Image, right: Image.Image) -> float:
         difference.close()
 
 
-def _comparison_metrics(left: Image.Image, right: Image.Image) -> tuple[float, float]:
-    difference = _difference(left, right)
-    try:
-        width, height = difference.size
-        mse = sum(ImageStat.Stat(difference).sum2) / (width * height * 3)
-        values = np.asarray(difference, dtype=np.uint16)
-        max_pixel_mse = float(np.max(np.sum(values * values, axis=2, dtype=np.uint32)) / 3.0)
-        return mse, max_pixel_mse
-    finally:
-        difference.close()
-
-
 def _difference_map(left: Image.Image, right: Image.Image) -> tuple[Image.Image, float, float]:
     left_rgb = left.convert("RGB")
     right_rgb = right.convert("RGB")
@@ -266,6 +251,12 @@ def _difference_map(left: Image.Image, right: Image.Image) -> tuple[Image.Image,
         return result, total, maximum
     finally:
         difference.close()
+
+
+def _encode_difference(difference: Image.Image) -> bytes:
+    output = BytesIO()
+    difference.save(output, format="PNG", compress_level=DIFFERENCE_PNG_COMPRESS_LEVEL)
+    return output.getvalue()
 
 
 def _orient(first, second):
@@ -323,7 +314,7 @@ def _pair_cache_fingerprint(reference, compressed) -> tuple[object, ...]:
 
 
 def _comparison_cache_key(workspace_identity: str, reference, compressed) -> tuple[object, ...]:
-    return ("comparison-metrics-v3", workspace_identity, *_pair_cache_fingerprint(reference, compressed))
+    return ("comparison-metrics-v4", workspace_identity, *_pair_cache_fingerprint(reference, compressed))
 
 
 def _difference_cache_key(workspace_identity: str, reference, compressed) -> tuple[object, ...]:

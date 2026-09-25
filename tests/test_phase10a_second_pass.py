@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from archive_index.api.comparison import _difference_map, _mse, comparison_data, comparison_difference
+from archive_index.api.comparison import DIFFERENCE_PNG_COMPRESS_LEVEL, _difference_map, _encode_difference, _mse, comparison_data, comparison_difference
 from archive_index.file_management import build_dry_run_plan, cancel_plan_analysis, list_presets, list_profiles, list_rulesets, plan_analysis_status, save_profile, save_ruleset, start_plan_analysis
 from archive_index.file_management_previews import _encode, bundled_preview_manifest, custom_profile_preview
 from archive_index.indexing.media_pipeline import index_workspace
@@ -419,6 +419,7 @@ class Phase10ASecondPassTests(unittest.TestCase):
                 connection.close()
             result = comparison_data(workspace, ids[0], ids[1], "workspace")
             self.assertIsNotNone(result["metrics"]["mse"])
+            self.assertNotIn("max_pixel_mse", result["metrics"])
             self.assertIn("byte_identical", result["metrics"])
             self.assertIn("/original", result["left"]["preview_url"])
             self.assertTrue("/preview" in result["right"]["preview_url"] or "comparison-preview" in result["right"]["preview_url"])
@@ -447,6 +448,40 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertIn("total", first["timings_ms"])
             self.assertIn("cache_lookup", second["timings_ms"])
 
+    def test_normal_comparison_does_not_compute_or_encode_difference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (20, 30), (80, 120, 160)).save(root / "photo.png")
+            Image.new("RGB", (20, 30), (80, 120, 161)).save(root / "other.png")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                rows = connection.execute("SELECT id, logical_asset_id FROM physical_file ORDER BY relative_path").fetchall()
+                connection.execute("UPDATE physical_file SET logical_asset_id = ? WHERE id = ?", (rows[0]["logical_asset_id"], rows[1]["id"]))
+                connection.commit()
+            finally:
+                connection.close()
+            from archive_index.api import comparison as comparison_module
+            with patch.object(comparison_module, "_difference_map", side_effect=AssertionError("Difference map was requested")) as difference_map, patch.object(comparison_module, "_encode_difference") as encoder:
+                result = comparison_data(workspace, rows[0]["id"], rows[1]["id"], "workspace")
+            self.assertIsNotNone(result["metrics"]["mse"])
+            self.assertNotIn("max_pixel_mse", result["metrics"])
+            difference_map.assert_not_called()
+            encoder.assert_not_called()
+
+    def test_difference_encoding_uses_fast_png_settings(self):
+        difference = Image.new("RGB", (2, 2), (128, 0, 0))
+        original_save = Image.Image.save
+        try:
+            with patch.object(Image.Image, "save", autospec=True) as save:
+                save.side_effect = original_save
+                _encode_difference(difference)
+            self.assertEqual(save.call_args.kwargs["compress_level"], DIFFERENCE_PNG_COMPRESS_LEVEL)
+            self.assertNotIn("optimize", save.call_args.kwargs)
+        finally:
+            difference.close()
+
     def test_difference_cache_is_separate_and_reuses_encoded_result(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -469,6 +504,24 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertFalse(first_timings["cache_hit"])
             self.assertTrue(second_timings["cache_hit"])
             self.assertEqual(decoder.call_count, 2)
+
+    def test_difference_uses_decoded_dimensions_when_index_is_stale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (20, 30), (80, 120, 160)).save(root / "photo.png")
+            Image.new("RGB", (20, 30), (80, 120, 161)).save(root / "other.png")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                rows = connection.execute("SELECT id, logical_asset_id FROM physical_file ORDER BY relative_path").fetchall()
+                connection.execute("UPDATE physical_file SET logical_asset_id = ?, width = 1, height = 1 WHERE id = ?", (rows[0]["logical_asset_id"], rows[1]["id"]))
+                connection.commit()
+            finally:
+                connection.close()
+            body, _ = comparison_difference(workspace, rows[0]["id"], rows[1]["id"])
+            with Image.open(BytesIO(body)) as difference:
+                self.assertEqual(difference.size, (20, 30))
 
     def test_byte_identical_pair_is_explicitly_marked(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -534,12 +587,13 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual(pixels[4, 7].tolist(), [255, 0, 0])
             self.assertGreater(unequal["metrics"]["mse"], 0)
             expected_max = (120 ** 2 + 40 ** 2 + 8 ** 2) / 3
-            self.assertEqual(unequal["metrics"]["max_pixel_mse"], round(expected_max, 6))
             self.assertEqual(unequal["metrics"]["mse"], round(expected_max / (12 * 16), 6))
+            self.assertNotIn("max_pixel_mse", unequal["metrics"])
+            self.assertEqual(timings["max_pixel_mse"], round(expected_max, 6))
             identical_bytes, identical_timings = comparison_difference(workspace, rows[0]["id"], rows[0]["id"])
             identical_pixels = np.asarray(Image.open(BytesIO(identical_bytes)))
             self.assertFalse(np.any(identical_pixels))
-            self.assertEqual(identical["metrics"]["max_pixel_mse"], 0)
+            self.assertNotIn("max_pixel_mse", identical["metrics"])
             self.assertIn("difference_compute", timings)
             self.assertIn("difference_encode", timings)
             self.assertFalse(identical_timings["cache_hit"])

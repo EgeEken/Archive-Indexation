@@ -74,7 +74,7 @@ function comparisonFingerprint(file) {
 }
 
 function comparisonPairKey(compressed, reference) {
-  return JSON.stringify(["comparison-metrics-v3", state.workspace || "", comparisonFingerprint(reference), comparisonFingerprint(compressed)]);
+  return JSON.stringify(["comparison-metrics-v4", state.workspace || "", comparisonFingerprint(reference), comparisonFingerprint(compressed)]);
 }
 
 function comparisonDisplayData(compressed, reference) {
@@ -236,12 +236,10 @@ function comparisonFactor(value) {
   const number = Number(value);
   return number.toFixed(number < 1.01 ? 3 : 2).replace(/\.?0+$/, "");
 }
-function comparisonNumber(value) {
+const comparisonLegendNumberFormat = new Intl.NumberFormat(undefined, {maximumFractionDigits: 2});
+function comparisonLegendNumber(value) {
   const number = Number(value);
-  if (!Number.isFinite(number) || number === 0) return "0";
-  if (Math.abs(number) >= 1000) return number.toLocaleString(undefined, {maximumFractionDigits: 2});
-  if (Math.abs(number) >= 1) return number.toFixed(3).replace(/\.?0+$/, "");
-  return number.toPrecision(6).replace(/0+$/, "").replace(/\.$/, "");
+  return Number.isFinite(number) ? comparisonLegendNumberFormat.format(number) : "—";
 }
 function comparisonMetricsMarkup(metrics, comparedFile) {
   const referenceBytes = Number(metrics.reference_bytes || 0);
@@ -253,22 +251,22 @@ function comparisonMetricsMarkup(metrics, comparedFile) {
       : `${comparisonFactor(comparedBytes / referenceBytes)}× larger`;
   const comparedLabel = isCompressedRepresentation(comparedFile) ? "Compressed" : "Compared";
   const percent = metrics.compressed_percent == null ? "Unavailable" : `${metrics.compressed_percent}% of reference`;
-  const mse = metrics.mse == null ? `<span class="comparison-metric-mse">Global MSE unavailable</span>` : `<span class="comparison-metric-mse" style="color:${escapeHtml(comparisonMseColor(metrics.mse))}">Global MSE ${escapeHtml(comparisonNumber(metrics.mse))}</span>`;
-  const maxPixelMse = metrics.max_pixel_mse == null ? "" : `<span class="comparison-metric-max">Max pixel MSE ${escapeHtml(comparisonNumber(metrics.max_pixel_mse))}</span>`;
+  const mseValue = metrics.mse == null ? NaN : Number(metrics.mse);
+  const mse = Number.isFinite(mseValue) ? `<span class="comparison-metric-mse" style="color:${escapeHtml(comparisonMseColor(mseValue))}">MSE ${Math.round(mseValue)}</span>` : `<span class="comparison-metric-mse">MSE unavailable</span>`;
   const identity = metrics.byte_identical ? "Exact duplicate of preferred representation" : metrics.pixel_identical ? "Pixel-identical to preferred representation" : "";
   const parts = [`Reference ${escapeHtml(formatBytes(referenceBytes))} → ${comparedLabel} ${escapeHtml(formatBytes(comparedBytes))}`, `<span class="comparison-metric-ratio">${escapeHtml(sizeLabel)}</span>`, `<span class="comparison-metric-percent">${escapeHtml(percent)}</span>`, mse];
-  return `${identity ? `<div class="comparison-metric-identity">${identity}</div>` : ""}<div class="comparison-metric-row">${parts.join(" · ")} ${maxPixelMse ? ` · ${maxPixelMse}` : ""}</div>`;
+  return `${identity ? `<div class="comparison-metric-identity">${identity}</div>` : ""}<div class="comparison-metric-row">${parts.join(" · ")}</div>`;
 }
 
 function comparisonLabel(file) { return `${escapeHtml(file.filename)} · ${escapeHtml(formatBytes(file.size_bytes))}`; }
 
-function differenceLegendMarkup(metrics) {
-  const maximum = Number(metrics?.max_pixel_mse);
+function differenceLegendMarkup(data) {
+  const maximum = Number(data?.max_pixel_mse);
   if (!Number.isFinite(maximum)) return "";
   const logMaximum = Math.log1p(maximum);
   const ticks = [0, .25, .5, .75, 1].map(fraction => {
     const value = Math.expm1(fraction * logMaximum);
-    return `<div class="difference-legend-tick" style="bottom:${fraction * 100}%"><span>${escapeHtml(comparisonNumber(value))}</span></div>`;
+    return `<div class="difference-legend-tick" style="bottom:${fraction * 100}%"><span>${escapeHtml(comparisonLegendNumber(value))}</span></div>`;
   }).join("");
   return `<aside class="difference-legend" aria-label="Absolute pixel MSE scale"><div class="difference-legend-bar">${ticks}</div></aside>`;
 }
@@ -281,7 +279,7 @@ function comparisonViewMarkup(data, mode) {
   if (mode === "slider") return `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-frame" data-comparison-frame><img class="comparison-slider-sizer" src="${escapeHtml(reference.preview_url)}" alt="" aria-hidden="true"><div class="comparison-slider-base"><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button></div><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>`;
   if (mode === "difference") {
     const image = data.difference_url ? `<img class="comparison-difference-image" data-comparison-image src="${escapeHtml(data.difference_url)}" alt="Log-scaled per-pixel squared-error map">` : data.difference_error ? `<p class="error comparison-unavailable">${escapeHtml(data.difference_error)}</p>` : data.same_dimensions ? `<p class="comparison-unavailable" data-comparison-pending>Calculating difference…</p>` : `<p class="comparison-unavailable">Difference is unavailable because representation dimensions differ.</p>`;
-    return `<div class="comparison-difference-layout"><div class="comparison-difference" data-comparison-viewport><div class="comparison-difference-frame">${image}</div></div>${differenceLegendMarkup(data.metrics)}</div>`;
+    return `<div class="comparison-difference-layout"><div class="comparison-difference" data-comparison-viewport><div class="comparison-difference-frame">${image}</div></div>${differenceLegendMarkup(data)}</div>`;
   }
   return `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
 }
@@ -394,6 +392,7 @@ async function loadRepresentationDifference(asset, compressedId, referenceId, da
   const cached = readDifferenceCache(pairKey);
   if (cached) {
     data.difference_url = cached.url;
+    data.max_pixel_mse = cached.max_pixel_mse;
     data.difference_error = null;
     if (dialog._comparisonPairKey === pairKey && dialog._comparisonMode === "difference") {
       dialog._comparisonViews?.delete("difference");
@@ -418,7 +417,8 @@ async function loadRepresentationDifference(asset, compressedId, referenceId, da
         throw new Error(message);
       }
       const blob = await response.blob();
-      const cachedData = {url: URL.createObjectURL(blob), size: blob.size};
+      const backend = (() => { try { return JSON.parse(response.headers.get("X-Comparison-Timings") || "null"); } catch { return null; } })();
+      const cachedData = {url: URL.createObjectURL(blob), size: blob.size, max_pixel_mse: backend?.max_pixel_mse, global_mse: backend?.global_mse};
       const retained = writeDifferenceCache(pairKey, cachedData);
       if (!retained && dialog._differenceRequestToken === requestToken && !controller.signal.aborted) {
         dialog._ephemeralDifferenceUrls ||= [];
@@ -426,10 +426,10 @@ async function loadRepresentationDifference(asset, compressedId, referenceId, da
       } else if (!retained) {
         URL.revokeObjectURL(cachedData.url);
       }
-      const backend = (() => { try { return JSON.parse(response.headers.get("X-Comparison-Timings") || "null"); } catch { return null; } })();
       if (dialog._differenceRequestToken === requestToken && !controller.signal.aborted) {
         const currentData = dialog._comparisonData?.pairKey === pairKey ? dialog._comparisonData : data;
         currentData.difference_url = cachedData.url;
+        currentData.max_pixel_mse = cachedData.max_pixel_mse;
         currentData.difference_error = null;
         if (dialog._comparisonPairKey === pairKey && dialog._comparisonMode === "difference") {
           dialog._comparisonViews?.delete("difference");
@@ -465,7 +465,10 @@ async function loadRepresentationComparisonMetrics(asset, compressedId, referenc
   const cached = readComparisonCache(pairKey);
   if (cached) {
     const cachedDifference = readDifferenceCache(pairKey);
-    if (cachedDifference) cached.difference_url = cachedDifference.url;
+    if (cachedDifference) {
+      cached.difference_url = cachedDifference.url;
+      cached.max_pixel_mse = cachedDifference.max_pixel_mse;
+    }
     dialog._comparisonData = cached;
     await renderRepresentationComparison(asset, compressedId, referenceId, dialog._comparisonMode || "slider", cached);
     recordComparisonTiming(dialog, {kind: "metrics", pairKey, cache: "frontend", total: 0});
@@ -484,7 +487,10 @@ async function loadRepresentationComparisonMetrics(asset, compressedId, referenc
     if (dialog._comparisonRequestToken !== requestToken || controller.signal.aborted || dialog._comparisonPairKey !== pairKey) return;
     data.pairKey = pairKey;
     const cachedDifference = readDifferenceCache(pairKey);
-    if (cachedDifference) data.difference_url = cachedDifference.url;
+    if (cachedDifference) {
+      data.difference_url = cachedDifference.url;
+      data.max_pixel_mse = cachedDifference.max_pixel_mse;
+    }
     writeComparisonCache(pairKey, data);
     dialog._comparisonData = data;
     const mode = dialog._comparisonMode || "slider";
