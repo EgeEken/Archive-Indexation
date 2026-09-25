@@ -477,14 +477,106 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator("#viewer-close").click()
         self.page.locator("#viewer").wait_for(state="hidden")
 
+    def test_fullscreen_backdrop_uses_visible_image_hit_testing(self) -> None:
+        self._open_main()
+        card = self.page.locator(".photo-card", has_text="portrait.jpg").first
+        card.locator(".thumb").click()
+        self.page.locator("#viewer[open]").wait_for()
+        self.page.wait_for_function("document.querySelector('#viewer-media img.viewer-media')?.complete")
+
+        blank = self.page.evaluate("""() => {
+          const frame=document.querySelector('#viewer-media-pane').getBoundingClientRect();
+          const image=document.querySelector('#viewer-media img.viewer-media').getBoundingClientRect();
+          return image.left > frame.left + 4 ? {x:frame.left + 2, y:frame.top + frame.height / 2} : {x:frame.right - 2, y:frame.top + frame.height / 2};
+        }""")
+        self.page.mouse.click(blank["x"], blank["y"])
+        self.page.locator("#viewer").wait_for(state="hidden")
+
+        card.locator(".thumb").click()
+        self.page.locator("#viewer[open]").wait_for()
+        self.page.wait_for_function("document.querySelector('#viewer-media img.viewer-media')?.complete")
+        pane = self.page.locator("#viewer-media-pane")
+        box = pane.bounding_box()
+        self.page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        self.page.mouse.wheel(0, -240)
+        self.page.wait_for_function("new DOMMatrix(getComputedStyle(document.querySelector('#viewer-media img.viewer-media')).transform).a > 1")
+        zoomed_blank = self.page.evaluate("""() => {
+          const frame=document.querySelector('#viewer-media-pane').getBoundingClientRect();
+          const image=document.querySelector('#viewer-media img.viewer-media').getBoundingClientRect();
+          return image.left > frame.left + 4 ? {x:frame.left + 2, y:frame.top + frame.height / 2} : {x:frame.right - 2, y:frame.top + frame.height / 2};
+        }""")
+        self.page.mouse.move(zoomed_blank["x"], zoomed_blank["y"])
+        self.assertNotEqual(self.page.evaluate("getComputedStyle(document.querySelector('#viewer-media-pane')).cursor"), "grab")
+        self.page.mouse.click(zoomed_blank["x"], zoomed_blank["y"])
+        self.page.locator("#viewer").wait_for(state="hidden")
+
+        card.locator(".thumb").click()
+        self.page.locator("#viewer[open]").wait_for()
+        self.page.wait_for_function("document.querySelector('#viewer-media img.viewer-media')?.complete")
+        pane = self.page.locator("#viewer-media-pane")
+        box = pane.bounding_box()
+        self.page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        self.page.mouse.wheel(0, -240)
+        self.page.wait_for_function("new DOMMatrix(getComputedStyle(document.querySelector('#viewer-media img.viewer-media')).transform).a > 1")
+        image_box = self.page.locator("#viewer-media img.viewer-media").bounding_box()
+        self.page.mouse.move(image_box["x"] + image_box["width"] / 2, image_box["y"] + image_box["height"] / 2)
+        self.page.mouse.down()
+        self.page.mouse.move(image_box["x"] + image_box["width"] / 2 + 80, image_box["y"] + image_box["height"] / 2 + 40, steps=2)
+        self.page.mouse.up()
+        self.assertTrue(self.page.locator("#viewer[open]").count())
+        self.page.locator("#viewer-close").click()
+
+    def test_raw_inspector_fit_geometry_survives_preview_replacement_and_reset(self) -> None:
+        self.page.add_init_script("""
+          (() => {
+            const originalFetch = window.fetch.bind(window);
+            window.fetch = (input, init) => String(input).includes('raw-development-preview')
+              ? Promise.resolve(new Response(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="80" height="140"><rect width="80" height="140" fill="red"/></svg>'], {type:'image/svg+xml'}), {status:200, headers:{'X-RAW-White-Balance':'Camera/as-shot WB'}}))
+              : originalFetch(input, init);
+          })();
+        """)
+        self.page.goto(f"{self.base_url}/?workspace={self.raw_online_handle}", wait_until="domcontentloaded")
+        self.page.locator(".photo-card", has_text="initial.jpg").first.wait_for()
+        self.page.locator(".photo-card", has_text="initial.jpg").first.locator(".info-button").click()
+        self.page.locator("#details[open]").wait_for()
+        self.page.locator("#details .representation-row", has_text="initial.arw").first.locator("[data-representation-view]").click()
+        self.page.locator("#representation-comparison[open]").wait_for()
+        self.page.wait_for_function("document.querySelector('[data-raw-image]')?.complete && document.querySelector('[data-raw-image]').naturalWidth > 0")
+
+        def assert_fit() -> None:
+            geometry = self.page.evaluate("""() => {
+              const frame=document.querySelector('[data-raw-stage]').getBoundingClientRect();
+              const image=document.querySelector('[data-raw-image]').getBoundingClientRect();
+              return {frame:{left:frame.left,right:frame.right,top:frame.top,bottom:frame.bottom},image:{left:image.left,right:image.right,top:image.top,bottom:image.bottom}};
+            }""")
+            self.assertGreaterEqual(geometry["image"]["left"], geometry["frame"]["left"] - 1, geometry)
+            self.assertLessEqual(geometry["image"]["right"], geometry["frame"]["right"] + 1, geometry)
+            self.assertGreaterEqual(geometry["image"]["top"], geometry["frame"]["top"] - 1, geometry)
+            self.assertLessEqual(geometry["image"]["bottom"], geometry["frame"]["bottom"] + 1, geometry)
+
+        assert_fit()
+        self.page.locator("[data-raw-exposure]").evaluate("node => { node.value='1'; node.dispatchEvent(new Event('input', {bubbles:true})); }")
+        self.page.wait_for_function("document.querySelector('[data-raw-image]')?.complete && document.querySelector('[data-raw-image]').naturalWidth > 0")
+        assert_fit()
+        self.page.locator("[data-raw-reset]").click()
+        self.page.wait_for_function("document.querySelector('[data-raw-exposure]').value === '0'")
+        self.page.wait_for_function("document.querySelector('[data-raw-image]')?.complete && document.querySelector('[data-raw-image]').naturalWidth > 0")
+        assert_fit()
+        self.assertEqual(self.page.locator('[data-raw-reset-control="exposure_ev"] svg').count(), 1)
+        self.assertEqual(self.page.locator('[data-raw-reset-control="exposure_ev"]').get_attribute("aria-label"), "Reset exposure")
+
     def test_portrait_representation_comparison_geometry_and_difference_mode(self) -> None:
         self._open_main()
+        comparison_requests: list[str] = []
+        self.page.on("request", lambda request: comparison_requests.append(request.url) if "/comparison?" in request.url else None)
         self.page.locator(".photo-card", has_text="portrait.jpg").first.locator(".info-button").click()
         self.page.locator("#details[open]").wait_for()
         row = self.page.locator("#details .representation-row", has_text="portrait.jxl").first
         row.locator("[data-representation-view]").click()
         self.page.locator(".comparison-slider").wait_for()
         self.page.wait_for_function("[...document.querySelectorAll('.comparison-slider [data-comparison-image]')].every(image => image.complete && image.naturalWidth > 0)")
+        self.page.wait_for_function("!document.querySelector('[data-comparison-metrics]')?.innerText.includes('Calculating comparison')")
+        self.assertEqual(len(comparison_requests), 1)
         fit = self.page.evaluate("""() => {
           const frame=document.querySelector('[data-comparison-frame]').getBoundingClientRect();
           const images=[...document.querySelectorAll('.comparison-slider [data-comparison-image]')].map(image=>image.getBoundingClientRect());
@@ -503,8 +595,15 @@ class BrowserE2ETests(unittest.TestCase):
           const context=canvas.getContext('2d'); context.drawImage(image,0,0);
           return context.getImageData(0,0,canvas.width,canvas.height).data.every((value,index)=>index%4===3 || value===0);
         }"""))
+        self.assertIn("Pixel MSE", self.page.locator(".difference-legend").inner_text())
+        self.assertIn("Global MSE", self.page.locator("[data-comparison-metrics]").inner_text())
         self.page.locator('[data-compare-mode="slider"]').click()
         self.page.locator(".comparison-slider").wait_for()
+        self.page.locator('[data-compare-mode="side"]').click()
+        self.page.locator(".comparison-stage").wait_for()
+        self.page.locator('[data-compare-mode="slider"]').click()
+        self.page.locator(".comparison-slider").wait_for()
+        self.assertEqual(len(comparison_requests), 1)
         self.page.locator("[data-comparison-close]").click()
 
     def test_file_management_and_representation_comparison_workflow(self) -> None:

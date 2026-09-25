@@ -109,8 +109,9 @@ class SharedImageCamera {
     this.dragging = false;
     this.dragStart = null;
     this.panStart = null;
+    this.viewport.style.cursor = "";
   }
-  reset() { this.zoom = 1; this.panX = 0; this.panY = 0; this.apply(); }
+  reset() { this.zoom = 1; this.panX = 0; this.panY = 0; this.appliedZoom = 1; this.appliedPanX = 0; this.appliedPanY = 0; this.apply(); }
   frameEntries() {
     const values = this.getFrames ? this.getFrames() : (this.getImages?.() || []).map(image => ({image, frame: this.viewport}));
     return (values || []).map(value => {
@@ -121,13 +122,18 @@ class SharedImageCamera {
   setImages(images) { this.images = images || []; this.apply(); }
   frameForEvent(event) {
     const entries = this.frameEntries();
-    const targetImage = event.target.closest?.("img") || null;
-    const direct = entries.find(entry => entry.image === targetImage);
-    if (direct) return direct;
     return entries.find(entry => {
-      const rect = entry.frame.getBoundingClientRect();
-      return event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+      const frame = entry.frame.getBoundingClientRect();
+      const image = entry.image.getBoundingClientRect();
+      const left = Math.max(frame.left, image.left);
+      const right = Math.min(frame.right, image.right);
+      const top = Math.max(frame.top, image.top);
+      const bottom = Math.min(frame.bottom, image.bottom);
+      return right > left && bottom > top && event.clientX >= left && event.clientX <= right && event.clientY >= top && event.clientY <= bottom;
     }) || null;
+  }
+  updateCursor(event) {
+    this.viewport.style.cursor = this.zoom > 1 && this.frameForEvent(event) ? "grab" : "";
   }
   wheel(event) {
     const entry = this.frameForEvent(event);
@@ -160,7 +166,10 @@ class SharedImageCamera {
     this.apply();
   }
   pointerMove(event) {
-    if (!this.dragging) return;
+    if (!this.dragging) {
+      this.updateCursor(event);
+      return;
+    }
     event.preventDefault();
     this.panX = this.panStart.x + event.clientX - this.dragStart.x;
     this.panY = this.panStart.y + event.clientY - this.dragStart.y;
@@ -172,6 +181,7 @@ class SharedImageCamera {
     this.onChange({clickSuppressed: true});
     if (this.viewport.hasPointerCapture?.(event.pointerId)) this.viewport.releasePointerCapture(event.pointerId);
     this.apply();
+    this.updateCursor(event);
   }
   apply() {
     const entries = this.frameEntries();

@@ -178,6 +178,8 @@ def asset_detail(
                 "relationships": relationships.get(row["id"], []),
                 "representation_label": representation_label(row, relationships.get(row["id"], [])),
                 "size_bytes": row["size_bytes"],
+                "sha256": row["sha256"],
+                "mtime_ns": row["mtime_ns"],
                 "file_created_time": row["file_created_time"],
                 "is_online": bool(row["is_online"]),
                 "width": row["width"],
@@ -194,6 +196,8 @@ def asset_detail(
                 "original_url": _url(f"/api/files/{row['id']}/original", handle) if row["is_online"] and row["in_scope"] else None,
                 "thumbnail_url": _url(f"/api/files/{row['id']}/thumbnail", handle) if row["in_scope"] and row["thumbnail_status"] == "complete" and row["thumbnail_output_path"] and _valid_index_file(workspace, row["thumbnail_output_path"]) else None,
                 "display_preview_url": _url(f"/api/files/{row['id']}/preview", handle) if row["in_scope"] and row["display_preview_output_path"] and _valid_index_file(workspace, row["display_preview_output_path"]) else None,
+                "display_preview_version": row["display_preview_version"],
+                "display_preview_fingerprint": row["display_preview_fingerprint"],
                 "in_scope": bool(row["in_scope"]),
                 "components": {
                     "metadata": component_info(row, "metadata"),
@@ -237,6 +241,8 @@ def physical_rows(workspace: Workspace, asset_id: str):
                    thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
                    thumbnail.output_path AS thumbnail_output_path,
                    display_preview.output_path AS display_preview_output_path,
+                   display_preview.version AS display_preview_version,
+                   display_preview.input_fingerprint AS display_preview_fingerprint,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
@@ -268,6 +274,8 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
                    thumbnail.version AS thumbnail_version, thumbnail.error_message AS thumbnail_error,
                    thumbnail.output_path AS thumbnail_output_path,
                    display_preview.output_path AS display_preview_output_path,
+                   display_preview.version AS display_preview_version,
+                   display_preview.input_fingerprint AS display_preview_fingerprint,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf

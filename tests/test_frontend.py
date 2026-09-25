@@ -708,7 +708,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         ]};
         console.log(JSON.stringify(assetToViewerItem(asset)));
         '''
-        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True, encoding="utf-8", check=True)
         item = json.loads(result.stdout)
         self.assertEqual(item["preferred_physical_id"], "jpeg")
         self.assertEqual(item["filename"], "asset.JPG")

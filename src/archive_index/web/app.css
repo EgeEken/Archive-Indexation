@@ -112,7 +112,8 @@
     .meter { position: relative; display: block; height: .32rem; border-radius: 1rem; background: #3a444e; }
     .meter-fill { position: absolute; left: calc(var(--meter-position) - .22rem); top: -.16rem; width: .44rem; height: .64rem; border-radius: 50%; background: #9bb8d2; box-shadow: 0 0 0 1px #d0e0ed; }
     .meter-overflow { position: absolute; left: calc(var(--meter-position) - .2rem); top: -.55rem; color: #aeb8c1; font-size: .65rem; }
-    .hidden { display: none !important; }
+.hidden { display: none !important; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
     @media (max-width: 1200px) { .gallery { grid-template-columns: repeat(5, minmax(0, 1fr)); } .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 900px) { .gallery { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
     @media (max-width: 680px) { main { width: calc(100% - 1rem); margin-top: .7rem; } .app-header { align-items: flex-start; } nav { flex-wrap: wrap; justify-content: end; } .crumb { display: none; } .gallery { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; } .workspace-form { flex-wrap: wrap; } .workspace-form input, .workspace-form button { flex: 1 1 100%; } .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .viewer-stage { grid-template-columns: auto 1fr auto; padding: .3rem; gap: .25rem; } .viewer-bottom { flex-wrap: wrap; } }
@@ -171,7 +172,6 @@
 .viewer-stage { grid-template-columns: auto minmax(0, 1fr) auto; }
 .viewer-stage.info-open { grid-template-columns: auto minmax(0, 1fr) minmax(320px, 30vw) auto; }
 .viewer-media-pane { display: grid; place-items: center; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; position: relative; overscroll-behavior: contain; }
-.viewer-media-pane.zoomed { cursor: grab; }
 .viewer-media-pane.dragging { cursor: grabbing; }
 .viewer-media { user-select: none; }
 .viewer-media.viewer-video { width: 100%; height: 100%; max-width: 100%; max-height: calc(100dvh - 9rem); object-fit: contain; }
@@ -294,8 +294,14 @@
 .comparison-divider { position:absolute; top:0; bottom:0; z-index:3; width:2px; padding:0; border:0; background:#e9f5ff; cursor:ew-resize; transform:translateX(-1px); }
 .comparison-divider span { display:block; width:1.1rem; height:2.2rem; margin-left:-.55rem; border:1px solid #e9f5ff; border-radius:.3rem; background:#32678e; }
 .comparison-difference { min-height:22rem; display:grid; place-items:center; overflow:hidden; background:#0d1115; touch-action:none; cursor:grab; }
+.comparison-difference-layout { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.7rem; min-height:22rem; }
 .comparison-difference-frame { position:relative; display:grid; place-items:center; max-width:100%; max-height:58vh; }
 .comparison-difference-image { display:block; max-width:100%; max-height:58vh; object-fit:contain; transform-origin:center; user-select:none; image-rendering:auto; }
+.difference-legend { display:flex; align-items:center; gap:.35rem; padding:.5rem .2rem; color:#c6d2dc; font-size:.68rem; }
+.difference-legend-bar { position:relative; width:1.1rem; height:12rem; border:1px solid #7d8993; background:linear-gradient(to top,#050505,#3b0000,#ff0000); }
+.difference-legend-tick { position:absolute; left:100%; width:2.7rem; border-top:1px solid #9ca8b1; }
+.difference-legend-tick span { position:absolute; left:.25rem; top:-.55rem; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.difference-legend-title { writing-mode:vertical-rl; transform:rotate(180deg); color:#9faab5; }
 .comparison-wipe-label { position:absolute; z-index:4; top:.5rem; padding:.2rem .35rem; border-radius:.25rem; background:#101820cc; color:#eef7ff; font-size:.72rem; pointer-events:none; }
 .comparison-wipe-label-left { left:.5rem; }
 .comparison-wipe-label-right { right:.5rem; }
@@ -308,9 +314,9 @@
 .comparison-metric-mse { font-variant-numeric: tabular-nums; }
 .comparison-mode { display:flex; gap:.25rem; }
 .comparison-mode .active { background:#32678e; border-color:#8dcaf1; color:#fff; }
-.raw-inspection-stage { position:relative; min-height:24rem; display:grid; place-items:center; overflow:hidden; background:#0d1115; border-radius:.5rem; touch-action:none; cursor:grab; }
+.raw-inspection-stage { position:relative; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#0d1115; border-radius:.5rem; touch-action:none; cursor:grab; }
 .raw-inspection-stage:active { cursor:grabbing; }
-.raw-inspection-stage img { max-width:100%; max-height:100%; object-fit:contain; transform-origin:center; user-select:none; -webkit-user-drag:none; }
+.raw-inspection-stage img { display:block; width:auto; height:auto; max-width:100%; max-height:100%; object-fit:contain; transform-origin:center; user-select:none; -webkit-user-drag:none; }
 .raw-error { color:#f2b5b5; padding:1rem; }
 .raw-development-controls { display:grid; gap:.45rem; margin-top:.85rem; }
 .raw-development-status { display:flex; align-items:center; justify-content:space-between; gap:.7rem; min-height:1.25rem; color:#9faab5; font-size:.82rem; }
@@ -330,6 +336,10 @@
 .raw-inspection-dialog .raw-inspection-stage { min-width:0; min-height:0; height:100%; }
 .raw-inspection-dialog .raw-development-controls { min-width:0; min-height:0; max-height:100%; overflow:auto; overscroll-behavior:contain; padding-right:.25rem; }
 .raw-control-reset { grid-column:3; justify-self:end; padding:.2rem .4rem; font-size:.72rem; }
+.raw-control-reset { display:inline-flex; align-items:center; justify-content:center; width:1.7rem; height:1.55rem; min-height:0; padding:.2rem; border-color:#526575; background:#202a33; color:#9fb3c2; }
+.raw-control-reset svg { width:.9rem; height:.9rem; }
+.raw-control-reset:hover, .raw-control-reset:focus-visible { border-color:#8dcaf1; color:#dbeaf5; }
+.raw-reset-all { min-height:1.7rem; height:1.7rem; padding:.25rem .65rem; font-size:.76rem; }
 .raw-exposure-control { grid-template-columns:minmax(0,1fr) auto auto; }
 .raw-exposure-control > span { grid-column:1; }
 .raw-exposure-control output { grid-column:2; }

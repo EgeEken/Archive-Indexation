@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from archive_index.api.comparison import _mse, comparison_data
+from archive_index.api.comparison import _difference_map, _mse, comparison_data
 from archive_index.file_management import build_dry_run_plan, cancel_plan_analysis, list_presets, list_profiles, list_rulesets, plan_analysis_status, save_profile, save_ruleset, start_plan_analysis
 from archive_index.file_management_previews import _encode, bundled_preview_manifest, custom_profile_preview
 from archive_index.indexing.media_pipeline import index_workspace
@@ -261,6 +261,31 @@ class Phase10ASecondPassTests(unittest.TestCase):
         left.close()
         right.close()
 
+    def test_normalized_difference_map_uses_absolute_per_pixel_mse(self):
+        left = Image.new("RGB", (2, 2), (0, 0, 0))
+        right = Image.fromarray(np.array([[[0, 0, 0], [3, 0, 0]], [[0, 6, 0], [0, 0, 9]]], dtype=np.uint8))
+        difference, mse, maximum = _difference_map(left, right)
+        pixels = np.asarray(difference)
+        self.assertAlmostEqual(mse, (0 + 3 + 12 + 27) / 4)
+        self.assertEqual(maximum, 27)
+        self.assertEqual(pixels[0, 0].tolist(), [0, 0, 0])
+        self.assertEqual(pixels[1, 1].tolist(), [255, 0, 0])
+        self.assertTrue(0 < pixels[0, 1, 0] < pixels[1, 0, 0] < pixels[1, 1, 0])
+        difference.close()
+        left.close()
+        right.close()
+
+    def test_identical_difference_map_is_black_with_zero_metrics(self):
+        left = Image.new("RGB", (3, 2), (80, 120, 160))
+        right = left.copy()
+        difference, mse, maximum = _difference_map(left, right)
+        self.assertEqual(mse, 0)
+        self.assertEqual(maximum, 0)
+        self.assertTrue(np.array_equal(np.asarray(difference), np.zeros((2, 3, 3), dtype=np.uint8)))
+        difference.close()
+        left.close()
+        right.close()
+
     def test_builtins_expose_three_quality_profiles_and_refresh_code_rules(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace.create(Path(directory))
@@ -358,7 +383,32 @@ class Phase10ASecondPassTests(unittest.TestCase):
             result = comparison_data(workspace, ids[0], ids[1], "workspace")
             self.assertIsNotNone(result["metrics"]["mse"])
             self.assertIn("byte_identical", result["metrics"])
-            self.assertIn("comparison-preview", result["left"]["preview_url"])
+            self.assertIn("/original", result["left"]["preview_url"])
+            self.assertTrue("/preview" in result["right"]["preview_url"] or "comparison-preview" in result["right"]["preview_url"])
+
+    def test_comparison_cache_avoids_redecoding_an_unchanged_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (20, 30), (80, 120, 160)).save(root / "photo.png")
+            Image.new("RGB", (20, 30), (80, 120, 160)).save(root / "other.png")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                rows = connection.execute("SELECT id, logical_asset_id FROM physical_file ORDER BY relative_path").fetchall()
+                connection.execute("UPDATE physical_file SET logical_asset_id = ? WHERE id = ?", (rows[0]["logical_asset_id"], rows[1]["id"]))
+                connection.commit()
+            finally:
+                connection.close()
+            from archive_index.api import comparison as comparison_module
+            with patch.object(comparison_module, "_decode", wraps=comparison_module._decode) as decoder:
+                first = comparison_data(workspace, rows[0]["id"], rows[1]["id"], "workspace")
+                second = comparison_data(workspace, rows[0]["id"], rows[1]["id"], "workspace")
+            self.assertFalse(first["cache_hit"])
+            self.assertTrue(second["cache_hit"])
+            self.assertEqual(decoder.call_count, 2)
+            self.assertIn("total", first["timings_ms"])
+            self.assertTrue(second["timings_ms"]["total"] <= first["timings_ms"]["total"])
 
     def test_byte_identical_pair_is_explicitly_marked(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -421,10 +471,14 @@ class Phase10ASecondPassTests(unittest.TestCase):
                 pixels = np.asarray(diff)
             self.assertEqual(pixels.shape, (12, 16, 3))
             self.assertTrue(np.array_equal(pixels[0, 0], [0, 0, 0]))
-            self.assertTrue(np.any(pixels[4, 7] > 0))
+            self.assertEqual(pixels[4, 7].tolist(), [255, 0, 0])
             self.assertGreater(unequal["metrics"]["mse"], 0)
+            expected_max = (120 ** 2 + 40 ** 2 + 8 ** 2) / 3
+            self.assertEqual(unequal["metrics"]["max_pixel_mse"], round(expected_max, 6))
+            self.assertEqual(unequal["metrics"]["mse"], round(expected_max / (12 * 16), 6))
             identical_pixels = np.asarray(Image.open(BytesIO(base64.b64decode(identical["difference_data_url"].split(",", 1)[1]))))
             self.assertFalse(np.any(identical_pixels))
+            self.assertEqual(identical["metrics"]["max_pixel_mse"], 0)
 
     def test_lar_iqa_preparation_uses_canonical_loader(self):
         provider = object.__new__(LARIQAProvider)

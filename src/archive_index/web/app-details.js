@@ -62,6 +62,51 @@ function openOfflineRepresentation(file) {
 function representationPreviewUrl(fileId) { return apiPath(`/api/files/${encodeURIComponent(fileId)}/comparison-preview`); }
 const displayPreviewUrl = file => file.display_preview_url || file.thumbnail_url || file.original_url;
 const showViewerForRepresentation = (asset, file) => ({...assetToViewerItem(asset), filename: file.filename, preferred_physical_id: file.id, display_url: displayPreviewUrl(file)});
+const comparisonDataCache = new Map();
+const MAX_COMPARISON_DATA_CACHE = 6;
+
+function comparisonFingerprint(file) {
+  return [file.id, file.relative_path, file.size_bytes, file.mtime_ns, file.sha256, file.width, file.height, file.display_preview_version, file.display_preview_fingerprint];
+}
+
+function comparisonPairKey(compressed, reference) {
+  return JSON.stringify(["comparison-v2", comparisonFingerprint(reference), comparisonFingerprint(compressed)]);
+}
+
+function comparisonDisplayData(compressed, reference) {
+  const pairKey = comparisonPairKey(compressed, reference);
+  const representation = file => ({
+    id: file.id,
+    filename: file.filename,
+    format: String(file.extension || "").replace(".", "").toUpperCase(),
+    size_bytes: file.size_bytes,
+    width: file.width,
+    height: file.height,
+    preview_url: file.display_preview_url || file.original_url || file.thumbnail_url || representationPreviewUrl(file.id),
+  });
+  return {
+    pairKey,
+    reference: representation(reference),
+    compressed: representation(compressed),
+    metrics: null,
+    difference_data_url: null,
+    same_dimensions: reference.width === compressed.width && reference.height === compressed.height,
+  };
+}
+
+function readComparisonCache(key) {
+  const data = comparisonDataCache.get(key);
+  if (!data) return null;
+  comparisonDataCache.delete(key);
+  comparisonDataCache.set(key, data);
+  return data;
+}
+
+function writeComparisonCache(key, data) {
+  comparisonDataCache.delete(key);
+  comparisonDataCache.set(key, data);
+  while (comparisonDataCache.size > MAX_COMPARISON_DATA_CACHE) comparisonDataCache.delete(comparisonDataCache.keys().next().value);
+}
 
 function comparisonMseColor(value) {
   const stops = [[0, [121, 216, 155]], [50, [226, 199, 85]], [100, [232, 110, 110]]];
@@ -84,8 +129,15 @@ function disposeRepresentationDialog(dialog) {
   dialog._comparisonCamera = null;
   dialog._rawCamera = null;
   dialog._comparisonData = null;
+  dialog._comparisonDisplayData = null;
+  dialog._comparisonDisplayError = false;
+  dialog._comparisonViews = null;
   dialog._comparisonDataKey = null;
   dialog._comparisonPairKey = null;
+  dialog._comparisonMode = null;
+  dialog._comparisonRequestToken = (dialog._comparisonRequestToken || 0) + 1;
+  dialog._comparisonAbort?.abort();
+  dialog._comparisonAbort = null;
   dialog._previewData = null;
   dialog._rawGeneration = (dialog._rawGeneration || 0) + 1;
   dialog._rawAbort?.abort();
@@ -129,7 +181,12 @@ function openRepresentationInspection(asset, fileId) {
     dialog.querySelectorAll("[data-compare-mode]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
     renderRepresentationComparison(asset, fileId, target.id, button.dataset.compareMode);
   }));
-  if (comparisonOnly) renderRepresentationComparison(asset, fileId, target.id, "slider");
+  if (comparisonOnly) {
+    const initialData = comparisonDisplayData(file, target);
+    dialog._comparisonDisplayData = initialData;
+    renderRepresentationComparison(asset, fileId, target.id, "slider", initialData);
+    loadRepresentationComparisonMetrics(asset, fileId, target.id, initialData);
+  }
 }
 
 function isCompressedRepresentation(file) {
@@ -139,6 +196,13 @@ function isCompressedRepresentation(file) {
 function comparisonFactor(value) {
   const number = Number(value);
   return number.toFixed(number < 1.01 ? 3 : 2).replace(/\.?0+$/, "");
+}
+function comparisonNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "0";
+  if (Math.abs(number) >= 1000) return number.toLocaleString(undefined, {maximumFractionDigits: 2});
+  if (Math.abs(number) >= 1) return number.toFixed(3).replace(/\.?0+$/, "");
+  return number.toPrecision(6).replace(/0+$/, "").replace(/\.$/, "");
 }
 function comparisonMetricsMarkup(metrics, comparedFile) {
   const referenceBytes = Number(metrics.reference_bytes || 0);
@@ -150,42 +214,76 @@ function comparisonMetricsMarkup(metrics, comparedFile) {
       : `${comparisonFactor(comparedBytes / referenceBytes)}× larger`;
   const comparedLabel = isCompressedRepresentation(comparedFile) ? "Compressed" : "Compared";
   const percent = metrics.compressed_percent == null ? "Unavailable" : `${metrics.compressed_percent}% of reference`;
-  const mse = metrics.mse == null ? `<span class="comparison-metric-mse">MSE Unavailable</span>` : `<span class="comparison-metric-mse" style="color:${escapeHtml(comparisonMseColor(metrics.mse))}">MSE ${escapeHtml(metrics.mse)}</span>`;
+  const mse = metrics.mse == null ? `<span class="comparison-metric-mse">Global MSE unavailable</span>` : `<span class="comparison-metric-mse" style="color:${escapeHtml(comparisonMseColor(metrics.mse))}">Global MSE ${escapeHtml(comparisonNumber(metrics.mse))}</span>`;
+  const maxPixelMse = metrics.max_pixel_mse == null ? "" : `<span class="comparison-metric-max">Max pixel MSE ${escapeHtml(comparisonNumber(metrics.max_pixel_mse))}</span>`;
   const identity = metrics.byte_identical ? "Exact duplicate of preferred representation" : metrics.pixel_identical ? "Pixel-identical to preferred representation" : "";
   const parts = [`Reference ${escapeHtml(formatBytes(referenceBytes))} → ${comparedLabel} ${escapeHtml(formatBytes(comparedBytes))}`, `<span class="comparison-metric-ratio">${escapeHtml(sizeLabel)}</span>`, `<span class="comparison-metric-percent">${escapeHtml(percent)}</span>`, mse];
-  return `${identity ? `<div class="comparison-metric-identity">${identity}</div>` : ""}<div class="comparison-metric-row">${parts.join(" · ")}</div>`;
+  return `${identity ? `<div class="comparison-metric-identity">${identity}</div>` : ""}<div class="comparison-metric-row">${parts.join(" · ")} ${maxPixelMse ? ` · ${maxPixelMse}` : ""}</div>`;
 }
 
 function comparisonLabel(file) { return `${escapeHtml(file.filename)} · ${escapeHtml(formatBytes(file.size_bytes))}`; }
 
+function differenceLegendMarkup(metrics) {
+  const maximum = Number(metrics?.max_pixel_mse);
+  if (!Number.isFinite(maximum)) return "";
+  const ticks = [0, .25, .5, .75, 1].map(fraction => `<div class="difference-legend-tick" style="bottom:${fraction * 100}%"><span>${escapeHtml(comparisonNumber(maximum * fraction))}</span></div>`).join("");
+  return `<aside class="difference-legend" aria-label="Absolute pixel MSE scale"><div class="difference-legend-bar">${ticks}</div><div class="difference-legend-title">Pixel MSE</div></aside>`;
+}
+
+function comparisonViewMarkup(data, mode) {
+  const reference = data.reference || data.left;
+  const compressed = data.compressed || data.right;
+  const referenceLabel = comparisonLabel(reference);
+  const compressedLabel = comparisonLabel(compressed);
+  if (mode === "slider") return `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-frame" data-comparison-frame><img class="comparison-slider-sizer" src="${escapeHtml(reference.preview_url)}" alt="" aria-hidden="true"><div class="comparison-slider-base"><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button></div><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>`;
+  if (mode === "difference") {
+    const image = data.difference_data_url ? `<img class="comparison-difference-image" data-comparison-image src="${escapeHtml(data.difference_data_url)}" alt="Normalized per-pixel squared-error map">` : data.same_dimensions ? `<p class="comparison-unavailable" data-comparison-pending>Calculating difference…</p>` : `<p class="comparison-unavailable">Difference is unavailable because representation dimensions differ.</p>`;
+    return `<div class="comparison-difference-layout"><div class="comparison-difference" data-comparison-viewport><div class="comparison-difference-frame"><span class="comparison-wipe-label comparison-wipe-label-left">Normalized pixel error · black = identical</span>${image}</div></div>${differenceLegendMarkup(data.metrics)}</div>`;
+  }
+  return `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
+}
+
+function recordComparisonTiming(dialog, entry) {
+  dialog._comparisonTimings = [...(dialog._comparisonTimings || []), {...entry, at: performance.now()}].slice(-32);
+}
+
 async function renderRepresentationComparison(asset, compressedId, referenceId, mode = "slider", suppliedData = null) {
+  const renderStarted = performance.now();
   const dialog = $("representation-comparison");
   const result = dialog.querySelector("[data-comparison-result]");
   if (!result) return;
-  const pairKey = suppliedData ? `preview:${suppliedData.profile_id || suppliedData.profile_name}` : `${referenceId}:${compressedId}`;
+  const pairKey = suppliedData?.pairKey || (suppliedData?.profile_id || suppliedData?.profile_name ? `preview:${suppliedData.profile_id || suppliedData.profile_name}` : dialog._comparisonPairKey || `${referenceId}:${compressedId}`);
   const samePair = dialog._comparisonPairKey === pairKey;
   const previousCamera = samePair ? dialog._comparisonCamera : null;
   const cameraState = previousCamera ? {zoom: previousCamera.zoom, panX: previousCamera.panX, panY: previousCamera.panY} : null;
-  const requestToken = (dialog._comparisonRequestToken || 0) + 1;
-  dialog._comparisonRequestToken = requestToken;
+  dialog._comparisonPairKey = pairKey;
+  dialog._comparisonMode = mode;
   try {
-    const dataKey = suppliedData ? pairKey : `${compressedId}:${referenceId}`;
-    const data = suppliedData || (dialog._comparisonDataKey === dataKey ? dialog._comparisonData : await api(`/api/files/${encodeURIComponent(compressedId)}/comparison?with_id=${encodeURIComponent(referenceId)}`));
-    if (dialog._comparisonRequestToken !== requestToken) return;
-    dialog._comparisonData = data;
-    dialog._comparisonDataKey = dataKey;
-    dialog._comparisonPairKey = pairKey;
+    const data = suppliedData || dialog._comparisonData || dialog._comparisonDisplayData;
+    if (!data) throw new Error("Comparison data is unavailable.");
+    if (data.metrics) dialog._comparisonData = data;
+    if (data.pairKey) dialog._comparisonDataKey = data.pairKey;
     const metrics = data.metrics || {};
     const reference = data.reference || data.left;
     const compressed = data.compressed || data.right;
     const headerMetrics = dialog.querySelector("[data-comparison-metrics]");
-    if (headerMetrics) headerMetrics.innerHTML = comparisonMetricsMarkup(metrics, compressed);
-    const referenceLabel = comparisonLabel(reference);
-    const compressedLabel = comparisonLabel(compressed);
-    const stage = mode === "slider" ? `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-frame" data-comparison-frame><img class="comparison-slider-sizer" src="${escapeHtml(reference.preview_url)}" alt="" aria-hidden="true"><div class="comparison-slider-base"><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button></div><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>` : mode === "difference" ? `<div class="comparison-difference" data-comparison-viewport><div class="comparison-difference-frame"><span class="comparison-wipe-label comparison-wipe-label-left">Absolute RGB difference · black = identical</span>${data.difference_data_url ? `<img class="comparison-difference-image" data-comparison-image src="${escapeHtml(data.difference_data_url)}" alt="Per-pixel absolute RGB difference">` : `<p class="comparison-unavailable">Difference is unavailable because representation dimensions differ.</p>`}</div></div>` : `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
+    if (!samePair) {
+      dialog._comparisonViews = new Map();
+      dialog._comparisonDisplayError = false;
+    }
+    if (headerMetrics) headerMetrics.innerHTML = dialog._comparisonDisplayError ? "Comparison display unavailable" : data.metrics ? comparisonMetricsMarkup(metrics, compressed) : "Calculating comparison…";
+    if (data.metrics?.difference_data_url && dialog._comparisonViews?.has("difference")) dialog._comparisonViews.delete("difference");
+    const views = dialog._comparisonViews || (dialog._comparisonViews = new Map());
+    let view = views.get(mode);
+    if (!view) {
+      const template = document.createElement("template");
+      template.innerHTML = comparisonViewMarkup(data, mode);
+      view = template.content.firstElementChild;
+      views.set(mode, view);
+    }
     dialog._comparisonCamera?.destroy();
     dialog._comparisonCamera = null;
-    result.innerHTML = stage;
+    result.replaceChildren(view);
     const viewport = result.querySelector("[data-comparison-viewport]");
     const camera = new SharedImageCamera({
       viewport,
@@ -199,7 +297,23 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
     dialog._comparisonCamera = camera;
     if (cameraState) Object.assign(camera, cameraState);
     camera.setImages([...result.querySelectorAll("[data-comparison-image]")]);
-    result.querySelectorAll("img").forEach(image => image.addEventListener("load", () => camera.apply(), {once: true}));
+    result.querySelectorAll("img").forEach(image => {
+      if (image._comparisonLoadHandler) image.removeEventListener("load", image._comparisonLoadHandler);
+      if (image._comparisonErrorHandler) image.removeEventListener("error", image._comparisonErrorHandler);
+      clearTimeout(image._comparisonTimeout);
+      image._comparisonLoadHandler = () => { clearTimeout(image._comparisonTimeout); camera.apply(); };
+      image._comparisonErrorHandler = () => {
+        clearTimeout(image._comparisonTimeout);
+        if (!image.isConnected || dialog._comparisonPairKey !== pairKey) return;
+        dialog._comparisonDisplayError = true;
+        const header = dialog.querySelector("[data-comparison-metrics]");
+        if (header) header.textContent = "Comparison display unavailable";
+      };
+      image.addEventListener("load", image._comparisonLoadHandler);
+      image.addEventListener("error", image._comparisonErrorHandler);
+      image._comparisonTimeout = setTimeout(() => { if (image.isConnected && (!image.complete || !image.naturalWidth)) image._comparisonErrorHandler(); }, 15000);
+      if (image.complete) image.naturalWidth ? camera.apply() : image._comparisonErrorHandler();
+    });
     const wipe = result.querySelector("[data-wipe-top]");
     const handle = result.querySelector("[data-wipe-handle]");
     if (wipe && handle) {
@@ -211,19 +325,66 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
         handle.setAttribute("aria-valuenow", String(Math.round(position)));
       };
       setWipe(samePair && dialog._comparisonWipePosition != null ? dialog._comparisonWipePosition : 50);
-      let wiping = false;
-      handle.addEventListener("pointerdown", event => { wiping = true; handle.setPointerCapture(event.pointerId); event.preventDefault(); });
-      handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = result.querySelector("[data-comparison-frame]").getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
-      ["pointerup", "pointercancel"].forEach(name => handle.addEventListener(name, () => { wiping = false; }));
-      handle.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); setWipe(Number(handle.getAttribute("aria-valuenow")) + (event.key === "ArrowRight" ? 5 : -5)); });
+      if (!view._wipeBound) {
+        let wiping = false;
+        handle.addEventListener("pointerdown", event => { wiping = true; handle.setPointerCapture(event.pointerId); event.preventDefault(); });
+        handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = result.querySelector("[data-comparison-frame]").getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
+        ["pointerup", "pointercancel"].forEach(name => handle.addEventListener(name, () => { wiping = false; }));
+        handle.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); setWipe(Number(handle.getAttribute("aria-valuenow")) + (event.key === "ArrowRight" ? 5 : -5)); });
+        view._wipeBound = true;
+      }
     }
+    recordComparisonTiming(dialog, {kind: samePair ? "mode-switch" : "render", mode, pairKey, cache: Boolean(data.metrics), render_ms: roundTiming(performance.now() - renderStarted)});
   } catch (error) {
-    if (dialog._comparisonRequestToken !== requestToken) return;
     const headerMetrics = dialog.querySelector("[data-comparison-metrics]");
     if (headerMetrics) headerMetrics.textContent = "Comparison unavailable";
     result.innerHTML = `<p class="error">Comparison unavailable: ${escapeHtml(error.message)}</p>`;
   }
 }
+
+async function loadRepresentationComparisonMetrics(asset, compressedId, referenceId, initialData) {
+  const dialog = $("representation-comparison");
+  const pairKey = initialData.pairKey;
+  const cached = readComparisonCache(pairKey);
+  if (cached) {
+    dialog._comparisonData = cached;
+    await renderRepresentationComparison(asset, compressedId, referenceId, dialog._comparisonMode || "slider", cached);
+    recordComparisonTiming(dialog, {kind: "metrics", pairKey, cache: "frontend", total: 0});
+    return;
+  }
+  const requestToken = (dialog._comparisonRequestToken || 0) + 1;
+  dialog._comparisonRequestToken = requestToken;
+  dialog._comparisonAbort?.abort();
+  const controller = new AbortController();
+  dialog._comparisonAbort = controller;
+  const started = performance.now();
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
+  try {
+    const data = await api(`/api/files/${encodeURIComponent(compressedId)}/comparison?with_id=${encodeURIComponent(referenceId)}`, {signal: controller.signal});
+    if (dialog._comparisonRequestToken !== requestToken || controller.signal.aborted || dialog._comparisonPairKey !== pairKey) return;
+    data.pairKey = pairKey;
+    writeComparisonCache(pairKey, data);
+    dialog._comparisonData = data;
+    const mode = dialog._comparisonMode || "slider";
+    if (mode === "difference") dialog._comparisonViews?.delete("difference");
+    await renderRepresentationComparison(asset, compressedId, referenceId, mode, data);
+    recordComparisonTiming(dialog, {kind: "metrics", pairKey, cache: data.cache_hit ? "backend" : "miss", frontend_total: roundTiming(performance.now() - started), backend: data.timings_ms || null});
+  } catch (error) {
+    if ((error.name === "AbortError" && !timedOut) || dialog._comparisonRequestToken !== requestToken) return;
+    if (dialog._comparisonPairKey === pairKey) {
+      const header = dialog.querySelector("[data-comparison-metrics]");
+      if (header) header.textContent = "Comparison unavailable";
+      const result = dialog.querySelector("[data-comparison-result]");
+      if (result && dialog._comparisonMode === "difference") result.innerHTML = `<p class="error">Comparison unavailable: ${escapeHtml(error.message)}</p>`;
+    }
+  } finally {
+    clearTimeout(timeout);
+    if (dialog._comparisonRequestToken === requestToken) dialog._comparisonAbort = null;
+  }
+}
+
+function roundTiming(value) { return Math.round(value * 1000) / 1000; }
 
 async function openCompressionProfilePreview(profile) {
   if (!profile || !["jpeg-xl", "avif"].includes(profile.codec)) return;
@@ -290,7 +451,9 @@ function openRawInspection(asset, fileId) {
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
   dialog.classList.add("raw-inspection-dialog");
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><div class="raw-development-controls"><div class="raw-development-status"><span data-raw-wb-status>Camera/as-shot white balance when available</span><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-value>+0.00 EV</output><button type="button" class="raw-control-reset" data-raw-reset-control="exposure_ev">Reset</button><input data-raw-exposure type="range" min="-5" max="5" step="0.5" value="0" aria-label="RAW exposure"></label><label class="raw-exposure-control"><span>White balance</span><output data-raw-wb-value>Camera</output><button type="button" class="raw-control-reset" data-raw-reset-control="white_balance">Reset</button><small>Cool ← Camera → Warm</small><input data-raw-white-balance type="range" min="-100" max="100" step="5" value="0" aria-label="White balance"></label><label class="raw-exposure-control"><span>Saturation</span><output data-raw-saturation-value>100%</output><button type="button" class="raw-control-reset" data-raw-reset-control="saturation">Reset</button><input data-raw-saturation type="range" min="50" max="150" step="5" value="100" aria-label="Saturation"></label><label class="raw-exposure-control"><span>Highlights</span><output data-raw-highlights-value>0</output><button type="button" class="raw-control-reset" data-raw-reset-control="highlights">Reset</button><input data-raw-highlights type="range" min="-100" max="100" step="5" value="0" aria-label="Highlights"></label><label class="raw-exposure-control"><span>Shadows</span><output data-raw-shadows-value>0</output><button type="button" class="raw-control-reset" data-raw-reset-control="shadows">Reset</button><input data-raw-shadows type="range" min="-100" max="100" step="5" value="0" aria-label="Shadows"></label><button type="button" class="secondary" data-raw-reset>Reset all</button></div></div>`;
+  const resetIcon = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 11a8 8 0 1 0 2.3-5.6L4 7.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 4.5v3.2h3.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const resetButton = name => `<button type="button" class="raw-control-reset" data-raw-reset-control="${name}" aria-label="Reset ${name.replace("_ev", "").replace("_", " ")}" title="Reset ${name.replace("_ev", "").replace("_", " ")}">${resetIcon}</button>`;
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><div class="raw-development-controls"><div class="raw-development-status"><span class="sr-only" data-raw-wb-status aria-live="polite">Camera/as-shot white balance when available</span><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-value>+0.00 EV</output>${resetButton("exposure_ev")}<input data-raw-exposure type="range" min="-5" max="5" step="0.5" value="0" aria-label="RAW exposure"></label><label class="raw-exposure-control"><span>White balance</span><output data-raw-wb-value>Camera</output>${resetButton("white_balance")}<small>Cool ← Camera → Warm</small><input data-raw-white-balance type="range" min="-100" max="100" step="5" value="0" aria-label="White balance"></label><label class="raw-exposure-control"><span>Saturation</span><output data-raw-saturation-value>100%</output>${resetButton("saturation")}<input data-raw-saturation type="range" min="50" max="150" step="5" value="100" aria-label="Saturation"></label><label class="raw-exposure-control"><span>Highlights</span><output data-raw-highlights-value>0</output>${resetButton("highlights")}<input data-raw-highlights type="range" min="-100" max="100" step="5" value="0" aria-label="Highlights"></label><label class="raw-exposure-control"><span>Shadows</span><output data-raw-shadows-value>0</output>${resetButton("shadows")}<input data-raw-shadows type="range" min="-100" max="100" step="5" value="0" aria-label="Shadows"></label><button type="button" class="secondary raw-reset-all" data-raw-reset>Reset all</button></div></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
@@ -323,7 +486,6 @@ function openRawInspection(asset, fileId) {
   };
   const camera = new SharedImageCamera({viewport: stage, getFrames: () => [{image, frame: stage}], onChange: change => { image.style.imageRendering = change.zoom > 1 ? "pixelated" : "auto"; }});
   dialog._rawCamera = camera;
-  camera.setImages([image]);
   let timer = null;
   const load = async () => {
     const generation = (dialog._rawGeneration || 0) + 1;
@@ -343,7 +505,21 @@ function openRawInspection(asset, fileId) {
       const url = URL.createObjectURL(blob);
       const previous = image.dataset.objectUrl;
       image.dataset.objectUrl = url;
-      image.onload = () => { camera.apply(); if (previous) URL.revokeObjectURL(previous); };
+      image.onload = () => {
+        if (generation !== dialog._rawGeneration || controller.signal.aborted) return;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (generation !== dialog._rawGeneration || controller.signal.aborted) return;
+          camera.setImages([image]);
+          if (camera.zoom === 1) camera.reset(); else camera.apply();
+          if (previous) URL.revokeObjectURL(previous);
+        }));
+      };
+      image.onerror = () => {
+        if (generation !== dialog._rawGeneration || controller.signal.aborted) return;
+        image.classList.add("hidden");
+        errorNode.textContent = "RAW preview could not be decoded.";
+        errorNode.classList.remove("hidden");
+      };
       image.src = url;
       image.classList.remove("hidden");
     } catch (error) {
