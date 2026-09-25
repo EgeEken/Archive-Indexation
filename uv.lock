@@ -17,6 +17,8 @@ source = { editable = "." }
 dependencies = [
     { name = "imagecodecs", version = "2026.3.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-18-archive-indexation-quality-lar-cpu' and extra == 'extra-18-archive-indexation-quality-lar-cuda')" },
     { name = "imagecodecs", version = "2026.8.16", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-18-archive-indexation-quality-lar-cpu' and extra == 'extra-18-archive-indexation-quality-lar-cuda')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-18-archive-indexation-quality-lar-cpu' and extra == 'extra-18-archive-indexation-quality-lar-cuda')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-18-archive-indexation-quality-lar-cpu' and extra == 'extra-18-archive-indexation-quality-lar-cuda')" },
     { name = "pillow" },
 ]
 
@@ -58,6 +60,7 @@ requires-dist = [
     { name = "efficient-kan", marker = "extra == 'quality-lar-cpu'", git = "https://github.com/Blealtan/efficient-kan.git?rev=7b6ce1c87f18c8bc90c208f6b494042344216b11" },
     { name = "efficient-kan", marker = "extra == 'quality-lar-cuda'", git = "https://github.com/Blealtan/efficient-kan.git?rev=7b6ce1c87f18c8bc90c208f6b494042344216b11" },
     { name = "imagecodecs", specifier = ">=2025.11,<2027" },
+    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "numpy", marker = "extra == 'embeddings'", specifier = ">=1.26,<3" },
     { name = "numpy", marker = "extra == 'quality-lar-cpu'", specifier = ">=1.26,<3" },
     { name = "numpy", marker = "extra == 'quality-lar-cuda'", specifier = ">=1.26,<3" },

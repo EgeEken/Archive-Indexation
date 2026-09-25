@@ -64,13 +64,17 @@ const displayPreviewUrl = file => file.display_preview_url || file.thumbnail_url
 const showViewerForRepresentation = (asset, file) => ({...assetToViewerItem(asset), filename: file.filename, preferred_physical_id: file.id, display_url: displayPreviewUrl(file)});
 const comparisonDataCache = new Map();
 const MAX_COMPARISON_DATA_CACHE = 6;
+const differenceDataCache = new Map();
+const MAX_DIFFERENCE_DATA_CACHE = 4;
+const MAX_DIFFERENCE_DATA_CACHE_BYTES = 32 * 1024 * 1024;
+let differenceDataCacheBytes = 0;
 
 function comparisonFingerprint(file) {
   return [file.id, file.relative_path, file.size_bytes, file.mtime_ns, file.sha256, file.width, file.height, file.display_preview_version, file.display_preview_fingerprint];
 }
 
 function comparisonPairKey(compressed, reference) {
-  return JSON.stringify(["comparison-v2", comparisonFingerprint(reference), comparisonFingerprint(compressed)]);
+  return JSON.stringify(["comparison-metrics-v3", state.workspace || "", comparisonFingerprint(reference), comparisonFingerprint(compressed)]);
 }
 
 function comparisonDisplayData(compressed, reference) {
@@ -108,11 +112,38 @@ function writeComparisonCache(key, data) {
   while (comparisonDataCache.size > MAX_COMPARISON_DATA_CACHE) comparisonDataCache.delete(comparisonDataCache.keys().next().value);
 }
 
+function readDifferenceCache(key) {
+  const data = differenceDataCache.get(key);
+  if (!data) return null;
+  differenceDataCache.delete(key);
+  differenceDataCache.set(key, data);
+  return data;
+}
+
+function writeDifferenceCache(key, data) {
+  if (data.size > MAX_DIFFERENCE_DATA_CACHE_BYTES) return false;
+  const previous = differenceDataCache.get(key);
+  if (previous) differenceDataCacheBytes -= previous.size;
+  differenceDataCache.delete(key);
+  differenceDataCache.set(key, data);
+  differenceDataCacheBytes += data.size;
+  while (differenceDataCache.size > MAX_DIFFERENCE_DATA_CACHE || differenceDataCacheBytes > MAX_DIFFERENCE_DATA_CACHE_BYTES) {
+    const oldestKey = differenceDataCache.keys().next().value;
+    const oldest = differenceDataCache.get(oldestKey);
+    differenceDataCache.delete(oldestKey);
+    differenceDataCacheBytes -= oldest.size;
+    URL.revokeObjectURL(oldest.url);
+  }
+  return true;
+}
+
 function comparisonMseColor(value) {
   const stops = [[0, [121, 216, 155]], [50, [226, 199, 85]], [100, [232, 110, 110]]];
   const mse = Math.max(0, Number(value));
+  if (mse >= stops.at(-1)[0]) return `rgb(${stops.at(-1)[1].join(",")})`;
   const upper = stops.findIndex(stop => mse <= stop[0]);
-  if (upper <= 0) return `rgb(${stops[0][1].join(",")})`;
+  if (upper < 0) return `rgb(${stops.at(-1)[1].join(",")})`;
+  if (upper === 0) return `rgb(${stops[0][1].join(",")})`;
   const lower = stops[upper - 1] || stops.at(-1);
   const high = stops[upper] || stops.at(-1);
   const ratio = Math.max(0, Math.min(1, (mse - lower[0]) / (high[0] - lower[0] || 1)));
@@ -124,6 +155,8 @@ function disposeRepresentationDialog(dialog) {
   dialog.classList.remove("raw-inspection-dialog");
   const rawImage = dialog.querySelector("[data-raw-image]");
   if (rawImage?.dataset.objectUrl) URL.revokeObjectURL(rawImage.dataset.objectUrl);
+  for (const url of dialog._ephemeralDifferenceUrls || []) URL.revokeObjectURL(url);
+  dialog._ephemeralDifferenceUrls = [];
   dialog._comparisonCamera?.destroy();
   dialog._rawCamera?.destroy();
   dialog._comparisonCamera = null;
@@ -138,6 +171,12 @@ function disposeRepresentationDialog(dialog) {
   dialog._comparisonRequestToken = (dialog._comparisonRequestToken || 0) + 1;
   dialog._comparisonAbort?.abort();
   dialog._comparisonAbort = null;
+  dialog._differenceRequestToken = (dialog._differenceRequestToken || 0) + 1;
+  dialog._differenceAbort?.abort();
+  dialog._differenceAbort = null;
+  dialog._differencePromise = null;
+  dialog._differencePairKey = null;
+  dialog._comparisonDifferenceError = null;
   dialog._previewData = null;
   dialog._rawGeneration = (dialog._rawGeneration || 0) + 1;
   dialog._rawAbort?.abort();
@@ -226,8 +265,12 @@ function comparisonLabel(file) { return `${escapeHtml(file.filename)} · ${escap
 function differenceLegendMarkup(metrics) {
   const maximum = Number(metrics?.max_pixel_mse);
   if (!Number.isFinite(maximum)) return "";
-  const ticks = [0, .25, .5, .75, 1].map(fraction => `<div class="difference-legend-tick" style="bottom:${fraction * 100}%"><span>${escapeHtml(comparisonNumber(maximum * fraction))}</span></div>`).join("");
-  return `<aside class="difference-legend" aria-label="Absolute pixel MSE scale"><div class="difference-legend-bar">${ticks}</div><div class="difference-legend-title">Pixel MSE</div></aside>`;
+  const logMaximum = Math.log1p(maximum);
+  const ticks = [0, .25, .5, .75, 1].map(fraction => {
+    const value = Math.expm1(fraction * logMaximum);
+    return `<div class="difference-legend-tick" style="bottom:${fraction * 100}%"><span>${escapeHtml(comparisonNumber(value))}</span></div>`;
+  }).join("");
+  return `<aside class="difference-legend" aria-label="Absolute pixel MSE scale"><div class="difference-legend-bar">${ticks}</div></aside>`;
 }
 
 function comparisonViewMarkup(data, mode) {
@@ -237,8 +280,8 @@ function comparisonViewMarkup(data, mode) {
   const compressedLabel = comparisonLabel(compressed);
   if (mode === "slider") return `<div class="comparison-slider" data-comparison-viewport><div class="comparison-slider-frame" data-comparison-frame><img class="comparison-slider-sizer" src="${escapeHtml(reference.preview_url)}" alt="" aria-hidden="true"><div class="comparison-slider-base"><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div><div class="comparison-wipe-top" data-wipe-top><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><button class="comparison-divider" data-wipe-handle type="button" aria-label="Move comparison divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></button></div><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span></div>`;
   if (mode === "difference") {
-    const image = data.difference_data_url ? `<img class="comparison-difference-image" data-comparison-image src="${escapeHtml(data.difference_data_url)}" alt="Normalized per-pixel squared-error map">` : data.same_dimensions ? `<p class="comparison-unavailable" data-comparison-pending>Calculating difference…</p>` : `<p class="comparison-unavailable">Difference is unavailable because representation dimensions differ.</p>`;
-    return `<div class="comparison-difference-layout"><div class="comparison-difference" data-comparison-viewport><div class="comparison-difference-frame"><span class="comparison-wipe-label comparison-wipe-label-left">Normalized pixel error · black = identical</span>${image}</div></div>${differenceLegendMarkup(data.metrics)}</div>`;
+    const image = data.difference_url ? `<img class="comparison-difference-image" data-comparison-image src="${escapeHtml(data.difference_url)}" alt="Log-scaled per-pixel squared-error map">` : data.difference_error ? `<p class="error comparison-unavailable">${escapeHtml(data.difference_error)}</p>` : data.same_dimensions ? `<p class="comparison-unavailable" data-comparison-pending>Calculating difference…</p>` : `<p class="comparison-unavailable">Difference is unavailable because representation dimensions differ.</p>`;
+    return `<div class="comparison-difference-layout"><div class="comparison-difference" data-comparison-viewport><div class="comparison-difference-frame">${image}</div></div>${differenceLegendMarkup(data.metrics)}</div>`;
   }
   return `<div class="comparison-stage" data-comparison-viewport><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-left">${referenceLabel}</span><img class="comparison-reference" data-comparison-image src="${escapeHtml(reference.preview_url)}" alt="${escapeHtml(reference.filename)}"></div><div class="comparison-pane"><span class="comparison-wipe-label comparison-wipe-label-right">${compressedLabel}</span><img class="comparison-compressed" data-comparison-image src="${escapeHtml(compressed.preview_url)}" alt="${escapeHtml(compressed.filename)}"></div></div>`;
 }
@@ -272,7 +315,7 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
       dialog._comparisonDisplayError = false;
     }
     if (headerMetrics) headerMetrics.innerHTML = dialog._comparisonDisplayError ? "Comparison display unavailable" : data.metrics ? comparisonMetricsMarkup(metrics, compressed) : "Calculating comparison…";
-    if (data.metrics?.difference_data_url && dialog._comparisonViews?.has("difference")) dialog._comparisonViews.delete("difference");
+    if (data.difference_url || data.difference_error) dialog._comparisonViews?.delete("difference");
     const views = dialog._comparisonViews || (dialog._comparisonViews = new Map());
     let view = views.get(mode);
     if (!view) {
@@ -335,6 +378,7 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
       }
     }
     recordComparisonTiming(dialog, {kind: samePair ? "mode-switch" : "render", mode, pairKey, cache: Boolean(data.metrics), render_ms: roundTiming(performance.now() - renderStarted)});
+    if (mode === "difference" && data.same_dimensions && !data.difference_url && !data.difference_error) loadRepresentationDifference(asset, compressedId, referenceId, data);
   } catch (error) {
     const headerMetrics = dialog.querySelector("[data-comparison-metrics]");
     if (headerMetrics) headerMetrics.textContent = "Comparison unavailable";
@@ -342,11 +386,86 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
   }
 }
 
+async function loadRepresentationDifference(asset, compressedId, referenceId, data) {
+  const dialog = $("representation-comparison");
+  const pairKey = data.pairKey || dialog._comparisonPairKey;
+  if (!pairKey || !data.same_dimensions) return;
+  if (dialog._differencePromise && dialog._differencePairKey === pairKey) return dialog._differencePromise;
+  const cached = readDifferenceCache(pairKey);
+  if (cached) {
+    data.difference_url = cached.url;
+    data.difference_error = null;
+    if (dialog._comparisonPairKey === pairKey && dialog._comparisonMode === "difference") {
+      dialog._comparisonViews?.delete("difference");
+      await renderRepresentationComparison(asset, compressedId, referenceId, "difference", data);
+    }
+    recordComparisonTiming(dialog, {kind: "difference", pairKey, cache: "frontend", total: 0});
+    return;
+  }
+  const requestToken = (dialog._differenceRequestToken || 0) + 1;
+  dialog._differenceRequestToken = requestToken;
+  dialog._differenceAbort?.abort();
+  const controller = new AbortController();
+  dialog._differenceAbort = controller;
+  dialog._differencePairKey = pairKey;
+  const started = performance.now();
+  const promise = (async () => {
+    try {
+      const response = await fetch(apiPath(`/api/files/${encodeURIComponent(compressedId)}/comparison-difference?with_id=${encodeURIComponent(referenceId)}`), {signal: controller.signal});
+      if (!response.ok) {
+        let message = `Request failed (${response.status})`;
+        try { message = (await response.json()).error || message; } catch {}
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const cachedData = {url: URL.createObjectURL(blob), size: blob.size};
+      const retained = writeDifferenceCache(pairKey, cachedData);
+      if (!retained && dialog._differenceRequestToken === requestToken && !controller.signal.aborted) {
+        dialog._ephemeralDifferenceUrls ||= [];
+        dialog._ephemeralDifferenceUrls.push(cachedData.url);
+      } else if (!retained) {
+        URL.revokeObjectURL(cachedData.url);
+      }
+      const backend = (() => { try { return JSON.parse(response.headers.get("X-Comparison-Timings") || "null"); } catch { return null; } })();
+      if (dialog._differenceRequestToken === requestToken && !controller.signal.aborted) {
+        const currentData = dialog._comparisonData?.pairKey === pairKey ? dialog._comparisonData : data;
+        currentData.difference_url = cachedData.url;
+        currentData.difference_error = null;
+        if (dialog._comparisonPairKey === pairKey && dialog._comparisonMode === "difference") {
+          dialog._comparisonViews?.delete("difference");
+          await renderRepresentationComparison(asset, compressedId, referenceId, "difference", currentData);
+        }
+      }
+      recordComparisonTiming(dialog, {kind: "difference", pairKey, cache: backend?.cache_hit ? "backend" : "miss", frontend_total: roundTiming(performance.now() - started), backend});
+    } catch (error) {
+      if (error.name === "AbortError" || dialog._differenceRequestToken !== requestToken) return;
+      if (dialog._comparisonPairKey === pairKey) {
+        const currentData = dialog._comparisonData?.pairKey === pairKey ? dialog._comparisonData : data;
+        currentData.difference_error = `Difference unavailable: ${error.message}`;
+        if (dialog._comparisonMode === "difference") {
+          dialog._comparisonViews?.delete("difference");
+          await renderRepresentationComparison(asset, compressedId, referenceId, "difference", currentData);
+        }
+      }
+    } finally {
+      if (dialog._differenceRequestToken === requestToken) {
+        dialog._differenceAbort = null;
+        dialog._differencePromise = null;
+        dialog._differencePairKey = null;
+      }
+    }
+  })();
+  dialog._differencePromise = promise;
+  return promise;
+}
+
 async function loadRepresentationComparisonMetrics(asset, compressedId, referenceId, initialData) {
   const dialog = $("representation-comparison");
   const pairKey = initialData.pairKey;
   const cached = readComparisonCache(pairKey);
   if (cached) {
+    const cachedDifference = readDifferenceCache(pairKey);
+    if (cachedDifference) cached.difference_url = cachedDifference.url;
     dialog._comparisonData = cached;
     await renderRepresentationComparison(asset, compressedId, referenceId, dialog._comparisonMode || "slider", cached);
     recordComparisonTiming(dialog, {kind: "metrics", pairKey, cache: "frontend", total: 0});
@@ -364,6 +483,8 @@ async function loadRepresentationComparisonMetrics(asset, compressedId, referenc
     const data = await api(`/api/files/${encodeURIComponent(compressedId)}/comparison?with_id=${encodeURIComponent(referenceId)}`, {signal: controller.signal});
     if (dialog._comparisonRequestToken !== requestToken || controller.signal.aborted || dialog._comparisonPairKey !== pairKey) return;
     data.pairKey = pairKey;
+    const cachedDifference = readDifferenceCache(pairKey);
+    if (cachedDifference) data.difference_url = cachedDifference.url;
     writeComparisonCache(pairKey, data);
     dialog._comparisonData = data;
     const mode = dialog._comparisonMode || "slider";

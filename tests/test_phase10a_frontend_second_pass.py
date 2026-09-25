@@ -85,10 +85,12 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
 
     def test_comparison_and_raw_interaction_contract(self):
         css = (self.root / "app.css").read_text(encoding="utf-8")
-        for marker in ("comparison-slider-base", "clipPath", "pixelated", "data-raw-exposure", "data-raw-exposure-value", "raw-development-preview", "data-comparison-metrics", "max_pixel_mse", "difference-legend", "comparisonDataCache", "comparisonDisplayError"):
+        for marker in ("comparison-slider-base", "clipPath", "pixelated", "data-raw-exposure", "data-raw-exposure-value", "raw-development-preview", "data-comparison-metrics", "max_pixel_mse", "difference-legend", "comparisonDataCache", "differenceDataCache", "comparison-difference", "comparisonDisplayError", "comparison-difference"):
             self.assertIn(marker, self.details + css)
         self.assertNotIn("data-comparison-target", self.details)
         self.assertNotIn("PSNR", self.details)
+        self.assertNotIn("Normalized pixel error", self.details)
+        self.assertNotIn("difference-legend-title", self.details + css)
         self.assertNotIn("wipe.style.width", self.details)
         self.assertIn("dialog._comparisonDataKey", self.details)
         self.assertIn("Reference", self.details)
@@ -102,6 +104,16 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
             self.assertIn(marker, self.details)
         self.assertNotIn("1× smaller", self.details)
         self.assertIn("Recreate source folders inside destination", (self.root / "app-file-management.js").read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_comparison_mse_color_clamps_above_highest_stop(self):
+        start = self.details.index("function comparisonMseColor")
+        end = self.details.index("function disposeRepresentationDialog", start)
+        script = self.details[start:end] + "\nconsole.log(JSON.stringify([comparisonMseColor(10), comparisonMseColor(101)]));\n"
+        result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True, check=True)
+        low, high = json.loads(result.stdout)
+        self.assertNotEqual(low, high)
+        self.assertEqual(high, "rgb(232,110,110)")
 
     def test_file_management_layout_uses_binary_disk_labels_and_conditional_rows(self):
         management = self.management

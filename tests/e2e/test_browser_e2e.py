@@ -568,7 +568,8 @@ class BrowserE2ETests(unittest.TestCase):
     def test_portrait_representation_comparison_geometry_and_difference_mode(self) -> None:
         self._open_main()
         comparison_requests: list[str] = []
-        self.page.on("request", lambda request: comparison_requests.append(request.url) if "/comparison?" in request.url else None)
+        difference_requests: list[str] = []
+        self.page.on("request", lambda request: comparison_requests.append(request.url) if "/comparison?" in request.url else difference_requests.append(request.url) if "/comparison-difference?" in request.url else None)
         self.page.locator(".photo-card", has_text="portrait.jpg").first.locator(".info-button").click()
         self.page.locator("#details[open]").wait_for()
         row = self.page.locator("#details .representation-row", has_text="portrait.jxl").first
@@ -585,6 +586,7 @@ class BrowserE2ETests(unittest.TestCase):
         for first, second in zip(fit["images"][0].values(), fit["images"][1].values()):
             self.assertAlmostEqual(first, second, delta=1)
         self.assertEqual(self.page.locator('[data-compare-mode="difference"]').count(), 1)
+        self.assertEqual(len(difference_requests), 0)
         self.page.locator('[data-compare-mode="difference"]').click()
         difference = self.page.locator(".comparison-difference-image")
         difference.wait_for()
@@ -595,8 +597,17 @@ class BrowserE2ETests(unittest.TestCase):
           const context=canvas.getContext('2d'); context.drawImage(image,0,0);
           return context.getImageData(0,0,canvas.width,canvas.height).data.every((value,index)=>index%4===3 || value===0);
         }"""))
-        self.assertIn("Pixel MSE", self.page.locator(".difference-legend").inner_text())
+        self.assertEqual(self.page.locator(".difference-legend-tick").count(), 5)
         self.assertIn("Global MSE", self.page.locator("[data-comparison-metrics]").inner_text())
+        self.assertEqual(len(difference_requests), 1)
+        legend_geometry = self.page.evaluate("""() => {
+          const layout=document.querySelector('.comparison-difference-layout');
+          const ticks=[...document.querySelectorAll('.difference-legend-tick span')].map(node=>node.getBoundingClientRect());
+          return {width:layout.clientWidth, scrollWidth:layout.scrollWidth, ticks:ticks.map(rect=>({top:rect.top,bottom:rect.bottom}))};
+        }""")
+        self.assertLessEqual(legend_geometry["scrollWidth"], legend_geometry["width"] + 1, legend_geometry)
+        ticks = sorted(legend_geometry["ticks"], key=lambda tick: tick["top"])
+        self.assertTrue(all(ticks[index - 1]["bottom"] <= tick["top"] + 1 for index, tick in enumerate(ticks) if index), legend_geometry)
         self.page.locator('[data-compare-mode="slider"]').click()
         self.page.locator(".comparison-slider").wait_for()
         self.page.locator('[data-compare-mode="side"]').click()
@@ -604,6 +615,12 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.locator('[data-compare-mode="slider"]').click()
         self.page.locator(".comparison-slider").wait_for()
         self.assertEqual(len(comparison_requests), 1)
+        self.assertEqual(len(difference_requests), 1)
+        self.page.locator("[data-comparison-close]").click()
+        row.locator("[data-representation-view]").click()
+        self.page.locator('[data-compare-mode="difference"]').click()
+        self.page.locator(".comparison-difference-image").wait_for()
+        self.assertEqual(len(difference_requests), 1)
         self.page.locator("[data-comparison-close]").click()
 
     def test_file_management_and_representation_comparison_workflow(self) -> None:

@@ -56,7 +56,7 @@ from ..file_management import (
 from ..file_management_previews import cached_preview_file, custom_profile_preview
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
-from .comparison import comparison_data, comparison_preview
+from .comparison import comparison_data, comparison_difference, comparison_preview
 from .raw_development import raw_development_preview
 from .exports import selected_zip
 from .workspaces import (
@@ -734,6 +734,18 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison-preview":
             self._send_bytes(200, comparison_preview(workspace, parts[2]), "image/png")
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "comparison-difference":
+            other_id = _first(query, "with_id", "")
+            if not other_id:
+                raise InvalidRequest("with_id is required")
+            body, timings = comparison_difference(workspace, parts[2], other_id)
+            headers = {
+                "Cache-Control": "private, max-age=60",
+                "X-Comparison-Cache": "hit" if timings.get("cache_hit") else "miss",
+                "X-Comparison-Timings": json.dumps(timings, separators=(",", ":")),
+            }
+            self._send_bytes(200, body, "image/png", headers)
             return
         if len(parts) == 4 and parts[:3] == ["api", "file-management", "profile-preview"]:
             self._send_file(cached_preview_file(workspace, parts[3]), "image/webp")

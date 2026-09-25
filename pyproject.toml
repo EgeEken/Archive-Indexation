@@ -9,6 +9,7 @@ description = "Local-first indexing and browsing for personal media archives."
 requires-python = ">=3.11"
 dependencies = [
     "imagecodecs>=2025.11,<2027",
+    "numpy>=1.26,<3",
     "pillow>=10",
 ]
 

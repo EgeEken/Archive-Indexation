@@ -6,8 +6,8 @@ import types
 import threading
 import time
 import unittest
-import base64
 from io import BytesIO
+from math import log1p
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from archive_index.api.comparison import _difference_map, _mse, comparison_data
+from archive_index.api.comparison import _difference_map, _mse, comparison_data, comparison_difference
 from archive_index.file_management import build_dry_run_plan, cancel_plan_analysis, list_presets, list_profiles, list_rulesets, plan_analysis_status, save_profile, save_ruleset, start_plan_analysis
 from archive_index.file_management_previews import _encode, bundled_preview_manifest, custom_profile_preview
 from archive_index.indexing.media_pipeline import index_workspace
@@ -166,6 +166,42 @@ class Phase10ASecondPassTests(unittest.TestCase):
             operation = build_dry_run_plan(workspace, blocked["id"])["operations"][0]
             self.assertTrue(any("already exists" in conflict for conflict in operation["conflicts"]))
 
+    def test_file_management_targets_are_contained_before_conflict_inspection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "photo.jpg").write_bytes(b"photo")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            valid = ["compressed/file.jxl", "photos/day1/file.jxl", "raws/camera/file.ARW"]
+            for target in valid:
+                ruleset = save_ruleset(workspace, name=f"Valid {target}", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": target}}])
+                operation = build_dry_run_plan(workspace, ruleset["id"])["operations"][0]
+                self.assertEqual(operation["target_relative_path"], target)
+                self.assertFalse(operation["conflicts"])
+            invalid = [
+                "../outside/file.jxl", "folder/../../outside/file.jxl", "C:/outside/file.jxl",
+                r"C:\outside\file.jxl", r"\\server\share\file.jxl", "/archive/path",
+                ".archive-index/file", "foo/.archive-index/file", "/.archive-index/file", ".ARCHIVE-INDEX/file",
+            ]
+            for target in invalid:
+                ruleset = save_ruleset(workspace, name=f"Invalid {target}", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": target}}])
+                operation = build_dry_run_plan(workspace, ruleset["id"])["operations"][0]
+                self.assertIsNone(operation["target_relative_path"], target)
+                self.assertTrue(operation["conflicts"], target)
+                self.assertTrue(any("Destination" in conflict for conflict in operation["conflicts"]), target)
+            outside = root.parent / f"outside-target-{root.name}"
+            outside.mkdir()
+            link = root / "escape-link"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pass
+            else:
+                ruleset = save_ruleset(workspace, name="Symlink escape", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": "escape-link/file.jxl"}}])
+                operation = build_dry_run_plan(workspace, ruleset["id"])["operations"][0]
+                self.assertIsNone(operation["target_relative_path"])
+                self.assertIn("escapes the workspace", " ".join(operation["conflicts"]))
+
     def test_planned_same_content_target_is_coalesced(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -270,6 +306,7 @@ class Phase10ASecondPassTests(unittest.TestCase):
         self.assertEqual(maximum, 27)
         self.assertEqual(pixels[0, 0].tolist(), [0, 0, 0])
         self.assertEqual(pixels[1, 1].tolist(), [255, 0, 0])
+        self.assertEqual(pixels[0, 1, 0], round(log1p(3) / log1p(27) * 255))
         self.assertTrue(0 < pixels[0, 1, 0] < pixels[1, 0, 0] < pixels[1, 1, 0])
         difference.close()
         left.close()
@@ -408,7 +445,30 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertTrue(second["cache_hit"])
             self.assertEqual(decoder.call_count, 2)
             self.assertIn("total", first["timings_ms"])
-            self.assertTrue(second["timings_ms"]["total"] <= first["timings_ms"]["total"])
+            self.assertIn("cache_lookup", second["timings_ms"])
+
+    def test_difference_cache_is_separate_and_reuses_encoded_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (20, 30), (80, 120, 160)).save(root / "photo.png")
+            Image.new("RGB", (20, 30), (80, 120, 161)).save(root / "other.png")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            connection = workspace.connect()
+            try:
+                rows = connection.execute("SELECT id, logical_asset_id FROM physical_file ORDER BY relative_path").fetchall()
+                connection.execute("UPDATE physical_file SET logical_asset_id = ? WHERE id = ?", (rows[0]["logical_asset_id"], rows[1]["id"]))
+                connection.commit()
+            finally:
+                connection.close()
+            from archive_index.api import comparison as comparison_module
+            with patch.object(comparison_module, "_decode", wraps=comparison_module._decode) as decoder:
+                first, first_timings = comparison_difference(workspace, rows[0]["id"], rows[1]["id"])
+                second, second_timings = comparison_difference(workspace, rows[0]["id"], rows[1]["id"])
+            self.assertEqual(first, second)
+            self.assertFalse(first_timings["cache_hit"])
+            self.assertTrue(second_timings["cache_hit"])
+            self.assertEqual(decoder.call_count, 2)
 
     def test_byte_identical_pair_is_explicitly_marked(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -466,7 +526,7 @@ class Phase10ASecondPassTests(unittest.TestCase):
                 identical = comparison_data(workspace, rows[0]["id"], rows[0]["id"], "workspace")
             finally:
                 connection.close()
-            diff_bytes = base64.b64decode(unequal["difference_data_url"].split(",", 1)[1])
+            diff_bytes, timings = comparison_difference(workspace, rows[0]["id"], rows[1]["id"])
             with Image.open(BytesIO(diff_bytes)) as diff:
                 pixels = np.asarray(diff)
             self.assertEqual(pixels.shape, (12, 16, 3))
@@ -476,9 +536,13 @@ class Phase10ASecondPassTests(unittest.TestCase):
             expected_max = (120 ** 2 + 40 ** 2 + 8 ** 2) / 3
             self.assertEqual(unequal["metrics"]["max_pixel_mse"], round(expected_max, 6))
             self.assertEqual(unequal["metrics"]["mse"], round(expected_max / (12 * 16), 6))
-            identical_pixels = np.asarray(Image.open(BytesIO(base64.b64decode(identical["difference_data_url"].split(",", 1)[1]))))
+            identical_bytes, identical_timings = comparison_difference(workspace, rows[0]["id"], rows[0]["id"])
+            identical_pixels = np.asarray(Image.open(BytesIO(identical_bytes)))
             self.assertFalse(np.any(identical_pixels))
             self.assertEqual(identical["metrics"]["max_pixel_mse"], 0)
+            self.assertIn("difference_compute", timings)
+            self.assertIn("difference_encode", timings)
+            self.assertFalse(identical_timings["cache_hit"])
 
     def test_lar_iqa_preparation_uses_canonical_loader(self):
         provider = object.__new__(LARIQAProvider)
