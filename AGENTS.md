@@ -1609,95 +1609,39 @@ Copy and Move rules use explicit left-aligned option wrappers. Their helper upda
 
 The final correctness pass keeps EV text and the RAW loading indicator in separate stable nodes; latest-request generation checks control the indicator, including aborted stale requests. Built-in compression-preview manifest entries use the same `settings.quality`/`settings.effort` contract as custom previews. The installed imagecodecs AVIF API maps profile quality to its supported `level` parameter (0–100) and effort to `speed` (0–10); AVIF remains custom-preview-only. Custom preview WebP and manifest artifacts are validated and atomically replaced under a process-local cache lock, with incomplete `.tmp` files harmless. Planned outputs with the same known SHA-256 coalesce at one case-insensitive target; differing or unknown content retains deterministic suffix/conflict behavior. The package smoke check builds a wheel, installs it into a temporary target, and verifies every `_UI_RESOURCES` entry; setuptools package data uses root web globs so modular frontend files are not omitted.
 
-## Phase 10 — compression pipeline
+## Current checkpoint — Phase 10A
 
-### Goal
+Phase 10A planning and review foundations are essentially complete after the final stabilization pass. The application has the indexing/catalog foundation, quality, conservative grouping and review, reconciliation, RAW/JPEG representation handling, video quality, semantic search and Similar, modular frontend, Geo Map/Timeline/Vector Cloud, JXL decoding and comparison/Difference mode, RAW inspection, compression profiles/previews, File Management rulesets/presets, and dry-run filesystem planning with collision, blocker, and executable-storage accounting. The executor remains disabled. No source media is mutated by browsing, inspection, previews, or planning.
 
-Add safe, resumable JXL/AV1 production after generic jobs/provenance are already reliable.
+Current File Management analysis reuses per-run directory listings and target-status/hash results, indexes operation membership for summary calculation, and reports cancellable phases through a small in-process session API. A manual decision carries the cached browser catalog forward only when the browser revision advanced by exactly that single decision, avoiding a full catalog rebuild during fullscreen filtered navigation without masking concurrent catalog changes. Fullscreen image fit is constrained to the actual media pane, including Info-open layouts. RAW inspection is read-only, uses a bounded 16-entry memory cache keyed by source stat and all five control values, and debounces latest-request-wins previews. A cache hit returns the already encoded PNG; each unique setting tuple currently performs its own rawpy decode/postprocess and display encoding. RAW controls use 0.5 EV and 5-unit coarse steps, with per-control and all-control resets.
 
-### Before coding defaults
+## Phase 10B — safe File Management executor
 
-Collect representative source media and inspect exact existing HandBrake settings. Benchmark candidate CLI commands.
+Implement persistent, resumable execution for Copy, Move, Delete, and Compress on physical representations while human review remains asset-level. Execution must use conservative dependency ordering; complete copy/move/compression and output validation before destructive deletes; stage to temporary output, validate, then atomically finalize; never silently overwrite; retain deterministic `(1)`, `(2)` conflict naming; support cancellation, resume, interruption recovery, persistent per-operation state, and per-operation/overall progress, elapsed time, ETA, throughput, completed/failed/skipped counts, and actual storage effects. Keep the executor disabled until its safety model and review workflow are explicitly implemented and tested.
 
-### Implement
+## Phase 10C — production compression
 
-- canonical image compression preset;
-- canonical video compression preset;
-- advanced settings;
-- queue + persisted jobs;
-- temp output paths;
-- cancellation at file boundaries;
-- restart interrupted file;
-- output validation;
-- source -> derivative links;
-- destination/folder-role handling;
-- retry failed;
-- batch retry;
-- explicit retry with different settings;
-- safe-to-manually-delete source report.
+JPEG XL is the primary image target, using the existing High Quality, Balanced, and High Compression concepts. Evaluate AVIF only for a demonstrated use case. Target AV1 for video after benchmarking CPU/GPU paths and archival quality, size, compatibility, speed, and hardware costs. Compression may keep its source, write to a separate destination, or replace a source only after successful validated output. App-created derivatives require exact provenance; external compressed peers remain unknown-lineage unless evidence proves otherwise. Do not infer that existing JXL/AV1 files were app-generated.
 
-### Acceptance criteria
+## Video compatibility proxies
 
-- kill/restart application during a large batch and safely resume completed queue items;
-- partial output is never marked complete;
-- output decodes/probes;
-- provenance records exact settings;
-- source file remains unchanged;
-- retry behavior is explicit;
-- pre-existing unknown JXL/AV1 files are not silently considered app-managed.
+Browser-incompatible HEVC/FX3 playback is not an indexing failure. Do not generate proxies during ordinary indexing. Later provide an explicit `Create playable proxy` action; proxies are app-owned, cacheable/removable playback derivatives and are conceptually separate from long-term AV1 archival representations.
 
----
+## Phase 11 — optional enrichment
 
-## Phase 10B — richer organization and exploratory navigation
+Keep OCR, speech-to-text/transcripts, face/person clustering, stronger-IQA evaluation, and focus/sharpness localization independent and optional, with explicit model installation and resumable jobs. Evaluate stronger modern IQA models against actual archive-selection cases without replacing LAR-IQA by default. Investigate a user-requested, on-demand focus/defocus/sharpness model that returns a focus-area or sharpness mask for one image; do not precompute masks for every indexed image unless later benchmarking demonstrates value. None of these are prerequisites for base archive functionality.
 
-After core search/selection/compression works:
+## Phase 12 — product polish and organization
 
-- arbitrary user tags;
-- notes;
-- search history/saved searches if still useful;
-- semantic k-means clustering;
-- silhouette-based suggested K;
-- representative/approximate cluster labels;
-- 2D embedding map;
-- timeline/calendar;
-- GPS/map view where metadata exists;
-- more powerful group comparison UI.
+Keep current conservative Strict grouping unchanged while considering a separate Broad mode. Later work may include bulk/archive workflows, navigation and visualization polish, consistent error/offline/empty states, accessibility/keyboard support, large real-archive profiling, and deliberate responsive-layout/browser-zoom/aspect-ratio auditing. Mobile-oriented UI work remains later.
 
-These are useful but must not delay the core application.
+## Packaging and release
 
----
+Plan for dependable Windows distribution, deliberate native codec/model dependencies, repeatable migrations/upgrades, diagnostics, safe cache cleanup/uninstall, clean-machine validation, lightweight Linux/Chromium CI, and Windows release smoke testing. Large models remain explicit installs rather than silently bundled.
 
-## Phase 11B — video semantic enrichment
+## Mobile
 
-Progressively add:
-
-1. video thumbnails/proxies;
-2. simple file-level visual representation using sampled frames;
-3. semantic search over videos;
-4. speech transcription;
-5. transcript text search;
-6. optional OCR;
-7. optional shot detection/timestamp-level results;
-8. faces later.
-
-Do not attempt automatic video selection until there is a separate validated design for it. Video quality itself is implemented in Phase 8C and does not currently feed selection or recommendations.
-
----
-
-## Phase 12B — packaging, lower-end optimization, and mobile exploration
-
-Only after the desktop architecture is stable:
-
-- package localhost app into a convenient Windows executable/application;
-- simplify model installation/download UX;
-- hardware/resource benchmarking;
-- tune Lightweight defaults;
-- CPU-only testing;
-- lower-memory batching;
-- possible ONNX/CoreML/TFLite/mobile-friendly model paths;
-- investigate local mobile filesystem/workspace handling.
-
-Mobile should initially be capable of local browse/search/indexation itself rather than depending on sending an entire archive to a PC and copying indexes back.
+Consider an Android/mobile port later, reusing local-first workspace/index concepts where practical. Desktop archive management and compression release come first.
 
 ---
 

@@ -374,6 +374,28 @@ class CorrectionFrontendTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), {"first": "asset-60", "second": "asset-61", "index": 59, "total": 178})
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_fullscreen_reanchoring_is_shared_by_rejected_and_undecided_filters(self):
+        source = javascript_source()
+        start = source.index("async function moveViewer")
+        end = source.index("function stopViewerMedia", start)
+        script = "(async()=>{let state,filterParams,api;const resetViewerZoom=()=>{};const renderViewer=()=>{};const showToast=()=>{};const $=()=>({textContent:''});" + source[start:end] + r'''
+        const results=[];
+        for(const manual of ['rejected','undecided']){
+          const records=Array.from({length:180},(_,index)=>({asset_id:`asset-${index}`,filename:`asset-${index}`}));
+          const removed=new Set([5,59]);
+          const filtered=()=>records.filter((_,index)=>!removed.has(index));
+          state={viewerContext:'gallery',viewerStart:0,viewerIndex:59,viewerItems:records.slice(0,60),viewerTotal:180,viewerPageSize:60,viewerFilterKey:`manual=${manual}`,viewerFilterDirty:true,viewerSequenceIdsByPosition:new Map(records.slice(0,60).map((item,index)=>[index,item.asset_id])),viewerRemovedPositions:new Set([5,59])};
+          filterParams=()=>new URLSearchParams(`manual=${manual}`);
+          api=async path=>{const url=new URL('http://localhost/'+path);if(url.pathname.endsWith('locate-asset')){const items=filtered();const assetIds=JSON.parse(url.searchParams.get('asset_ids')||'[]');return {found:false,index:0,total:items.length,asset_indices:Object.fromEntries(assetIds.flatMap(id=>{const index=items.findIndex(item=>item.asset_id===id);return index<0?[]:[[id,index]]}))};}const offset=Number(url.searchParams.get('offset'));const limit=Number(url.searchParams.get('limit'));const items=filtered();return {items:items.slice(offset,offset+limit),total:items.length};};
+          await moveViewer(1);results.push([manual,state.viewerItems[state.viewerIndex].asset_id,state.viewerFilterDirty]);
+        }
+        console.log(JSON.stringify(results));
+        })();
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(result.stdout), [["rejected", "asset-60", False], ["undecided", "asset-60", False]])
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_representation_diagnostics_only_when_present(self):
         source=javascript_source()
         render=source[source.index("function renderRepresentations"):source.index("function renderQuality")]
