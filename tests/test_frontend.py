@@ -340,7 +340,7 @@ class CorrectionFrontendTests(unittest.TestCase):
         result = subprocess.run(
             [shutil.which("node"), "--eval", source[start:end] + """
             const records=Array.from({length:240},(_,index)=>({asset_id:'asset-'+index,filename:'asset-'+index}));
-            const state={viewerContext:'gallery',viewerStart:0,viewerIndex:59,viewerItems:records.slice(0,60),viewerTotal:240,viewerPageSize:60};
+            const state={viewerContext:'gallery',viewerStart:0,viewerIndex:59,viewerItems:records.slice(0,60),viewerTotal:240,viewerPageSize:60,viewerFilterKey:'',viewerFilterDirty:false,viewerSequenceIdsByPosition:new Map(records.slice(0,60).map((item,index)=>[index,item.asset_id])),viewerRemovedPositions:new Set()};
             const filterParams=()=>new URLSearchParams();
             const api=async path=>{const query=new URL('http://localhost/'+path).searchParams;const offset=Number(query.get('offset'));const limit=Number(query.get('limit'));return {items:records.slice(offset,offset+limit),total:records.length};};
             const resetViewerZoom=()=>{};const renderViewer=()=>{};
@@ -354,6 +354,24 @@ class CorrectionFrontendTests(unittest.TestCase):
         )
         result = json.loads(result.stdout)
         self.assertEqual(result, {"first":"asset-60","last":"asset-210","unique":151,"final":"asset-60","ordinal":61})
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_fullscreen_navigation_reanchors_after_selected_filter_mutations(self):
+        source = javascript_source()
+        start = source.index("async function moveViewer")
+        end = source.index("function stopViewerMedia", start)
+        script = source[start:end] + r'''
+        const records=Array.from({length:180},(_,index)=>({asset_id:`asset-${index}`,filename:`asset-${index}`}));
+        const removed=new Set([5,59]);
+        const filtered=()=>records.filter((_,index)=>!removed.has(index));
+        const state={viewerContext:'gallery',viewerStart:0,viewerIndex:59,viewerItems:records.slice(0,60),viewerTotal:180,viewerPageSize:60,viewerFilterKey:'manual=selected',viewerFilterDirty:true,viewerSequenceIdsByPosition:new Map(records.slice(0,60).map((item,index)=>[index,item.asset_id])),viewerRemovedPositions:new Set([5,59])};
+        const filterParams=()=>new URLSearchParams('manual=selected');
+        const api=async path=>{const url=new URL('http://localhost/'+path);if(url.pathname.endsWith('locate-asset')){const items=filtered();const assetId=url.searchParams.get('asset_id');const assetIds=JSON.parse(url.searchParams.get('asset_ids')||'[]');return {found:items.some(item=>item.asset_id===assetId),index:items.findIndex(item=>item.asset_id===assetId),total:items.length,asset_indices:Object.fromEntries(assetIds.flatMap(id=>{const index=items.findIndex(item=>item.asset_id===id);return index<0?[]:[[id,index]]}))};}const offset=Number(url.searchParams.get('offset'));const limit=Number(url.searchParams.get('limit'));const items=filtered();return {items:items.slice(offset,offset+limit),total:items.length};};
+        const resetViewerZoom=()=>{};const renderViewer=()=>{};const showToast=()=>{};const $=()=>({textContent:''});
+        (async()=>{await moveViewer(1);const first=state.viewerItems[state.viewerIndex].asset_id;await moveViewer(1);console.log(JSON.stringify({first,second:state.viewerItems[state.viewerIndex].asset_id,index:state.viewerStart+state.viewerIndex,total:state.viewerTotal}));})();
+        '''
+        result = subprocess.run([shutil.which("node"), "--eval", script], capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(result.stdout), {"first": "asset-60", "second": "asset-61", "index": 59, "total": 178})
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_representation_diagnostics_only_when_present(self):

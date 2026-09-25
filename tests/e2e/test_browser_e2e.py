@@ -11,6 +11,7 @@ import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import imagecodecs
 import numpy as np
@@ -808,6 +809,83 @@ class BrowserE2ETests(unittest.TestCase):
             }""", timeout=8000)
         self.assertLessEqual(self.page.locator("#gallery .photo-card").count(), 180)
         self.assertTrue(self.page.locator("#gallery .loading-state").is_visible())
+
+    def test_fullscreen_selected_filter_navigation_survives_decision_changes(self) -> None:
+        total = 180
+        synthetic = None
+        seed_data = None
+        removed: set[str] = set()
+
+        def browser_response(route):
+            nonlocal synthetic, seed_data
+            parsed = urlsplit(route.request.url)
+            query = parse_qs(parsed.query)
+            if synthetic is None:
+                seed_query = dict(query)
+                seed_query.update(manual=["all"], offset=["0"], limit=["180"])
+                seed_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(seed_query, doseq=True), ""))
+                seed_data = route.fetch(url=seed_url).json()
+                source = seed_data["items"]
+                synthetic = []
+                while len(synthetic) < total:
+                    for item in source:
+                        clone = dict(item)
+                        index = len(synthetic)
+                        clone.update(asset_id=f"synthetic-{index}", filename=f"synthetic-{index:04}.jpg", user_decision="selected")
+                        synthetic.append(clone)
+                        if len(synthetic) == total:
+                            break
+            items = synthetic if query.get("manual", ["all"])[0] == "all" else [item for item in synthetic if item["asset_id"] not in removed]
+            if parsed.path.endswith("/locate-asset"):
+                asset_id = query.get("asset_id", [""])[0]
+                candidates = json.loads(query.get("asset_ids", ["[]"])[0])
+                indices = {item["asset_id"]: index for index, item in enumerate(items) if item["asset_id"] in candidates}
+                index = next((i for i, item in enumerate(items) if item["asset_id"] == asset_id), None)
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"found": index is not None, "index": index or 0, "total": len(items), "asset_indices": indices}))
+                return
+            offset = int(query.get("offset", ["0"])[0])
+            limit = int(query.get("limit", ["60"])[0])
+            data = {**seed_data, "items": items[offset:offset + limit], "total": len(items), "has_next": offset + limit < len(items)}
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+        def decision_response(route):
+            asset_id = urlsplit(route.request.url).path.split("/")[-2]
+            decision = route.request.post_data_json["decision"]
+            if decision == "selected":
+                removed.discard(asset_id)
+            else:
+                removed.add(asset_id)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"asset_id": asset_id, "user_decision": decision, "auto_recommended": False, "recommendation_run_id": None}))
+
+        self.page.route("**/api/browser*", browser_response)
+        self.page.route("**/api/browser/locate-asset*", browser_response)
+        self.page.route("**/api/assets/*/decision*", decision_response)
+        self.page.goto(f"{self.base_url}/?workspace={self.main_handle}&manual=selected", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
+        self.page.locator(".photo-card").first.wait_for()
+        self.page.evaluate("""() => {const seed=state.items[0];state.items=Array.from({length:180},(_,index)=>({...seed,asset_id:`synthetic-${index}`,filename:`synthetic-${String(index).padStart(4,'0')}.jpg`,user_decision:'selected'}));state.total=180;state.windowStart=0;showViewer(59,state.items,{mode:'gallery',start:0,total:180});}""")
+        self.page.locator("#viewer[open]").wait_for()
+        self.assertEqual(self.page.locator("#viewer-title").inner_text(), "synthetic-0059.jpg")
+        self.page.locator("#viewer-selection [data-decision='selected']").click()
+        self.page.wait_for_function("() => document.querySelector(\"#viewer-selection [data-decision='selected']\").textContent === 'Select'")
+        self.assertIn("synthetic-59", removed)
+        self.assertTrue(self.page.evaluate("state.viewerFilterDirty"), self.page.evaluate("JSON.stringify({manual:state.manual,context:state.viewerContext,ids:state.viewerSequenceIdsByPosition.size,removed:[...state.viewerRemovedPositions]})"))
+        self.assertFalse(self.page.locator("#viewer-previous").is_disabled())
+        self.page.locator("#viewer-previous").click()
+        self.page.wait_for_function("() => document.querySelector('#viewer-title').textContent.includes('synthetic-0058')")
+        self.page.locator("#viewer-selection [data-decision='selected']").click()
+        self.page.wait_for_function("() => document.querySelector(\"#viewer-selection [data-decision='selected']\").textContent === 'Select'")
+        self.page.locator("#viewer-next").click()
+        self.page.wait_for_function("() => document.querySelector('#viewer-title').textContent.includes('synthetic-0060')")
+        visited = []
+        for index in range(60, 122):
+            visited.append(self.page.locator("#viewer-title").inner_text())
+            if index < 121:
+                self.page.locator("#viewer-next").click()
+                expected = index + 1
+                self.page.wait_for_function("expected => document.querySelector('#viewer-title').textContent.includes(`synthetic-${String(expected).padStart(4,'0')}`)", arg=expected)
+        self.assertEqual(visited, [f"synthetic-{index:04}.jpg" for index in range(60, 122)])
+        self.page.locator("#viewer-close").click()
 
     def test_unavailable_visualizations_are_hidden_and_url_falls_back(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.offline_handle}", wait_until="domcontentloaded")

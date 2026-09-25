@@ -19,6 +19,9 @@ const state = {
   viewerTotal: 0,
   viewerPageSize: 60,
   viewerFilterKey: null,
+  viewerFilterDirty: false,
+  viewerSequenceIdsByPosition: new Map(),
+  viewerRemovedPositions: new Set(),
   viewerReturnAssetId: null,
   viewerSourceScrollY: 0,
   viewerReturnToken: 0,
@@ -374,6 +377,14 @@ async function setDecision(assetId, decision) {
     state.items.forEach(update);
     state.viewerItems.forEach(update);
     (state.groupItems || []).forEach(update);
+    if (state.viewerContext === "gallery" && state.manual !== "all") {
+      const position = [...state.viewerSequenceIdsByPosition].find(([, id]) => id === assetId)?.[0];
+      if (position != null) {
+        if (payload.user_decision === state.manual) state.viewerRemovedPositions.delete(position);
+        else state.viewerRemovedPositions.add(position);
+        state.viewerFilterDirty = true;
+      }
+    }
     if ($("viewer").open) {
       updateViewerReviewState();
       if (state.similar) renderSimilarResults();

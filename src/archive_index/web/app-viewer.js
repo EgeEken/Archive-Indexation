@@ -53,6 +53,14 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
   state.viewerStart = context.start ?? (state.viewerContext === "gallery" ? state.windowStart : 0);
   state.viewerTotal = context.total ?? (state.viewerContext === "gallery" ? state.total : state.viewerItems.length);
   state.viewerFilterKey = state.viewerContext === "gallery" ? String(filterParams()) : null;
+  state.viewerFilterDirty = false;
+  state.viewerSequenceIdsByPosition = new Map();
+  state.viewerRemovedPositions = new Set();
+  if (state.viewerContext === "gallery") {
+    state.viewerItems.forEach((item, itemIndex) => {
+      if (item) state.viewerSequenceIdsByPosition.set(state.viewerStart + itemIndex, item.asset_id);
+    });
+  }
   state.viewerGroupId = context.groupId || visibleStrictGroupId(state.viewerItems[index]);
   state.viewerInfoOpen = false;
   state.viewerDetail = null;
@@ -136,6 +144,16 @@ function applyViewerTransform(media) {
 
 async function moveViewer(delta) {
   if (state.viewerContext === "gallery") {
+    if (state.viewerFilterDirty || state.viewerFilterKey !== String(filterParams())) {
+      let moved;
+      try { moved = await moveFilteredGalleryViewer(delta); }
+      catch (error) { showToast(`Gallery navigation failed: ${error.message}`); return; }
+      if (!moved) return;
+      resetViewerZoom();
+      state.viewerDetail = null;
+      renderViewer();
+      return;
+    }
     const target = state.viewerStart + state.viewerIndex + delta;
     if (target < 0 || target >= state.viewerTotal) return;
     if (target < state.viewerStart || target >= state.viewerStart + state.viewerItems.length) {
@@ -169,6 +187,38 @@ async function moveViewer(delta) {
 
 async function loadViewerPageAt(absoluteIndex) {
   const params = filterParams();
+  await loadViewerPageWithParams(absoluteIndex, params);
+}
+
+async function moveFilteredGalleryViewer(delta) {
+  const current = state.viewerItems[state.viewerIndex];
+  if (!current) return false;
+  const oldPosition = state.viewerStart + state.viewerIndex;
+  const params = filterParams();
+  params.set("asset_id", current.asset_id);
+  const candidates = [...state.viewerSequenceIdsByPosition]
+    .filter(([position]) => delta > 0 ? position > oldPosition : position < oldPosition)
+    .sort((left, right) => delta > 0 ? left[0] - right[0] : right[0] - left[0])
+    .map(([, assetId]) => assetId);
+  if (candidates.length) params.set("asset_ids", JSON.stringify(candidates));
+  const located = await api("/api/browser/locate-asset?" + params);
+  let target;
+  if (located.found) {
+    target = located.index + delta;
+  } else {
+    const neighbor = candidates.map(id => located.asset_indices?.[id]).find(index => index != null);
+    if (neighbor != null) target = neighbor;
+    else {
+      const removedBefore = [...state.viewerRemovedPositions].filter(position => delta > 0 ? position <= oldPosition : position < oldPosition).length;
+      target = oldPosition + delta - removedBefore;
+    }
+  }
+  if (target < 0 || target >= located.total) return false;
+  await loadViewerPageWithParams(target, filterParams());
+  return true;
+}
+
+async function loadViewerPageWithParams(absoluteIndex, params) {
   const offset = Math.floor(absoluteIndex / state.viewerPageSize) * state.viewerPageSize;
   params.set("offset", String(offset));
   params.set("limit", String(state.viewerPageSize));
@@ -178,6 +228,10 @@ async function loadViewerPageAt(absoluteIndex) {
   state.viewerStart = offset;
   state.viewerTotal = data.total;
   state.viewerIndex = absoluteIndex - offset;
+  state.viewerFilterKey = String(filterParams());
+  state.viewerFilterDirty = false;
+  state.viewerSequenceIdsByPosition = new Map(data.items.map((item, index) => [offset + index, item.asset_id]));
+  state.viewerRemovedPositions.clear();
 }
 
 function updateViewerReviewState() {

@@ -340,11 +340,17 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 asset_id = _first(query, "asset_id", "")
                 items, _, _, _ = _browser_filtered_assets(workspace, query, handle)
                 found = next((index for index, item in enumerate(items) if item["asset_id"] == asset_id), None)
+                asset_ids = json.loads(_first(query, "asset_ids", "[]"))
+                if not isinstance(asset_ids, list) or len(asset_ids) > MAX_PAGE_SIZE or not all(isinstance(value, str) for value in asset_ids):
+                    raise InvalidRequest("asset_ids must be a list of at most 180 asset IDs")
+                requested_ids = set(asset_ids)
+                positions = {item["asset_id"]: index for index, item in enumerate(items) if item["asset_id"] in requested_ids}
                 self._send_json(200, {
                     "found": found is not None,
                     "index": found if found is not None else 0,
                     "offset": (found // 60) * 60 if found is not None else 0,
                     "total": len(items),
+                    "asset_indices": positions,
                 })
             elif request.path == "/api/browser":
                 self._send_json(200, _browser_assets(workspace, query, handle))
@@ -1323,7 +1329,7 @@ def _browser_filtered_assets(workspace, query, handle):
     threshold = float(_first(query, "threshold", "0.20"))
     if not 0 <= threshold <= 1:
         raise InvalidRequest("threshold must be between 0 and 1")
-    signature = tuple(sorted((k, tuple(v)) for k, v in query.items() if k not in {"offset", "limit", "view", "group_id", "async"}))
+    signature = tuple(sorted((k, tuple(v)) for k, v in query.items() if k not in {"offset", "limit", "view", "group_id", "async", "asset_id", "asset_ids"}))
     catalog_revision = _browser_catalog_revision(workspace)
     key = (str(workspace.root), handle, catalog_revision, signature)
     with _browser_lock:
