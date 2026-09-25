@@ -157,6 +157,15 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(_asset_detail(self.workspace, asset_id, "test")["user_decision"], "rejected")
         self.assertEqual(Workspace.open(self.workspace.root).configuration()["recommendation_threshold"], .95)
 
+    def test_manual_decision_keeps_browser_catalog_warm_for_fullscreen_navigation(self):
+        initial = self.browser(limit=1)
+        asset_id = initial["items"][0]["asset_id"]
+        with patch("archive_index.api.server._browser_catalog", side_effect=AssertionError("catalog must be reused")):
+            _set_user_decision(self.workspace, asset_id, "selected")
+            selected = self.browser(manual="selected", limit=1)
+        self.assertEqual(selected["total"], 1)
+        self.assertEqual(selected["items"][0]["asset_id"], asset_id)
+
     def test_recommendations_derive_from_group_representative_and_threshold(self):
         with self.workspace.transaction() as connection:
             connection.execute("UPDATE logical_asset SET capture_time = '2026-09-03T12:00:00', capture_time_kind = 'exif_local_unknown'")

@@ -2110,6 +2110,7 @@ def _recommendations(workspace: Workspace) -> dict[str, object]:
 
 def _set_user_decision(workspace: Workspace, asset_id: str, decision: str) -> dict[str, object]:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    previous_revision = _browser_catalog_revision(workspace)
     with workspace.transaction() as connection:
         cursor = connection.execute(
             "UPDATE logical_asset SET selection_state = ?, selection_updated_at = ?, updated_at = ? WHERE id = ?",
@@ -2117,6 +2118,20 @@ def _set_user_decision(workspace: Workspace, asset_id: str, decision: str) -> di
         )
         if cursor.rowcount != 1:
             raise ResourceNotFound("asset not found")
+    revision = _browser_catalog_revision(workspace)
+    if revision == previous_revision + 1:
+        root = str(workspace.root)
+        with _browser_lock:
+            prior_catalogs = [(key, items) for key, items in _browser_catalogs.items() if key[0] == root and key[2] == previous_revision]
+            for (_, handle, _), items in prior_catalogs:
+                refreshed = [
+                    {**item, "user_decision": decision, "user_decision_updated_at": now}
+                    if item["asset_id"] == asset_id else item
+                    for item in items
+                ]
+                _browser_catalogs[(root, handle, revision)] = refreshed
+            while len(_browser_catalogs) > 4:
+                del _browser_catalogs[next(iter(_browser_catalogs))]
     recommendation_ids, recommendation_run_id = _current_recommendations(workspace)
     return {
         "asset_id": asset_id,
