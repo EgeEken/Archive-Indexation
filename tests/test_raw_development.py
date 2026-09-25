@@ -219,6 +219,7 @@ class RawDevelopmentTests(unittest.TestCase):
             with patch.dict(sys.modules, {"rawpy": fake_rawpy}):
                 for settings in ({}, {"white_balance": 1}, {"saturation": 101}, {"highlights": 1}, {"shadows": 1}):
                     raw_development_preview(workspace, physical_id, 0, **settings)
+                raw_development_preview(workspace, physical_id, 0)
                 with self.assertRaises(ValueError):
                     raw_development_preview(workspace, physical_id, 0, saturation=151)
             self.assertEqual(len(_FakeRaw.calls), 5)

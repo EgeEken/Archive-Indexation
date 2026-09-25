@@ -76,6 +76,7 @@ function comparisonMseColor(value) {
 }
 
 function disposeRepresentationDialog(dialog) {
+  dialog.classList.remove("raw-inspection-dialog");
   const rawImage = dialog.querySelector("[data-raw-image]");
   if (rawImage?.dataset.objectUrl) URL.revokeObjectURL(rawImage.dataset.objectUrl);
   dialog._comparisonCamera?.destroy();
@@ -288,7 +289,8 @@ function openRawInspection(asset, fileId) {
   const dialog = $("representation-comparison");
   ensureRepresentationDialogLifecycle(dialog);
   disposeRepresentationDialog(dialog);
-  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><div class="raw-development-controls"><div class="raw-development-status"><span data-raw-wb-status>Camera/as-shot white balance when available</span><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-value>+0.00 EV</output><input data-raw-exposure type="range" min="-5" max="5" step="0.25" value="0" aria-label="RAW exposure"></label><label class="raw-exposure-control"><span>White balance</span><output data-raw-wb-value>Camera</output><small>Cool ← Camera → Warm</small><input data-raw-white-balance type="range" min="-100" max="100" step="1" value="0" aria-label="White balance"></label><label class="raw-exposure-control"><span>Saturation</span><output data-raw-saturation-value>100%</output><input data-raw-saturation type="range" min="50" max="150" step="1" value="100" aria-label="Saturation"></label><label class="raw-exposure-control"><span>Highlights</span><output data-raw-highlights-value>0</output><input data-raw-highlights type="range" min="-100" max="100" step="1" value="0" aria-label="Highlights"></label><label class="raw-exposure-control"><span>Shadows</span><output data-raw-shadows-value>0</output><input data-raw-shadows type="range" min="-100" max="100" step="1" value="0" aria-label="Shadows"></label><button type="button" class="secondary" data-raw-reset>Reset adjustments</button></div></div>`;
+  dialog.classList.add("raw-inspection-dialog");
+  dialog.innerHTML = `<div class="dialog-inner raw-inspection"><div class="dialog-header"><div><h2>${escapeHtml(file.filename)}</h2><p class="muted">RAW source (${escapeHtml(formatBytes(file.size_bytes))})</p></div><button class="icon" type="button" data-comparison-close aria-label="Close RAW viewer">×</button></div><div class="raw-inspection-stage" data-raw-stage><img class="hidden" data-raw-image alt="${escapeHtml(file.filename)}"><p class="raw-error hidden" data-raw-error>RAW development is unavailable for this file.</p></div><div class="raw-development-controls"><div class="raw-development-status"><span data-raw-wb-status>Camera/as-shot white balance when available</span><span class="raw-loading-inline hidden" data-raw-loading>Loading preview…</span></div><label class="raw-exposure-control"><span>Exposure</span><output data-raw-exposure-value>+0.00 EV</output><button type="button" class="raw-control-reset" data-raw-reset-control="exposure_ev">Reset</button><input data-raw-exposure type="range" min="-5" max="5" step="0.5" value="0" aria-label="RAW exposure"></label><label class="raw-exposure-control"><span>White balance</span><output data-raw-wb-value>Camera</output><button type="button" class="raw-control-reset" data-raw-reset-control="white_balance">Reset</button><small>Cool ← Camera → Warm</small><input data-raw-white-balance type="range" min="-100" max="100" step="5" value="0" aria-label="White balance"></label><label class="raw-exposure-control"><span>Saturation</span><output data-raw-saturation-value>100%</output><button type="button" class="raw-control-reset" data-raw-reset-control="saturation">Reset</button><input data-raw-saturation type="range" min="50" max="150" step="5" value="100" aria-label="Saturation"></label><label class="raw-exposure-control"><span>Highlights</span><output data-raw-highlights-value>0</output><button type="button" class="raw-control-reset" data-raw-reset-control="highlights">Reset</button><input data-raw-highlights type="range" min="-100" max="100" step="5" value="0" aria-label="Highlights"></label><label class="raw-exposure-control"><span>Shadows</span><output data-raw-shadows-value>0</output><button type="button" class="raw-control-reset" data-raw-reset-control="shadows">Reset</button><input data-raw-shadows type="range" min="-100" max="100" step="5" value="0" aria-label="Shadows"></label><button type="button" class="secondary" data-raw-reset>Reset all</button></div></div>`;
   dialog.showModal();
   dialog.querySelector("[data-comparison-close]").onclick = () => dialog.close();
   const stage = dialog.querySelector("[data-raw-stage]");
@@ -367,6 +369,14 @@ function openRawInspection(asset, fileId) {
     clearTimeout(timer);
     timer = setTimeout(load, 0);
   });
+  dialog.querySelectorAll("[data-raw-reset-control]").forEach(button => button.addEventListener("click", () => {
+    const input = inputs[button.dataset.rawResetControl];
+    if (!input) return;
+    input.value = input.defaultValue;
+    updateControls();
+    clearTimeout(timer);
+    timer = setTimeout(load, 180);
+  }));
   updateControls();
   load();
 }

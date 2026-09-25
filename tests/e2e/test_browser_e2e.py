@@ -456,6 +456,27 @@ class BrowserE2ETests(unittest.TestCase):
             self.page.locator("#viewer-close").click()
             self.page.locator("#viewer").wait_for(state="hidden")
 
+    def test_fullscreen_camera_fits_info_open_mobile_media_frame(self) -> None:
+        self.page.set_viewport_size({"width": 390, "height": 844})
+        self._open_main()
+        self.page.locator(".photo-card", has_text="portrait.jpg").first.locator(".thumb").click()
+        self.page.locator("#viewer[open]").wait_for()
+        self.page.locator("#viewer-info").click()
+        self.page.locator("#viewer-details:not(.hidden)").wait_for()
+        self.page.wait_for_function("document.querySelector('#viewer-media img.viewer-media')?.complete")
+        geometry = self.page.evaluate("""() => {
+          const frame=document.querySelector('#viewer-media-pane').getBoundingClientRect();
+          const image=document.querySelector('#viewer-media img.viewer-media').getBoundingClientRect();
+          return {frame:{left:frame.left,right:frame.right,top:frame.top,bottom:frame.bottom},image:{left:image.left,right:image.right,top:image.top,bottom:image.bottom}};
+        }""")
+        for edge in ("left", "right", "top", "bottom"):
+            if edge in ("left", "top"):
+                self.assertGreaterEqual(geometry["image"][edge] + 1, geometry["frame"][edge], geometry)
+            else:
+                self.assertLessEqual(geometry["image"][edge] - 1, geometry["frame"][edge], geometry)
+        self.page.locator("#viewer-close").click()
+        self.page.locator("#viewer").wait_for(state="hidden")
+
     def test_portrait_representation_comparison_geometry_and_difference_mode(self) -> None:
         self._open_main()
         self.page.locator(".photo-card", has_text="portrait.jpg").first.locator(".info-button").click()
@@ -566,7 +587,10 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(self.page.locator("#file-management-ruleset-kind").inner_text(), "Custom Ruleset")
         self.page.get_by_role("button", name="Analyze plan").click()
         self.page.locator('[data-file-management-section="plan"]:not(.hidden)').wait_for()
+        self.page.locator("#file-management-plan-progress:not(.hidden)").wait_for()
         self.page.locator("#file-management-plan-summary").wait_for()
+        self.page.locator(".plan-card").first.wait_for()
+        self.page.locator(".plan-card").first.wait_for()
         dialog_text = self.page.locator("#file-management-dialog").inner_text()
         self.assertNotIn("Settings JSON", dialog_text)
         self.assertNotIn("Rules JSON", dialog_text)
@@ -657,6 +681,16 @@ class BrowserE2ETests(unittest.TestCase):
         reset_params = self.page.evaluate("new URL(window.__rawUrls[3], location.origin).searchParams.toString()")
         self.assertEqual(self.page.locator("[data-raw-saturation-value]").inner_text(), "100%")
         self.assertIn("white_balance=0", reset_params)
+        saturation = self.page.locator("[data-raw-saturation]")
+        saturation.evaluate("node => { node.value = '125'; node.dispatchEvent(new Event('input', {bubbles: true})); }")
+        self.page.wait_for_function("window.__rawResolvers.length === 5")
+        self.page.evaluate("window.__resolveRaw(4)")
+        wb_reset = self.page.locator('[data-raw-reset-control="white_balance"]')
+        wb_reset.click()
+        self.assertEqual(self.page.locator("[data-raw-saturation]").input_value(), "125")
+        self.assertEqual(self.page.locator("[data-raw-white-balance]").input_value(), "0")
+        self.assertEqual(self.page.locator("[data-raw-white-balance]").get_attribute("step"), "5")
+        self.assertEqual(self.page.locator("[data-raw-exposure]").get_attribute("step"), "0.5")
 
     def test_similar_weaker_results_navigation_and_close_variants(self) -> None:
         self._open_main()
