@@ -212,7 +212,7 @@ async function renderRepresentationComparison(asset, compressedId, referenceId, 
       setWipe(samePair && dialog._comparisonWipePosition != null ? dialog._comparisonWipePosition : 50);
       let wiping = false;
       handle.addEventListener("pointerdown", event => { wiping = true; handle.setPointerCapture(event.pointerId); event.preventDefault(); });
-      handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = viewport.getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
+      handle.addEventListener("pointermove", event => { if (!wiping) return; const rect = result.querySelector("[data-comparison-frame]").getBoundingClientRect(); setWipe((event.clientX - rect.left) / rect.width * 100); });
       ["pointerup", "pointercancel"].forEach(name => handle.addEventListener(name, () => { wiping = false; }));
       handle.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); setWipe(Number(handle.getAttribute("aria-valuenow")) + (event.key === "ArrowRight" ? 5 : -5)); });
     }
