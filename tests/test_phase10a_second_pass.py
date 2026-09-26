@@ -142,13 +142,15 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual(len(list(cache.glob("*.webp"))), 1)
             self.assertFalse(list(cache.glob("*.tmp")))
 
-    def test_builtin_copy_rules_preserve_subfolders_and_rename(self):
+    def test_builtin_archive_rules_use_flat_safe_destinations_and_rename(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace.create(Path(directory))
             cleanup = next(item for item in list_rulesets(workspace) if item["id"] == "builtin-archive-cleanup")
             copies = [rule["action"] for rule in cleanup["rules"] if rule["action"].get("operation") == "copy"]
-            self.assertEqual([action["preserve_relative_structure"] for action in copies], [True, True])
-            self.assertTrue(all(action["rename_on_conflict"] for action in copies))
+            moves = [rule["action"] for rule in cleanup["rules"] if rule["action"].get("operation") == "move"]
+            self.assertEqual([action["preserve_relative_structure"] for action in copies], [False])
+            self.assertEqual([action["conflict_policy"] for action in copies + moves], ["rename", "rename"])
+            self.assertEqual([action["preserve_relative_structure"] for action in moves], [False])
 
     def test_copy_collision_uses_windows_suffix_and_can_be_blocked(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -164,7 +166,8 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertTrue(operation["renamed_to_avoid_conflict"])
             blocked = save_ruleset(workspace, name="Copy blocked", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "destination_dir": "out", "rename_on_conflict": False}}])
             operation = build_dry_run_plan(workspace, blocked["id"])["operations"][0]
-            self.assertTrue(any("already exists" in conflict for conflict in operation["conflicts"]))
+            self.assertEqual(operation["destination_status"], "skipped")
+            self.assertFalse(operation["conflicts"])
 
     def test_file_management_targets_are_contained_before_conflict_inspection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -229,7 +232,8 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual([item["target_relative_path"] for item in operations], ["out/file.jpg", "out/file (1).jpg"])
             blocked = save_ruleset(workspace, name="Blocked", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": "out/file.jpg", "rename_on_conflict": False}}])
             operations = build_dry_run_plan(workspace, blocked["id"])["operations"]
-            self.assertTrue(any("planned output" in conflict for conflict in operations[1]["conflicts"]))
+            self.assertEqual(operations[1]["destination_status"], "skipped")
+            self.assertFalse(operations[1]["conflicts"])
 
     def test_executable_summary_excludes_blocked_and_conflicted_operations(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -277,7 +281,8 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual(operation["target_relative_path"], "ODA8_7608 (1).mp4")
             blocked = save_ruleset(workspace, name="Keep blocked", rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep", "compress_in_place": True, "rename_on_conflict": False}}])
             operation = build_dry_run_plan(workspace, blocked["id"])["operations"][0]
-            self.assertTrue(any("already exists" in conflict for conflict in operation["conflicts"]))
+            self.assertEqual(operation["destination_status"], "skipped")
+            self.assertFalse(operation["conflicts"])
 
     def test_av1_blocker_is_grouped_once_and_capability_is_reported(self):
         with tempfile.TemporaryDirectory() as directory:

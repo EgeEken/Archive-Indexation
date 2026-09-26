@@ -11,6 +11,7 @@ from archive_index.file_management import build_dry_run_plan, save_ruleset
 from archive_index.file_management_executor import (
     ExecutionConflict,
     OperationFailure,
+    discard_execution,
     get_execution,
     prepare_execution,
     retry_failed,
@@ -70,6 +71,51 @@ class Phase10BExecutorTests(unittest.TestCase):
         self.assertEqual(result["operations"][0]["status"], "failed")
         self.assertEqual((self.root / "copies" / "photo.jpg").read_bytes(), b"unrelated")
 
+    def test_skip_policy_is_persisted_without_writing(self):
+        (self.root / "copies").mkdir()
+        (self.root / "copies" / "photo.jpg").write_bytes(b"unrelated")
+        _, execution = self._prepare("copy", destination_dir="copies", conflict_policy="skip")
+        self.assertEqual(execution["operations"][0]["status"], "skipped")
+        result = self._run(execution["id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["counts"]["skipped"], 1)
+        self.assertEqual((self.root / "copies" / "photo.jpg").read_bytes(), b"unrelated")
+
+    def test_overwrite_requires_reviewed_target_and_rejects_changed_target(self):
+        (self.root / "copies").mkdir()
+        target = self.root / "copies" / "photo.jpg"
+        target.write_bytes(b"old target")
+        _, execution = self._prepare("copy", destination_dir="copies", conflict_policy="overwrite")
+        self.assertIsNotNone(execution["operations"][0]["target_expected_sha256"])
+        target.write_bytes(b"changed after review")
+        result = self._run(execution["id"])
+        self.assertEqual(result["operations"][0]["status"], "failed")
+        self.assertIn("Destination changed since the plan was confirmed.", result["operations"][0]["error_message"])
+        self.assertEqual(target.read_bytes(), b"changed after review")
+
+    def test_overwrite_replaces_exact_reviewed_target(self):
+        (self.root / "copies").mkdir()
+        target = self.root / "copies" / "photo.jpg"
+        target.write_bytes(b"old target")
+        _, execution = self._prepare("copy", destination_dir="copies", conflict_policy="overwrite")
+        result = self._run(execution["id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(target.read_bytes(), b"photo contents")
+
+    def test_same_digest_reuses_draft_and_changed_rules_supersede_it(self):
+        ruleset = save_ruleset(self.workspace, name=f"draft-{time.time_ns()}", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "destination_dir": "copies"}}])
+        plan = build_dry_run_plan(self.workspace, ruleset["id"])
+        first = prepare_execution(self.workspace, ruleset["id"], plan["plan_digest"])
+        second = prepare_execution(self.workspace, ruleset["id"], plan["plan_digest"])
+        self.assertEqual(first["id"], second["id"])
+        changed = save_ruleset(self.workspace, name=ruleset["name"], ruleset_id=ruleset["id"], rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "destination_dir": "other"}}])
+        changed_plan = build_dry_run_plan(self.workspace, changed["id"])
+        replacement = prepare_execution(self.workspace, changed["id"], changed_plan["plan_digest"])
+        self.assertNotEqual(replacement["id"], first["id"])
+        self.assertEqual(get_execution(self.workspace, first["id"])["status"], "superseded")
+        discard_execution(self.workspace, replacement["id"])
+        self.assertEqual(get_execution(self.workspace, replacement["id"])["status"], "abandoned")
+
     def test_executor_revalidates_windows_target_names(self):
         _, execution = self._prepare("copy", destination_dir="copies")
         with self.workspace.transaction() as connection:
@@ -112,6 +158,23 @@ class Phase10BExecutorTests(unittest.TestCase):
         result = self._run(execution["id"])
         self.assertEqual(result["status"], "completed")
         self.assertFalse((self.root / "moved" / "photo.jpg").exists())
+
+    def test_move_refresh_preserves_asset_identity_and_manual_decision(self):
+        with self.workspace.transaction() as connection:
+            logical = connection.execute("SELECT logical_asset_id FROM physical_file WHERE relative_path = 'photo.jpg'").fetchone()[0]
+            connection.execute("UPDATE logical_asset SET selection_state = 'selected' WHERE id = ?", (logical,))
+        _, execution = self._prepare("move", destination_dir="moved")
+        result = self._run(execution["id"])
+        self.assertEqual(result["status"], "completed")
+        connection = self.workspace.connect()
+        try:
+            row = connection.execute("SELECT logical_asset_id FROM physical_file WHERE relative_path = 'moved/photo.jpg' AND is_online = 1").fetchone()
+            decision = connection.execute("SELECT selection_state FROM logical_asset WHERE id = ?", (logical,)).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], logical)
+        self.assertEqual(decision, "selected")
 
     def test_cross_device_move_recovers_when_source_removal_fails(self):
         _, execution = self._prepare("move", destination_dir="moved")

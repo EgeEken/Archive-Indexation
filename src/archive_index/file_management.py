@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from .workspace import Workspace, WorkspaceError
+from .workspace import Workspace, WorkspaceError, _is_reparse_point
 from .media.capabilities import av1_capability
 
 BUILTIN_HIGH_QUALITY_PROFILE_ID = "builtin-jxl-high-quality"
@@ -29,6 +29,7 @@ BUILTIN_PROFILE_IDS = {
 }
 BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
 COMPRESSION_EXECUTION_BLOCKER = "Production compression execution is not enabled until Phase 10C."
+CONFLICT_POLICIES = {"rename", "skip", "overwrite"}
 _plan_runs = {}
 _plan_runs_lock = threading.Lock()
 
@@ -184,7 +185,7 @@ def save_ruleset(
                 (
                     rule_id, ruleset_id, position,
                     1, json.dumps(match, sort_keys=True),
-                    json.dumps(action, sort_keys=True), now, now,
+                    json.dumps(_normalize_action(action), sort_keys=True), now, now,
                 ),
             )
     return next(item for item in list_rulesets(workspace) if item["id"] == ruleset_id)
@@ -329,18 +330,19 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             operation = item["operation"]
             target = item["target"]
             source_replacement = operation == "compress" and item["action"].get("source_disposition") == "replace" and item["action"].get("compress_in_place", True)
-            rename_on_conflict = item["action"].get("rename_on_conflict", True) is not False
+            conflict_policy = _conflict_policy(item["action"])
             renamed_from = None
             replaces_source_in_place = False
+            target_snapshot = None
             if target is not None:
-                target, destination_status, renamed_from, replaces_source_in_place, target_conflict, coalesced = _resolve_target(
+                target, destination_status, renamed_from, replaces_source_in_place, target_conflict, coalesced, target_snapshot = _resolve_target(
                     workspace,
                     target,
                     source,
                     row["sha256"],
                     operation,
                     source_replacement,
-                    rename_on_conflict,
+                    conflict_policy,
                     targets,
                     directory_entries,
                     target_statuses,
@@ -374,6 +376,8 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "estimated_storage_delta_bytes": _storage_delta(row["size_bytes"] or 0, item["profile"], operation, item["action"]),
                 "source_disposition": item["action"].get("source_disposition", "keep"),
                 "destination_status": destination_status,
+                "conflict_policy": conflict_policy,
+                "target_snapshot": target_snapshot,
                 "renamed_from": renamed_from,
                 "renamed_to_avoid_conflict": renamed_from is not None,
                 "replaces_source_in_place": replaces_source_in_place,
@@ -597,8 +601,10 @@ def _workspace_target_status(workspace: Workspace, relative_path: str | None, so
         path = _case_insensitive_path(workspace, relative_path, directory_entries)
     except WorkspaceError:
         return "conflict"
-    if path is None or not path.is_file():
+    if path is None:
         status = None
+    elif _is_reparse_point(path) or not path.is_file():
+        status = "conflict"
     elif not source_sha256:
         status = "conflict"
     else:
@@ -616,6 +622,33 @@ def _workspace_target_status(workspace: Workspace, relative_path: str | None, so
     if target_statuses is not None:
         target_statuses[cache_key] = status
     return status
+
+
+def _target_snapshot(workspace: Workspace, relative_path: str | None) -> dict[str, object] | None:
+    if not relative_path:
+        return None
+    try:
+        path = _case_insensitive_path(workspace, relative_path)
+        if path is None or not path.is_file() or _is_reparse_point(path):
+            return None
+        stat_result = path.stat()
+        return {
+            "relative_path": relative_path,
+            "size_bytes": stat_result.st_size,
+            "mtime_ns": stat_result.st_mtime_ns,
+            "sha256": _hash_path(path),
+            "file_type": "regular",
+        }
+    except (OSError, WorkspaceError):
+        return None
+
+
+def _hash_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _case_insensitive_path(workspace: Workspace, relative_path: str, directory_entries=None) -> Path | None:
@@ -643,39 +676,49 @@ def _resolve_target(
     source_sha256: str | None,
     operation: str,
     source_replacement: bool,
-    rename_on_conflict: bool,
+    conflict_policy: str,
     planned_targets: dict[str, tuple[str, str, str | None]],
     directory_entries=None,
     target_statuses=None,
     target_hashes=None,
-) -> tuple[str, str | None, str | None, bool, str | None, bool]:
+ ) -> tuple[str, str | None, str | None, bool, str | None, bool, dict[str, object] | None]:
     source_key = source.casefold()
     target_key = target.casefold()
     planned = planned_targets.get(target_key)
     if planned is not None and planned[2] and source_sha256 and planned[2] == source_sha256:
-        return target, "already_satisfied", None, False, None, True
+        return target, "already_satisfied", None, False, None, True, None
     if target_key == source_key:
         if source_replacement:
-            return target, "replace_source", None, True, None, False
+            return target, "replace_source", None, True, None, False, _target_snapshot(workspace, target)
         if operation == "move":
-            return target, "already_satisfied", None, False, None, False
+            return target, "already_satisfied", None, False, None, False, None
         if operation == "copy":
-            return target, "already_satisfied", None, False, None, False
-        if rename_on_conflict:
+            return target, "already_satisfied", None, False, None, False, None
+        if conflict_policy == "rename":
             renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
-            return renamed, "renamed", target, False, None, False
-        return target, "conflict", None, False, "A file already exists at this destination.", False
+            return renamed, "renamed", target, False, None, False, None
+        if conflict_policy == "skip":
+            return target, "skipped", None, False, None, False, None
+        return target, "overwrite", None, False, None, False, _target_snapshot(workspace, target)
 
     existing = _workspace_target_status(workspace, target, source_sha256, directory_entries, target_statuses, target_hashes)
     if existing == "already_satisfied" and planned is None:
-        return target, existing, None, False, None, False
+        return target, existing, None, False, None, False, None
     if planned is None and existing is None:
-        return target, None, None, False, None, False
-    if rename_on_conflict:
+        return target, None, None, False, None, False, None
+    if planned is not None:
+        if conflict_policy == "rename":
+            renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
+            return renamed, "renamed", target, False, None, False, None
+        if conflict_policy == "skip":
+            return target, "skipped", None, False, None, False, None
+        return target, "conflict", None, False, "Another planned output uses this destination.", False, None
+    if conflict_policy == "rename":
         renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
-        return renamed, "renamed", target, False, None, False
-    reason = "Another planned output already uses this destination." if planned is not None else "A file already exists at this destination."
-    return target, "conflict", None, False, reason, False
+        return renamed, "renamed", target, False, None, False, None
+    if conflict_policy == "skip":
+        return target, "skipped", None, False, None, False, None
+    return target, "overwrite", None, False, None, False, _target_snapshot(workspace, target)
 
 
 def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str, str | None]], directory_entries=None, target_statuses=None, target_hashes=None) -> str:
@@ -737,7 +780,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
         return groups
 
     candidate_groups = summarize(operations)
-    executable_operations = [operation for operation in operations if not operation["conflicts"] and not operation.get("blockers")]
+    executable_operations = [operation for operation in operations if _is_plan_executable(operation)]
     groups = summarize(executable_operations)
     for name, group in groups.items():
         group["candidate_file_count"] = candidate_groups[name]["file_count"]
@@ -809,6 +852,25 @@ def _storage_delta(size: int, profile: dict[str, object] | None, operation: str,
     return output - size if action.get("source_disposition", "keep") == "replace" else output
 
 
+def _conflict_policy(action: dict[str, object] | None) -> str:
+    action = action or {}
+    policy = action.get("conflict_policy")
+    if policy in CONFLICT_POLICIES:
+        return str(policy)
+    return "skip" if action.get("rename_on_conflict") is False else "rename"
+
+
+def _normalize_action(action: dict[str, object]) -> dict[str, object]:
+    normalized = dict(action)
+    normalized["conflict_policy"] = _conflict_policy(action)
+    normalized.pop("rename_on_conflict", None)
+    return normalized
+
+
+def _is_plan_executable(operation: dict[str, object]) -> bool:
+    return not operation.get("conflicts") and not operation.get("blockers") and operation.get("destination_status") not in {"already_satisfied", "skipped"}
+
+
 def _profile_snapshot(profile: dict[str, object] | None) -> dict[str, object] | None:
     if profile is None:
         return None
@@ -834,6 +896,8 @@ def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object]
                 "source_mtime_ns": operation.get("source_mtime_ns"),
                 "source_sha256": operation.get("source_sha256"),
                 "target_relative_path": operation.get("target_relative_path"),
+                "conflict_policy": operation.get("conflict_policy", "rename"),
+                "target_snapshot": operation.get("target_snapshot"),
                 "source_disposition": operation.get("source_disposition"),
                 "profile_id": operation.get("profile_id"),
                 "profile_snapshot": operation.get("profile_snapshot"),
@@ -898,7 +962,7 @@ def _rule(row):
         "position": row["position"],
         "enabled": bool(row["enabled"]),
         "match": _json(row["match_json"]) or {},
-        "action": _json(row["action_json"]) or {},
+        "action": _normalize_action(_json(row["action_json"]) or {}),
     }
 
 
@@ -947,12 +1011,12 @@ def _ensure_builtins(workspace: Workspace) -> None:
     cleanup_rules = [
         {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "copy", "destination_dir": "raws", "preserve_relative_structure": True, "rename_on_conflict": True}},
-        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": True, "rename_on_conflict": True}},
-        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "rename_on_conflict": True}},
+        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "move", "destination_dir": "raws", "preserve_relative_structure": False, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
         {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "rename_on_conflict": True}},
+        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
     ]
     selected_rules = [
         {"enabled": True, "match": {"selection_state": "rejected"}, "action": {"operation": "delete"}},
@@ -996,7 +1060,6 @@ def _timestamp() -> str:
 
 
 def _ensure_no_active_execution(workspace: Workspace) -> None:
-    from .file_management_executor import has_active_execution
+    from .file_management_executor import ensure_settings_unlocked
 
-    if has_active_execution(workspace):
-        raise WorkspaceError("File Management settings cannot change while an execution is active.")
+    ensure_settings_unlocked(workspace)

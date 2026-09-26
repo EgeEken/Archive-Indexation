@@ -57,9 +57,12 @@ from ..file_management_previews import cached_preview_file, custom_profile_previ
 from ..file_management_executor import (
     ExecutionConflict,
     ExecutionNotFound,
+    abandon_execution,
     cancel_execution,
+    discard_execution,
     get_active_execution,
     get_execution,
+    get_latest_execution,
     prepare_execution,
     retry_failed,
     resume_execution,
@@ -391,7 +394,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             elif request.path == "/api/file-management/plan/status":
                 self._send_json(200, plan_analysis_status(workspace, _first(query, "session_id", "")))
             elif request.path == "/api/file-management/executions/active":
-                self._send_json(200, {"execution": get_active_execution(workspace)})
+                current = get_active_execution(workspace)
+                self._send_json(200, {"execution": current or get_latest_execution(workspace), "current_unresolved": current, "latest_execution": get_latest_execution(workspace)})
             elif request.path.startswith("/api/file-management/executions/"):
                 execution_id = request.path.rsplit("/", 1)[-1]
                 self._send_json(200, {"execution": get_execution(workspace, execution_id)})
@@ -516,6 +520,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 actions = {
                     "start": start_execution,
                     "cancel": cancel_execution,
+                    "discard": discard_execution,
+                    "abandon": abandon_execution,
                     "resume": resume_execution,
                     "retry-failed": retry_failed,
                 }

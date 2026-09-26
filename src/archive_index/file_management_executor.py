@@ -22,10 +22,11 @@ from .indexing.scanner import hash_file, scan
 from .workspace import INDEX_DIRECTORY, Workspace, WorkspaceError, _is_reparse_point
 
 LOGGER = logging.getLogger(__name__)
-CHUNK_SIZE = 1024 * 1024
+CHUNK_SIZE = 4 * 1024 * 1024
 SUPPORTED_OPERATIONS = ("copy", "move", "delete")
-RUN_ACTIVE = {"draft", "running", "cancelling", "interrupted"}
-RUN_TERMINAL = {"cancelled", "completed", "completed_with_errors", "failed"}
+RUN_MUTATING = {"running", "cancelling"}
+RUN_UNRESOLVED = {"draft", "running", "cancelling", "interrupted"}
+RUN_TERMINAL = {"cancelled", "completed", "completed_with_errors", "failed", "superseded", "abandoned"}
 OPERATION_PHASE = {"copy": 0, "compress": 1, "move": 2, "delete": 3}
 
 
@@ -54,6 +55,8 @@ class _Worker:
 
 _workers: dict[str, _Worker] = {}
 _workers_lock = threading.Lock()
+_progress_marks: dict[str, tuple[float, int]] = {}
+_progress_lock = threading.Lock()
 
 
 def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest: str) -> dict[str, object]:
@@ -67,13 +70,25 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
         raise ExecutionConflict("File Management cannot start while a workspace job is running.")
     with workspace.transaction() as connection:
         active = connection.execute(
-            "SELECT id, status FROM file_management_execution WHERE status IN (?, ?, ?, ?) ORDER BY created_at DESC LIMIT 1",
-            tuple(RUN_ACTIVE),
+            "SELECT id, status FROM file_management_execution WHERE status IN (?, ?, ?) ORDER BY created_at DESC LIMIT 1",
+            tuple(RUN_MUTATING | {"interrupted"}),
         ).fetchone()
         if active is not None:
-            raise ExecutionConflict("A File Management execution is already active for this workspace.")
-        execution_id = str(uuid.uuid4())
+            if active["status"] == "interrupted":
+                raise ExecutionConflict("An interrupted File Management execution must be resumed or abandoned before starting a new one.")
+            raise ExecutionConflict("A File Management execution is already changing files for this workspace.")
+        existing = connection.execute(
+            "SELECT id FROM file_management_execution WHERE status = 'draft' AND ruleset_id IS ? AND plan_digest = ? ORDER BY created_at DESC LIMIT 1",
+            (plan.get("ruleset_id"), plan_digest),
+        ).fetchone()
+        if existing is not None:
+            return get_execution(workspace, existing["id"])
         now = _timestamp()
+        connection.execute(
+            "UPDATE file_management_execution SET status = 'superseded', finished_at = ?, updated_at = ?, error_message = ? WHERE status = 'draft'",
+            (now, now, "Superseded by a newer execution review."),
+        )
+        execution_id = str(uuid.uuid4())
         operations = sorted(
             enumerate(plan.get("operations") or []),
             key=lambda item: (OPERATION_PHASE.get(str(item[1].get("operation")), 9), item[0]),
@@ -113,13 +128,15 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     source_size_bytes, source_mtime_ns, source_sha256, target_relative_path,
                     profile_id, source_disposition, destination_status, conflicts_json,
                     blockers_json, rule_snapshot_json, profile_snapshot_json,
-                    estimated_output_bytes, estimated_storage_delta, error_message, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_output_bytes, estimated_storage_delta, conflict_policy,
+                    target_expected_size_bytes, target_expected_mtime_ns, target_expected_sha256,
+                    target_expected_file_type, error_message, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()), execution_id, position,
                     OPERATION_PHASE.get(str(operation.get("operation")), 9),
-                    operation.get("operation"), status, "excluded" if status == "excluded" else "pending",
+                    operation.get("operation"), status, status if status in {"excluded", "skipped"} else "pending",
                     operation.get("physical_file_id"), operation.get("logical_asset_id"), operation.get("filename") or "File",
                     operation.get("source_relative_path"), operation.get("source_size_bytes", operation.get("bytes")),
                     operation.get("source_mtime_ns"), operation.get("source_sha256"), operation.get("target_relative_path"),
@@ -127,6 +144,11 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     _json(operation.get("conflicts") or []), _json(operation.get("blockers") or []),
                     _json(operation.get("rule_snapshot") or {}), _json(operation.get("profile_snapshot")),
                     int(operation.get("estimated_output_bytes") or 0), int(operation.get("estimated_storage_delta_bytes") or 0),
+                    operation.get("conflict_policy", "rename"),
+                    (operation.get("target_snapshot") or {}).get("size_bytes"),
+                    (operation.get("target_snapshot") or {}).get("mtime_ns"),
+                    (operation.get("target_snapshot") or {}).get("sha256"),
+                    (operation.get("target_snapshot") or {}).get("file_type"),
                     reason, now,
                 ),
             )
@@ -138,11 +160,52 @@ def get_active_execution(workspace: Workspace) -> dict[str, object] | None:
     connection = workspace.connect()
     try:
         row = connection.execute(
+            "SELECT id FROM file_management_execution WHERE status IN ('draft', 'running', 'cancelling', 'interrupted') ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    return get_execution(workspace, row["id"]) if row is not None else None
+
+
+def get_latest_execution(workspace: Workspace) -> dict[str, object] | None:
+    connection = workspace.connect()
+    try:
+        row = connection.execute(
             "SELECT id FROM file_management_execution ORDER BY updated_at DESC, created_at DESC LIMIT 1"
         ).fetchone()
     finally:
         connection.close()
     return get_execution(workspace, row["id"]) if row is not None else None
+
+
+def discard_execution(workspace: Workspace, execution_id: str) -> dict[str, object]:
+    with workspace.transaction() as connection:
+        row = connection.execute("SELECT status FROM file_management_execution WHERE id = ?", (execution_id,)).fetchone()
+        if row is None:
+            raise ExecutionNotFound("File Management execution was not found.")
+        if row["status"] != "draft":
+            raise ExecutionConflict("Only a draft execution review can be discarded.")
+        now = _timestamp()
+        connection.execute(
+            "UPDATE file_management_execution SET status = 'abandoned', finished_at = ?, updated_at = ?, error_message = ? WHERE id = ?",
+            (now, now, "Execution review discarded by the user.", execution_id),
+        )
+    return get_execution(workspace, execution_id)
+
+
+def abandon_execution(workspace: Workspace, execution_id: str) -> dict[str, object]:
+    with workspace.transaction() as connection:
+        row = connection.execute("SELECT status FROM file_management_execution WHERE id = ?", (execution_id,)).fetchone()
+        if row is None:
+            raise ExecutionNotFound("File Management execution was not found.")
+        if row["status"] != "interrupted":
+            raise ExecutionConflict("Only an interrupted execution can be abandoned.")
+        now = _timestamp()
+        connection.execute(
+            "UPDATE file_management_execution SET status = 'abandoned', finished_at = ?, updated_at = ?, warning_message = ? WHERE id = ?",
+            (now, now, "Completed filesystem changes remain; pending operations were abandoned.", execution_id),
+        )
+    return get_execution(workspace, execution_id)
 
 
 def get_execution(workspace: Workspace, execution_id: str) -> dict[str, object]:
@@ -239,10 +302,21 @@ def has_active_execution(workspace: Workspace) -> bool:
     connection = workspace.connect()
     try:
         return connection.execute(
-            "SELECT 1 FROM file_management_execution WHERE status IN ('draft', 'running', 'cancelling', 'interrupted') LIMIT 1"
+            "SELECT 1 FROM file_management_execution WHERE status IN ('running', 'cancelling') LIMIT 1"
         ).fetchone() is not None
     finally:
         connection.close()
+
+
+def ensure_settings_unlocked(workspace: Workspace) -> None:
+    _recover_startup(workspace)
+    if has_active_execution(workspace):
+        raise WorkspaceError("File Management settings cannot change while an execution is active.")
+    with workspace.transaction() as connection:
+        connection.execute(
+            "UPDATE file_management_execution SET status = 'superseded', finished_at = ?, updated_at = ?, error_message = ? WHERE status = 'draft'",
+            (_timestamp(), _timestamp(), "Superseded because File Management settings changed."),
+        )
 
 
 def recover_workspace(workspace: Workspace) -> None:
@@ -254,6 +328,7 @@ def recover_workspace(workspace: Workspace) -> None:
 def _start_execution(workspace: Workspace, execution_id: str, allowed: set[str]) -> dict[str, object]:
     if _active_job(workspace) is not None:
         raise ExecutionConflict("File Management cannot start while a workspace job is running.")
+    _recover_startup(workspace)
     key = _workspace_key(workspace)
     with _workers_lock:
         worker = _workers.get(key)
@@ -263,6 +338,14 @@ def _start_execution(workspace: Workspace, execution_id: str, allowed: set[str])
             row = connection.execute("SELECT status FROM file_management_execution WHERE id = ?", (execution_id,)).fetchone()
             if row is None:
                 raise ExecutionNotFound("File Management execution was not found.")
+            other = connection.execute(
+                "SELECT id, status FROM file_management_execution WHERE id != ? AND status IN ('running', 'cancelling', 'interrupted') LIMIT 1",
+                (execution_id,),
+            ).fetchone()
+            if other is not None:
+                if other["status"] == "interrupted":
+                    raise ExecutionConflict("An interrupted File Management execution must be resumed or abandoned before starting a new one.")
+                raise ExecutionConflict("A File Management execution is already changing files for this workspace.")
             if row["status"] not in allowed:
                 raise ExecutionConflict("This execution cannot be started in its current state.")
             free = _available_space(workspace)
@@ -338,18 +421,25 @@ def _execute_operation(workspace: Workspace, execution_id: str, operation, cance
 
 
 def _copy(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
-    source = _validate_source(workspace, operation)
+    source = _validate_source(workspace, operation, verify_hash=False)
     target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
     occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
     if occupied is not None:
         if operation.get("recovery_eligible") and _matches_expected(occupied, operation):
             _accept_existing_copy(workspace, execution_id, operation, source, occupied)
             return
-        raise OperationFailure("Destination now exists.")
+        if operation.get("conflict_policy") == "overwrite":
+            _validate_authorized_target(workspace, operation, occupied)
+        else:
+            raise OperationFailure("Destination now exists.")
     _ensure_target_directory(workspace, operation["target_relative_path"])
     target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
-    if _existing_case_insensitive_target(workspace, operation["target_relative_path"]) is not None:
-        raise OperationFailure("Destination now exists.")
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None:
+        if operation.get("conflict_policy") == "overwrite":
+            _validate_authorized_target(workspace, operation, occupied)
+        else:
+            raise OperationFailure("Destination now exists.")
     _ensure_operation_space(workspace, int(operation["source_size_bytes"] or 0))
     temp = _owned_temp_path(workspace, execution_id, operation)
     _set_temp(workspace, operation["id"], temp)
@@ -368,19 +458,22 @@ def _copy(workspace: Workspace, execution_id: str, operation, cancel: threading.
             output_file.flush()
             os.fsync(output_file.fileno())
         shutil.copystat(source, temp, follow_symlinks=False)
+        _update_progress(workspace, operation["id"], copied, force=True)
         if copied != int(operation["source_size_bytes"] or 0) or digest.hexdigest() != operation["source_sha256"]:
-            raise OperationFailure("Output hash did not match source.")
+            raise OperationFailure("Source changed since the plan was confirmed.")
+        current_source = source.stat()
+        if current_source.st_size != int(operation["source_size_bytes"] or 0) or current_source.st_mtime_ns != int(operation["source_mtime_ns"] or 0):
+            raise OperationFailure("Source changed since the plan was confirmed.")
         _set_stage(workspace, operation["id"], "finalizing")
-        _validate_source(workspace, operation)
         target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
-        if _existing_case_insensitive_target(workspace, operation["target_relative_path"]) is not None:
-            raise OperationFailure("Destination now exists.")
-        _atomic_no_replace(temp, target, remove_source=False)
-        output_sha = hash_file(target)
-        output_size = target.stat().st_size
-        if output_size != copied or output_sha != operation["source_sha256"]:
-            raise OperationFailure("Output hash did not match source.")
-        _complete_operation(workspace, execution_id, operation, output_size, output_sha, copied, copied, 0, 0)
+        occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+        if operation.get("conflict_policy") == "overwrite" and occupied is not None:
+            _atomic_replace_authorized(workspace, temp, target, operation)
+        else:
+            if occupied is not None:
+                raise OperationFailure("Destination now exists.")
+            _atomic_no_replace(temp, target, remove_source=False)
+        _complete_operation(workspace, execution_id, operation, copied, operation["source_sha256"], copied, copied, 0, 0)
     except Exception:
         if temp.exists():
             _remove_owned_temp(workspace, temp)
@@ -393,17 +486,25 @@ def _move(workspace: Workspace, execution_id: str, operation, cancel: threading.
     occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
     if occupied is not None:
         if operation.get("recovery_eligible") and _matches_expected(occupied, operation):
+            source_candidate = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+            if not source_candidate.exists():
+                _complete_operation(workspace, execution_id, operation, occupied.stat().st_size, operation["source_sha256"], 0, 0, int(operation["source_size_bytes"] or 0), 0)
+                return
             _validate_source(workspace, operation)
             _set_stage(workspace, operation["id"], "deleting")
             _unlink_source(workspace, operation)
             _complete_operation(workspace, execution_id, operation, occupied.stat().st_size, operation["source_sha256"], 0, 0, int(operation["source_size_bytes"] or 0), 0)
+            return
+        if operation.get("conflict_policy") == "overwrite":
+            _move_by_copy(workspace, execution_id, operation, cancel, source, target, allow_overwrite=True)
             return
         raise OperationFailure("Destination now exists.")
     _ensure_target_directory(workspace, operation["target_relative_path"])
     target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
     if _existing_case_insensitive_target(workspace, operation["target_relative_path"]) is not None:
         raise OperationFailure("Destination now exists.")
-    _set_stage(workspace, operation["id"], "finalizing")
+    _validate_source(workspace, operation)
+    _set_stage(workspace, operation["id"], "deleting")
     try:
         _atomic_no_replace(source, target, remove_source=True)
     except OSError as error:
@@ -416,7 +517,7 @@ def _move(workspace: Workspace, execution_id: str, operation, cancel: threading.
     _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], 0, 0, int(operation["source_size_bytes"] or 0), 0)
 
 
-def _move_by_copy(workspace: Workspace, execution_id: str, operation, cancel: threading.Event, source: Path, target: Path) -> None:
+def _move_by_copy(workspace: Workspace, execution_id: str, operation, cancel: threading.Event, source: Path, target: Path, *, allow_overwrite: bool = False) -> None:
     _ensure_operation_space(workspace, int(operation["source_size_bytes"] or 0))
     temp = _owned_temp_path(workspace, execution_id, operation)
     _set_temp(workspace, operation["id"], temp)
@@ -425,11 +526,13 @@ def _move_by_copy(workspace: Workspace, execution_id: str, operation, cancel: th
     _set_stage(workspace, operation["id"], "finalizing")
     _validate_source(workspace, operation)
     target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
-    if _existing_case_insensitive_target(workspace, operation["target_relative_path"]) is not None:
-        raise OperationFailure("Destination now exists.")
-    _atomic_no_replace(temp, target, remove_source=False)
-    if not _matches_expected(target, operation):
-        raise OperationFailure("Output hash did not match source.")
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None:
+        if not allow_overwrite:
+            raise OperationFailure("Destination now exists.")
+        _atomic_replace_authorized(workspace, temp, target, operation)
+    else:
+        _atomic_no_replace(temp, target, remove_source=False)
     _validate_source(workspace, operation)
     _set_stage(workspace, operation["id"], "deleting")
     _unlink_source(workspace, operation)
@@ -437,6 +540,11 @@ def _move_by_copy(workspace: Workspace, execution_id: str, operation, cancel: th
 
 
 def _delete(workspace: Workspace, execution_id: str, operation) -> None:
+    if operation.get("recovery_eligible"):
+        source_candidate = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+        if not source_candidate.exists():
+            _complete_operation(workspace, execution_id, operation, None, None, 0, 0, 0, int(operation["source_size_bytes"] or 0))
+            return
     _validate_source(workspace, operation)
     _set_stage(workspace, operation["id"], "deleting")
     _unlink_source(workspace, operation)
@@ -458,6 +566,7 @@ def _copy_to_temp(workspace, execution_id, operation, cancel, source: Path, temp
             output_file.flush()
             os.fsync(output_file.fileno())
         shutil.copystat(source, temp, follow_symlinks=False)
+        _update_progress(workspace, operation["id"], copied, force=True)
     except Exception:
         _remove_owned_temp(workspace, temp)
         raise
@@ -467,7 +576,7 @@ def _copy_to_temp(workspace, execution_id, operation, cancel, source: Path, temp
     return copied
 
 
-def _validate_source(workspace: Workspace, operation) -> Path:
+def _validate_source(workspace: Workspace, operation, *, verify_hash: bool = True) -> Path:
     relative = operation["source_relative_path"]
     connection = workspace.connect()
     try:
@@ -485,9 +594,40 @@ def _validate_source(workspace: Workspace, operation) -> Path:
     current = path.stat()
     if current.st_size != int(operation["source_size_bytes"] or 0) or current.st_mtime_ns != int(operation["source_mtime_ns"] or 0):
         raise OperationFailure("Source changed since the plan was confirmed.")
-    if hash_file(path) != operation["source_sha256"]:
+    if verify_hash and hash_file(path) != operation["source_sha256"]:
         raise OperationFailure("Source changed since the plan was confirmed.")
     return path
+
+
+def _validate_authorized_target(workspace: Workspace, operation, target: Path) -> None:
+    if operation.get("conflict_policy") != "overwrite":
+        raise OperationFailure("Destination now exists.")
+    expected_sha = operation.get("target_expected_sha256")
+    expected_size = operation.get("target_expected_size_bytes")
+    expected_mtime = operation.get("target_expected_mtime_ns")
+    if not expected_sha or expected_size is None or expected_mtime is None:
+        raise OperationFailure("Destination changed since the plan was confirmed.")
+    try:
+        if _is_reparse_point(target) or not target.is_file() or not stat.S_ISREG(target.stat().st_mode):
+            raise OperationFailure("Destination changed since the plan was confirmed.")
+        current = target.stat()
+        if current.st_size != int(expected_size) or current.st_mtime_ns != int(expected_mtime) or hash_file(target) != expected_sha:
+            raise OperationFailure("Destination changed since the plan was confirmed.")
+    except OSError as error:
+        raise OperationFailure("Destination changed since the plan was confirmed.") from error
+
+
+def _atomic_replace_authorized(workspace: Workspace, temp: Path, target: Path, operation) -> None:
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is None:
+        raise OperationFailure("Destination changed since the plan was confirmed.")
+    _validate_authorized_target(workspace, operation, occupied)
+    try:
+        os.replace(temp, occupied)
+    except FileExistsError as error:
+        raise OperationFailure("Destination changed since the plan was confirmed.") from error
+    except OSError as error:
+        raise OperationFailure("Filesystem does not support safe overwrite finalization.") from error
 
 
 def _validate_target(workspace: Workspace, relative: str, *, allow_missing: bool) -> Path:
@@ -656,7 +796,13 @@ def _set_temp(workspace, operation_id, temp: Path) -> None:
         )
 
 
-def _update_progress(workspace, operation_id, bytes_completed: int) -> None:
+def _update_progress(workspace, operation_id, bytes_completed: int, *, force: bool = False) -> None:
+    now_monotonic = time.monotonic()
+    with _progress_lock:
+        previous = _progress_marks.get(operation_id)
+        if not force and previous is not None and now_monotonic - previous[0] < 0.2 and bytes_completed - previous[1] < 16 * 1024 * 1024:
+            return
+        _progress_marks[operation_id] = (now_monotonic, bytes_completed)
     with workspace.transaction() as connection:
         row = connection.execute("SELECT execution_id FROM file_management_execution_operation WHERE id = ?", (operation_id,)).fetchone()
         if row is None:
@@ -669,6 +815,8 @@ def _update_progress(workspace, operation_id, bytes_completed: int) -> None:
 
 
 def _complete_operation(workspace, execution_id, operation, output_size, output_sha, bytes_completed, written, moved, removed) -> None:
+    with _progress_lock:
+        _progress_marks.pop(operation["id"], None)
     now = _timestamp()
     with workspace.transaction() as connection:
         connection.execute(
@@ -770,9 +918,9 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
 def _execution_payload(execution, operations) -> dict[str, object]:
     rows = [dict(row) for row in operations]
     counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("completed", "failed", "skipped", "pending", "interrupted", "cancelled", "excluded")}
-    total = sum(1 for row in rows if row["status"] not in {"excluded"})
-    completed = counts["completed"] + counts["skipped"]
-    bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["operation"] in {"copy", "move"})
+    total = sum(1 for row in rows if row["status"] not in {"excluded", "skipped"})
+    completed = counts["completed"]
+    bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["status"] not in {"excluded", "skipped"} and row["operation"] in {"copy", "move"})
     bytes_done = sum(int(row["bytes_completed"] or 0) for row in rows)
     elapsed = _elapsed(execution)
     written = int(execution["actual_bytes_written"] or 0)
@@ -828,7 +976,7 @@ def _operation_status(operation) -> str:
         return "excluded"
     if operation.get("conflicts") or operation.get("blockers"):
         return "excluded"
-    if operation.get("destination_status") == "already_satisfied":
+    if operation.get("destination_status") in {"already_satisfied", "skipped"}:
         return "skipped"
     return "pending"
 
@@ -837,7 +985,7 @@ def _operation_reason(operation, status) -> str | None:
     if status == "excluded":
         return "; ".join([*(operation.get("conflicts") or []), *(operation.get("blockers") or [])]) or "Excluded from execution."
     if status == "skipped":
-        return "Already satisfied"
+        return "Skipped because the destination already exists." if operation.get("destination_status") == "skipped" else "Already satisfied"
     return None
 
 

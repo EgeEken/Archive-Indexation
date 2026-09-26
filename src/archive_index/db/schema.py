@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -738,6 +738,13 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS file_management_execution_status_idx ON file_management_execution(status, updated_at)",
         "CREATE INDEX IF NOT EXISTS file_management_execution_operation_order_idx ON file_management_execution_operation(execution_id, position)",
     ),
+    26: (
+        "ALTER TABLE file_management_execution_operation ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT 'rename'",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_size_bytes INTEGER",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_mtime_ns INTEGER",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_sha256 TEXT",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_file_type TEXT",
+    ),
 }
 
 
@@ -767,6 +774,8 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 if version == 20 and statement.startswith("ALTER TABLE workspace_config ADD COLUMN") and _has_column(connection, "workspace_config", statement.split()[5]):
                     continue
                 if version == 21 and _has_column(connection, "job", "timing_json"):
+                    continue
+                if version == 26 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
                     continue
                 if (
                     version == 8
