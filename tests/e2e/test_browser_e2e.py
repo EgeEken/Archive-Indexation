@@ -13,7 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-import imagecodecs
+try:
+    import imagecodecs
+except ImportError:
+    imagecodecs = None
 import numpy as np
 from PIL import Image
 
@@ -24,6 +27,7 @@ except ImportError:
 
 from archive_index.api.server import WorkspaceHTTPServer
 from archive_index.app_state import WorkspaceRegistry, workspace_id
+from archive_index.file_management import save_ruleset, set_active_ruleset
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.projection import build_semantic_projection
@@ -33,7 +37,7 @@ from archive_index.media.quality_provider import OffQualityProvider
 from archive_index.workspace import Workspace
 
 
-@unittest.skipUnless(sync_playwright is not None, "Playwright is not installed")
+@unittest.skipUnless(sync_playwright is not None and imagecodecs is not None, "Playwright and imagecodecs are required")
 class BrowserE2ETests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -44,6 +48,7 @@ class BrowserE2ETests(unittest.TestCase):
         cls.offline_root = root / "offline-workspace"
         cls.raw_offline_root = root / "raw-offline-workspace"
         cls.raw_online_root = root / "raw-online-workspace"
+        cls.executor_root = root / "executor-workspace"
         cls._create_main_fixtures(cls.main_root)
         cls._create_setup_fixtures(cls.setup_root)
         cls._create_image(cls.offline_root / "initial.jpg", (120, 80), (70, 140, 220))
@@ -51,22 +56,41 @@ class BrowserE2ETests(unittest.TestCase):
         (cls.raw_offline_root / "initial.arw").write_bytes(b"offline raw fixture")
         cls._create_image(cls.raw_online_root / "initial.jpg", (120, 80), (70, 140, 220))
         (cls.raw_online_root / "initial.arw").write_bytes(b"online raw fixture")
+        cls._create_image(cls.executor_root / "copy.jpg", (80, 60), (220, 80, 80))
+        cls._create_image(cls.executor_root / "move.png", (80, 60), (80, 180, 100))
+        cls._create_image(cls.executor_root / "delete.jpg", (80, 60), (80, 100, 220))
+        with Image.open(cls.executor_root / "delete.jpg") as image:
+            image.save(cls.executor_root / "delete.webp", format="WEBP")
+        (cls.executor_root / "delete.jpg").unlink()
         cls.main_workspace = cls._build_workspace(cls.main_root, semantic=True)
         cls.offline_workspace = cls._build_workspace(cls.offline_root, semantic=False)
         cls.raw_offline_workspace = cls._build_workspace(cls.raw_offline_root, semantic=False)
         cls.raw_online_workspace = cls._build_workspace(cls.raw_online_root, semantic=False)
+        cls.executor_workspace = cls._build_workspace(cls.executor_root, semantic=False)
         with cls.raw_online_workspace.transaction() as connection:
             connection.execute("UPDATE physical_file SET is_online = 1 WHERE relative_path = 'initial.arw'")
         cls.main_handle = workspace_id(cls.main_workspace)
         cls.offline_handle = workspace_id(cls.offline_workspace)
         cls.raw_offline_handle = workspace_id(cls.raw_offline_workspace)
         cls.raw_online_handle = workspace_id(cls.raw_online_workspace)
+        cls.executor_handle = workspace_id(cls.executor_workspace)
+        cls.executor_ruleset = save_ruleset(
+            cls.executor_workspace,
+            name="Browser execution fixture",
+            rules=[
+                {"match": {"format": "jpeg", "folder_prefix": "copy.jpg"}, "action": {"operation": "copy", "destination_dir": "copies"}},
+                {"match": {"format": "png"}, "action": {"operation": "move", "destination_dir": "moved"}},
+                {"match": {"format": "webp"}, "action": {"operation": "delete"}},
+            ],
+        )
+        set_active_ruleset(cls.executor_workspace, cls.executor_ruleset["id"])
         cls.registry_path = root / "registry.json"
         registry = WorkspaceRegistry(cls.registry_path)
         registry.add(cls.main_workspace)
         registry.add(cls.offline_workspace)
         registry.add(cls.raw_offline_workspace)
         registry.add(cls.raw_online_workspace)
+        registry.add(cls.executor_workspace)
 
         cls.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=cls.registry_path)
         cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -714,6 +738,32 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertNotIn("Rules JSON", dialog_text)
         self.assertNotIn("candidate_count", dialog_text)
         self.page.locator("#file-management-close").click()
+
+    def test_file_management_copy_move_delete_execution_workflow(self) -> None:
+        self.page.goto(f"{self.base_url}/?workspace={self.executor_handle}", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
+        self.page.locator("#file-management-button").click()
+        self.page.locator("#file-management-dialog[open]").wait_for()
+        self.page.locator("#file-management-ruleset-select").select_option(self.executor_ruleset["id"])
+        self.page.get_by_role("button", name="Analyze plan").click()
+        self.page.locator("#file-management-plan-summary").wait_for()
+        self.page.locator("[data-review-execution]").click()
+        review = self.page.locator(".execution-review")
+        review.wait_for()
+        self.assertIn("Copy", review.inner_text())
+        self.assertIn("Move", review.inner_text())
+        self.assertIn("Delete", review.inner_text())
+        self.assertTrue(review.locator("[data-execution-ack]").is_visible())
+        self.assertTrue(review.locator("[data-execution-start]").is_disabled())
+        review.locator("[data-execution-ack]").check()
+        review.locator("[data-execution-start]").click()
+        self.page.locator(".execution-progress").wait_for()
+        self.page.wait_for_function("document.querySelector('.execution-progress')?.innerText.includes('Execution completed')")
+        self.assertTrue((self.executor_root / "copies" / "copy.jpg").is_file())
+        self.assertTrue((self.executor_root / "moved" / "move.png").is_file())
+        self.assertFalse((self.executor_root / "move.png").is_file())
+        self.assertFalse((self.executor_root / "delete.webp").exists())
+        self.assertFalse(list(self.executor_root.rglob("*.archive-index-*.tmp")))
 
         self.page.locator(".photo-card", has_text="alpha.jpg").first.locator(".info-button").click()
         self.page.locator("#details[open]").wait_for()

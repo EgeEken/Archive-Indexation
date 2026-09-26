@@ -1,4 +1,4 @@
-let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false, planSession: null, planToken: 0, planTimer: null};
+let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false, planSession: null, planToken: 0, planTimer: null, plan: null, execution: null, executionTimer: null};
 
 const assetSelectors = [["all", "All"], ["selected", "Selected"], ["undecided", "Undecided"], ["rejected", "Rejected"]];
 const representationSelectors = [["all", "All"], ["raw", "RAW"], ["conventional-image", "JPEG/PNG"], ["jpeg", "JPEG"], ["png", "PNG"], ["jxl", "JXL"], ["avif", "AVIF"], ["webp", "WebP"], ["video", "Video"]];
@@ -190,6 +190,7 @@ async function loadFileManagementPlan() {
 }
 
 function renderFileManagementPlan(data) {
+  fileManagement.plan = data;
   const summary = data.summary || {};
   const cards = [["DELETE", summary.delete, "bytes"], ["COMPRESS", summary.compress, "source_bytes"], ["COPY", summary.copy, "bytes_added"], ["MOVE", summary.move, "bytes_moved"]];
   const delta = Number(summary.estimated_storage_delta_bytes || 0);
@@ -202,14 +203,80 @@ function renderFileManagementPlan(data) {
   $("file-management-plan-conflicts").innerHTML = data.conflicts?.length ? `<section class="plan-conflicts"><h3>${data.conflicts.length} conflicts must be resolved</h3>${data.conflicts.map(conflict => `<article class="plan-conflict"><strong>${escapeHtml(conflict.filename || "File")}</strong><span>${escapeHtml(conflict.source_relative_path || "")}${conflict.target_relative_path ? ` → ${escapeHtml(conflict.target_relative_path)}` : ""}</span><p>${escapeHtml(conflict.reason)}</p><small>Rule ${escapeHtml(conflict.rule_id || "")}</small></article>`).join("")}</section>` : `<p class="plan-ok">No conflicts detected.</p>`;
   const operations = data.operations || [];
   $("file-management-plan-details").innerHTML = ["delete", "compress", "copy", "move"].map(operation => { const rows = operations.filter(item => item.operation === operation); if (!rows.length) return ""; return `<details class="plan-operation" open><summary>${operation[0].toUpperCase() + operation.slice(1)} · ${rows.length}</summary>${rows.map(item => `<div class="plan-operation-row"><span><strong>${escapeHtml(item.filename || "File")}</strong><small>${escapeHtml(item.source_relative_path || "")}</small></span><span>${escapeHtml(item.target_relative_path || item.profile_name || "Delete")}${item.renamed_to_avoid_conflict ? " · Renamed to avoid conflict" : item.replaces_source_in_place ? " · Replaces source in place" : ""}</span><span>${formatBytes(item.bytes)}${item.destination_status === "already_satisfied" ? " · Already satisfied" : ""}${item.conflicts?.length ? ` · <em>${escapeHtml(item.conflicts.join("; "))}</em>` : ""}${item.blockers?.length ? ` · <em>Blocked: ${escapeHtml(item.blockers.join("; "))}</em>` : ""}</span></div>`).join("")}</details>`; }).join("");
-  $("file-management-plan-note").textContent = data.executor?.message || "Execution is not available.";
+  $("file-management-plan-note").innerHTML = `${escapeHtml(data.executor?.message || "")}${data.plan_digest ? ` · Plan digest <code>${escapeHtml(data.plan_digest)}</code>` : ""}`;
+  const executable = (data.operations || []).some(item => ["copy", "move", "delete"].includes(item.operation) && !item.conflicts?.length && !item.blockers?.length && item.destination_status !== "already_satisfied");
+  $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Execution will revalidate this plan before creating a frozen snapshot.</small></div>` : `<p class="muted">No safe Copy, Move, or Delete operations are available to execute.</p>`;
+  $("file-management-execution-panel").classList.remove("hidden");
+  $("file-management-execution-panel").querySelector("[data-review-execution]")?.addEventListener("click", () => { void prepareFileManagementExecution(); });
+}
+
+function executionRows(execution) { return execution?.operations || []; }
+function formatDuration(seconds) { const value = Math.max(0, Math.round(Number(seconds) || 0)); const hours = Math.floor(value / 3600); const minutes = Math.floor((value % 3600) / 60); const rest = value % 60; return hours ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}` : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`; }
+function executionDestructive(execution) { return executionRows(execution).some(row => ["move", "delete"].includes(row.operation) && row.status === "pending"); }
+function renderExecution(execution) {
+  fileManagement.execution = execution;
+  const panel = $("file-management-execution-panel");
+  if (!execution) { panel.classList.add("hidden"); return; }
+  const rows = executionRows(execution);
+  const pending = rows.filter(row => row.status === "pending");
+  const destructive = executionDestructive(execution);
+  const active = ["running", "cancelling"].includes(execution.status);
+  const canStart = execution.status === "draft";
+  const canResume = ["cancelled", "interrupted"].includes(execution.status);
+  const canRetry = rows.some(row => row.status === "failed") && !active;
+  const counts = execution.counts || {};
+  if (canStart) {
+    const copies = pending.filter(row => row.operation === "copy").length;
+    const moves = pending.filter(row => row.operation === "move").length;
+    const deletes = pending.filter(row => row.operation === "delete").length;
+    const compressed = rows.filter(row => row.operation === "compress").length;
+    panel.innerHTML = `<section class="execution-review"><h3>Review execution</h3><p>Frozen plan ${escapeHtml(execution.plan_digest || "")}</p><div class="execution-counts"><span>Copy <strong>${copies}</strong></span><span>Move <strong>${moves}</strong></span><span>Delete <strong>${deletes}</strong></span><span>Compress blocked <strong>${compressed}</strong></span><span>Excluded <strong>${counts.excluded || 0}</strong></span><span>Skipped <strong>${counts.skipped || 0}</strong></span></div><p class="muted">Estimated written ${formatBytes(execution.estimated_bytes_written || 0)} · removed ${formatBytes(execution.estimated_bytes_removed || 0)} · storage delta ${formatBytes(execution.estimated_storage_delta || 0)}</p>${compressed ? `<p class="muted">${compressed} Compress operation${compressed === 1 ? " is" : "s are"} excluded: production compression remains disabled until Phase 10C.</p>` : ""}${destructive ? `<p class="execution-warning">Move and Delete operations will modify source files. Delete operations permanently remove the confirmed files.</p><label class="checkbox-line"><input type="checkbox" data-execution-ack> I understand that this execution will modify source files.</label>` : ""}<div class="form-actions"><button type="button" class="primary-action" data-execution-start ${destructive ? "disabled" : ""}>Execute safe operations</button></div></section>`;
+    panel.querySelector("[data-execution-ack]")?.addEventListener("change", event => { panel.querySelector("[data-execution-start]").disabled = !event.target.checked; });
+    panel.querySelector("[data-execution-start]")?.addEventListener("click", () => { void startFileManagementExecution(); });
+    return;
+  }
+  const current = execution.current_operation;
+  const statusLabel = execution.status === "running" ? "Executing file plan" : execution.status === "cancelling" ? "Cancelling execution" : `Execution ${execution.status}`;
+  const byteLine = execution.total_bytes ? `${formatBytes(execution.bytes_processed)} / ${formatBytes(execution.total_bytes)}` : "No byte-copy work";
+  const throughput = execution.throughput_bytes_per_second ? `${formatBytes(execution.throughput_bytes_per_second)}/s` : "—";
+  const eta = execution.eta_seconds == null ? "—" : formatDuration(execution.eta_seconds);
+  panel.innerHTML = `<section class="execution-progress"><h3>${escapeHtml(statusLabel)}</h3><p>${current ? `${escapeHtml(current.operation)} · ${escapeHtml(current.filename)}<br>${byteLine}<br>${throughput} · Elapsed ${formatDuration(execution.elapsed_seconds || 0)} · ETA ${eta}` : byteLine}</p><div class="execution-counts"><span>Completed <strong>${counts.completed || 0}</strong></span><span>Failed <strong>${counts.failed || 0}</strong></span><span>Skipped <strong>${counts.skipped || 0}</strong></span><span>Pending <strong>${counts.pending || 0}</strong></span><span>${counts.completed || 0} / ${counts.total || 0} operations</span></div><p class="muted">Written ${formatBytes(execution.actual_bytes_written || 0)} · Removed ${formatBytes(execution.actual_bytes_removed || 0)} · Storage delta ${formatBytes(execution.actual_storage_delta || 0)}</p>${execution.error ? `<p class="status error">${escapeHtml(execution.error)}</p>` : ""}${execution.warning ? `<p class="status">${escapeHtml(execution.warning)}</p>` : ""}<div class="form-actions">${active ? `<button type="button" class="danger-button" data-execution-cancel>Cancel</button>` : ""}${canResume ? `<button type="button" class="primary-action" data-execution-resume>Resume</button>` : ""}${canRetry ? `<button type="button" class="secondary" data-execution-retry>Retry failed</button>` : ""}</div></section>`;
+  panel.querySelector("[data-execution-cancel]")?.addEventListener("click", () => { void executionAction("cancel"); });
+  panel.querySelector("[data-execution-resume]")?.addEventListener("click", () => { void executionAction("resume"); });
+  panel.querySelector("[data-execution-retry]")?.addEventListener("click", () => { void executionAction("retry-failed"); });
+}
+function stopExecutionPolling() { clearTimeout(fileManagement.executionTimer); fileManagement.executionTimer = null; }
+async function pollFileManagementExecution() {
+  if (!fileManagement.execution?.id) return;
+  try {
+    const result = await api(`/api/file-management/executions/${encodeURIComponent(fileManagement.execution.id)}`);
+    renderExecution(result.execution);
+    if (["running", "cancelling"].includes(result.execution.status)) fileManagement.executionTimer = setTimeout(() => { void pollFileManagementExecution(); }, 300);
+    else stopExecutionPolling();
+  } catch (error) { stopExecutionPolling(); fileManagementStatus(`Execution status failed: ${error.message}`, true); }
+}
+async function prepareFileManagementExecution() {
+  try {
+    const result = await api("/api/file-management/executions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ruleset_id: fileManagement.current, plan_digest: fileManagement.plan?.plan_digest})});
+    renderExecution(result.execution);
+  } catch (error) { fileManagementStatus(error.message, true); }
+}
+async function startFileManagementExecution() { try { const result = await executionAction("start"); if (result) void pollFileManagementExecution(); } catch {} }
+async function executionAction(action) {
+  if (!fileManagement.execution?.id) return null;
+  try {
+    const result = await api(`/api/file-management/executions/${encodeURIComponent(fileManagement.execution.id)}/${action}`, {method: "POST", headers: {"Content-Type": "application/json"}});
+    renderExecution(result.execution);
+    if (["running", "cancelling"].includes(result.execution.status)) void pollFileManagementExecution();
+    return result.execution;
+  } catch (error) { fileManagementStatus(`Execution action failed: ${error.message}`, true); return null; }
 }
 
 function editProfile(id) { const profile = fileManagement.profiles.find(item => item.id === id); if (!profile) return; const form = $("file-management-profile-form"); form.dataset.profileId = id; $("file-management-profile-name").value = profile.name; $("file-management-profile-codec").value = profile.codec; $("file-management-profile-quality").value = profile.settings?.quality ?? 60; $("file-management-profile-effort").value = profile.settings?.effort ?? 7; form.classList.remove("hidden"); }
 
-$("file-management-button").addEventListener("click", async () => { try { await refreshFileManagementEditor(); $("file-management-dialog").showModal(); } catch (error) { fileManagementStatus(`File Management failed: ${error.message}`, true); } });
+$("file-management-button").addEventListener("click", async () => { try { await refreshFileManagementEditor(); const active = await api("/api/file-management/executions/active"); renderExecution(active.execution); $("file-management-dialog").showModal(); if (active.execution && ["running", "cancelling"].includes(active.execution.status)) void pollFileManagementExecution(); } catch (error) { fileManagementStatus(`File Management failed: ${error.message}`, true); } });
 $("file-management-close").addEventListener("click", () => $("file-management-dialog").close());
-$("file-management-dialog").addEventListener("close", () => { void cancelFileManagementPlan(); });
+$("file-management-dialog").addEventListener("close", () => { void cancelFileManagementPlan(); stopExecutionPolling(); });
 document.querySelectorAll("[data-file-management-tab]").forEach(button => button.addEventListener("click", () => setFileManagementTab(button.dataset.fileManagementTab)));
 $("file-management-ruleset-select").addEventListener("change", event => { if (event.target.value === "custom-draft") return; selectRuleset(event.target.value); });
 $("file-management-add-rule").addEventListener("click", () => { fileManagement.draft.push(ruleToUi({})); markRulesDirty(); renderFileManagementRules(); });

@@ -264,6 +264,14 @@
 .plan-blocker span { color: #e6d6b7; }
 .plan-blocker small { color: #b9a98c; }
 .plan-ok { color: #c9e9cd; }
+.execution-panel { margin-top: 1rem; padding: .8rem; border: 1px solid #526b80; border-radius: .55rem; background: #17232c; }
+.execution-review, .execution-progress { display: grid; gap: .6rem; }
+.execution-review h3, .execution-progress h3 { margin: 0; color: #a9d8f5; }
+.execution-counts { display: flex; flex-wrap: wrap; gap: .45rem .8rem; color: #cbd6de; }
+.execution-counts span { padding: .35rem .5rem; background: #1a2026; border-radius: .35rem; }
+.execution-warning { margin: 0; color: #f2b5b5; }
+.execution-review-actions { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
+.execution-review-actions small { color: #9faab5; }
 .plan-operation { border-top: 1px solid #39444f; padding: .65rem 0; }
 .plan-operation-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(8rem, .7fr); gap: .7rem; padding: .45rem 0; border-top: 1px solid #252d34; }
 .plan-operation-row small { display: block; color: #8f9ba6; overflow-wrap: anywhere; }
