@@ -182,6 +182,8 @@ class Phase10ASecondPassTests(unittest.TestCase):
                 "../outside/file.jxl", "folder/../../outside/file.jxl", "C:/outside/file.jxl",
                 r"C:\outside\file.jxl", r"\\server\share\file.jxl", "/archive/path",
                 ".archive-index/file", "foo/.archive-index/file", "/.archive-index/file", ".ARCHIVE-INDEX/file",
+                "CON", "CON.jpg", "folder/NUL", "NUL.png", "LPT1", "bad:name.jpg", "bad?.jpg",
+                "trailing.", "trailing ", "control\u0001name.jpg",
             ]
             for target in invalid:
                 ruleset = save_ruleset(workspace, name=f"Invalid {target}", rules=[{"match": {"format": "jpeg"}, "action": {"operation": "copy", "target_template": target}}])
@@ -356,7 +358,8 @@ class Phase10ASecondPassTests(unittest.TestCase):
             plan = build_dry_run_plan(workspace, ruleset["id"])
             self.assertEqual(plan["summary"]["delete"]["file_count"], 1)
             self.assertIsNone(plan["operations"][0]["target_relative_path"])
-            self.assertFalse(plan["executor"]["available"])
+            self.assertTrue(plan["executor"]["available"])
+            self.assertIn("Phase 10C", plan["executor"]["message"])
             self.assertEqual(len(rulesets), 2)
 
     def test_all_matching_rules_report_copy_delete_conflict(self):

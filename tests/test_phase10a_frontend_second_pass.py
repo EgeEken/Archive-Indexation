@@ -35,10 +35,11 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertNotIn("elapsed ${elapsed}", maintenance)
         self.assertNotIn("projected total", maintenance)
 
-    def test_rules_use_semantic_controls_and_no_executor(self):
+    def test_rules_use_semantic_controls_and_phase10b_executor(self):
         for marker in ("representation_class", "selection_state", "delete", "source_disposition", "destination_status", "executor"):
             self.assertIn(marker, self.management + self.file_management_backend)
-        self.assertIn('"available": False', self.file_management_backend)
+        self.assertIn('"available": True', self.file_management_backend)
+        self.assertIn("Phase 10C", self.file_management_backend)
 
     def test_representation_eye_and_actual_comparison_controls_exist(self):
         for marker in ("data-representation-view", "View representation", "comparison-preview", "Side by side", "Slider", "PSNR", "SharedImageCamera"):

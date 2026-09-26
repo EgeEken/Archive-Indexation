@@ -28,6 +28,7 @@ BUILTIN_PROFILE_IDS = {
     BUILTIN_AV1_PROFILE_ID,
 }
 BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
+COMPRESSION_EXECUTION_BLOCKER = "Production compression execution is not enabled until Phase 10C."
 _plan_runs = {}
 _plan_runs_lock = threading.Lock()
 
@@ -65,6 +66,7 @@ def save_profile(
     settings: dict[str, object] | None = None,
     profile_id: str | None = None,
 ) -> dict[str, object]:
+    _ensure_no_active_execution(workspace)
     if not name.strip():
         raise ValueError("profile name is required")
     if codec not in {"jpeg-xl", "avif", "av1"}:
@@ -140,6 +142,7 @@ def save_ruleset(
     description: str = "",
     ruleset_id: str | None = None,
 ) -> dict[str, object]:
+    _ensure_no_active_execution(workspace)
     if not name.strip():
         raise ValueError("ruleset name is required")
     if not isinstance(rules, list):
@@ -188,6 +191,7 @@ def save_ruleset(
 
 
 def delete_ruleset(workspace: Workspace, ruleset_id: str) -> None:
+    _ensure_no_active_execution(workspace)
     if ruleset_id in {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}:
         raise ValueError("built-in rulesets are immutable")
     with workspace.transaction() as connection:
@@ -202,6 +206,7 @@ def save_preset(
     ruleset_id: str,
     preset_id: str | None = None,
 ) -> dict[str, object]:
+    _ensure_no_active_execution(workspace)
     if not name.strip():
         raise ValueError("preset name is required")
     if preset_id in BUILTIN_RULESET_IDS:
@@ -224,6 +229,7 @@ def save_preset(
 
 
 def set_active_ruleset(workspace: Workspace, ruleset_id: str | None) -> None:
+    _ensure_no_active_execution(workspace)
     if ruleset_id is not None and not any(item["id"] == ruleset_id for item in list_rulesets(workspace)):
         raise ValueError("ruleset not found")
     with workspace.transaction() as connection:
@@ -261,7 +267,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
         rows = connection.execute(
             """
             SELECT pf.id, pf.logical_asset_id, pf.relative_path, pf.filename, pf.extension,
-                       pf.media_type, pf.role, pf.size_bytes, pf.sha256, pf.in_scope, pf.is_online,
+                       pf.media_type, pf.role, pf.size_bytes, pf.mtime_ns, pf.sha256, pf.in_scope, pf.is_online,
                    la.selection_state
             FROM physical_file AS pf
             JOIN logical_asset AS la ON la.id = pf.logical_asset_id
@@ -306,16 +312,9 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             if target_validation_error:
                 item_conflicts.append(target_validation_error)
             if operation == "compress":
+                item_blockers.append(COMPRESSION_EXECUTION_BLOCKER)
                 if profile is None:
                     item_blockers.append("compression profile is missing")
-                elif profile["codec"] == "av1":
-                    capability = av1_capability()
-                    if not capability["available"]:
-                        item_blockers.append(capability["message"])
-                    else:
-                        item_blockers.append("AV1 Archival profile is pending; production encoding is not enabled.")
-                elif profile["codec"] == "avif":
-                    item_blockers.append("AVIF encoding is not available in the planning runtime.")
             if operation not in {"compress", "copy", "move", "delete"}:
                 item_conflicts.append(f"unsupported planned operation: {operation}")
             if operation in {"compress", "copy", "move"} and target is None and target_validation_error is None:
@@ -368,6 +367,9 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "profile_name": item["profile"]["name"] if item["profile"] else None,
                 "rule_id": item["rule"]["id"],
                 "bytes": row["size_bytes"] or 0,
+                "source_size_bytes": row["size_bytes"] or 0,
+                "source_mtime_ns": row["mtime_ns"],
+                "source_sha256": row["sha256"],
                 "estimated_output_bytes": _estimated_output_bytes(row["size_bytes"] or 0, item["profile"]),
                 "estimated_storage_delta_bytes": _storage_delta(row["size_bytes"] or 0, item["profile"], operation, item["action"]),
                 "source_disposition": item["action"].get("source_disposition", "keep"),
@@ -378,6 +380,8 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "coalesced_by_planned_target": coalesced,
                 "conflicts": item_conflicts,
                 "blockers": item_blockers,
+                "rule_snapshot": item["rule"],
+                "profile_snapshot": _profile_snapshot(item["profile"]),
                 "requires_confirmation": True,
             }
             operations.append(operation_row)
@@ -398,11 +402,12 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
     return {
         "available": True,
         "ruleset_id": ruleset_id,
+        "plan_digest": _plan_digest(operations, ruleset),
         "operations": operations,
         "conflicts": conflicts,
         "blockers": list(blockers.values()),
         "summary": summary,
-        "executor": {"available": False, "message": "Execution is unavailable until the safety executor is enabled."},
+        "executor": {"available": True, "supported_operations": ["copy", "move", "delete"], "message": "Copy, Move, and Delete execution is available. Compression remains blocked until Phase 10C."},
     }
 
 
@@ -547,6 +552,8 @@ def _normalize_target_path(workspace: Workspace, target: str | None) -> str | No
         raise WorkspaceError("Destination escapes the workspace.")
     if any(part in {"", "."} for part in parts):
         raise WorkspaceError("Destination is malformed.")
+    for part in parts:
+        _validate_windows_segment(part)
     if any(part.casefold() == ".archive-index" for part in parts):
         raise WorkspaceError("Destination may not use the application state directory.")
     normalized = "/".join(parts)
@@ -561,6 +568,16 @@ def _normalize_target_path(workspace: Workspace, target: str | None) -> str | No
     except ValueError:
         return normalized
     raise WorkspaceError("Destination may not use the application state directory.")
+
+
+def _validate_windows_segment(segment: str) -> None:
+    if any(ord(character) < 32 or character in '<>:"|?*' for character in segment):
+        raise WorkspaceError("Destination contains characters that are invalid on Windows.")
+    if segment.endswith((" ", ".")):
+        raise WorkspaceError("Destination segments may not end with a space or period.")
+    device = segment.split(".", 1)[0].casefold()
+    if device in {"con", "prn", "aux", "nul"} or re.fullmatch(r"(?:com|lpt)[1-9]", device):
+        raise WorkspaceError("Destination uses a reserved Windows device name.")
 
 
 def _workspace_file_exists(workspace: Workspace, relative_path: str) -> bool:
@@ -761,7 +778,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
         "estimated_storage_delta_bytes": storage_delta,
         "estimated_net_bytes_freed": max(0, -storage_delta),
         "estimated_net_bytes_added": max(0, storage_delta),
-        "temporary_space_upper_bound_bytes": sum(int(operation.get("estimated_output_bytes") or 0) for operation in executable_operations if operation["operation"] == "compress"),
+        "temporary_space_upper_bound_bytes": sum(int(operation.get("bytes") or 0) for operation in executable_operations if operation["operation"] in {"copy", "move", "compress"}),
         "available_space_bytes": _available_space(workspace),
         "assets_with_no_surviving_representation": max(0, len(assets) - surviving),
     }
@@ -790,6 +807,50 @@ def _storage_delta(size: int, profile: dict[str, object] | None, operation: str,
         return 0
     output = _estimated_output_bytes(size, profile)
     return output - size if action.get("source_disposition", "keep") == "replace" else output
+
+
+def _profile_snapshot(profile: dict[str, object] | None) -> dict[str, object] | None:
+    if profile is None:
+        return None
+    return {
+        "id": profile.get("id"),
+        "codec": profile.get("codec"),
+        "container": profile.get("container"),
+        "settings": profile.get("settings") or {},
+    }
+
+
+def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object] | None) -> str:
+    state = {
+        "ruleset_id": ruleset.get("id") if ruleset else None,
+        "operations": [
+            {
+                "position": position,
+                "operation": operation.get("operation"),
+                "physical_file_id": operation.get("physical_file_id"),
+                "logical_asset_id": operation.get("logical_asset_id"),
+                "source_relative_path": operation.get("source_relative_path"),
+                "source_size_bytes": operation.get("source_size_bytes", operation.get("bytes")),
+                "source_mtime_ns": operation.get("source_mtime_ns"),
+                "source_sha256": operation.get("source_sha256"),
+                "target_relative_path": operation.get("target_relative_path"),
+                "source_disposition": operation.get("source_disposition"),
+                "profile_id": operation.get("profile_id"),
+                "profile_snapshot": operation.get("profile_snapshot"),
+                "rule_id": operation.get("rule_id"),
+                "rule_snapshot": operation.get("rule_snapshot"),
+                "destination_status": operation.get("destination_status"),
+                "conflicts": operation.get("conflicts") or [],
+                "blockers": operation.get("blockers") or [],
+                "estimated_output_bytes": operation.get("estimated_output_bytes"),
+                "estimated_storage_delta_bytes": operation.get("estimated_storage_delta_bytes"),
+                "coalesced_by_planned_target": bool(operation.get("coalesced_by_planned_target")),
+            }
+            for position, operation in enumerate(operations)
+        ],
+    }
+    encoded = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _available_space(workspace):
@@ -870,7 +931,8 @@ def _empty_plan(reason: str):
             "assets_with_no_surviving_representation": 0,
         },
         "empty_reason": reason,
-        "executor": {"available": False, "message": "Execution is unavailable until the safety executor is enabled."},
+        "plan_digest": _plan_digest([], None),
+        "executor": {"available": True, "supported_operations": ["copy", "move", "delete"], "message": "Copy, Move, and Delete execution is available. Compression remains blocked until Phase 10C."},
     }
 
 
@@ -931,3 +993,10 @@ def _json(value):
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _ensure_no_active_execution(workspace: Workspace) -> None:
+    from .file_management_executor import has_active_execution
+
+    if has_active_execution(workspace):
+        raise WorkspaceError("File Management settings cannot change while an execution is active.")

@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -668,6 +668,75 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         )
         """,
         "CREATE INDEX IF NOT EXISTS display_preview_output_idx ON display_preview(output_path)",
+    ),
+    25: (
+        """
+        CREATE TABLE IF NOT EXISTS file_management_execution (
+            id TEXT PRIMARY KEY,
+            ruleset_id TEXT,
+            plan_digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            summary_json TEXT NOT NULL,
+            plan_metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            updated_at TEXT NOT NULL,
+            finished_at TEXT,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            estimated_bytes_written INTEGER NOT NULL DEFAULT 0,
+            estimated_bytes_removed INTEGER NOT NULL DEFAULT 0,
+            estimated_storage_delta INTEGER NOT NULL DEFAULT 0,
+            temporary_space_upper_bound_bytes INTEGER NOT NULL DEFAULT 0,
+            actual_bytes_written INTEGER NOT NULL DEFAULT 0,
+            actual_bytes_removed INTEGER NOT NULL DEFAULT 0,
+            actual_bytes_moved INTEGER NOT NULL DEFAULT 0,
+            actual_storage_delta INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            warning_message TEXT,
+            catalog_refresh_status TEXT NOT NULL DEFAULT 'pending',
+            catalog_refresh_error TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS file_management_execution_operation (
+            id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL REFERENCES file_management_execution(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            phase INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            status TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT 'pending',
+            physical_file_id TEXT,
+            logical_asset_id TEXT,
+            filename TEXT NOT NULL,
+            source_relative_path TEXT,
+            source_size_bytes INTEGER,
+            source_mtime_ns INTEGER,
+            source_sha256 TEXT,
+            target_relative_path TEXT,
+            profile_id TEXT,
+            source_disposition TEXT,
+            destination_status TEXT,
+            conflicts_json TEXT NOT NULL,
+            blockers_json TEXT NOT NULL,
+            rule_snapshot_json TEXT NOT NULL,
+            profile_snapshot_json TEXT,
+            estimated_output_bytes INTEGER NOT NULL DEFAULT 0,
+            estimated_storage_delta INTEGER NOT NULL DEFAULT 0,
+            temp_relative_path TEXT,
+            actual_output_size_bytes INTEGER,
+            actual_output_sha256 TEXT,
+            bytes_completed INTEGER NOT NULL DEFAULT 0,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            started_at TEXT,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE(execution_id, position)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS file_management_execution_status_idx ON file_management_execution(status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS file_management_execution_operation_order_idx ON file_management_execution_operation(execution_id, position)",
     ),
 }
 
