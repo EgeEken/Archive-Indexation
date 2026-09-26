@@ -154,7 +154,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertIn("storageDelta ?", management)
 
     def test_profile_previews_and_planner_safety_controls(self):
-        for marker in ("data-profile-preview", "Preview ${escapeHtml(profile.name)} compression", "profile.is_builtin ?", "profile-preview", "compression-preview/manifest.json", "renameOnConflict", "Rename in case of conflict", "data-rule-help"):
+        for marker in ("data-profile-preview", "Preview ${escapeHtml(profile.name)} compression", "profile.is_builtin ?", "profile-preview", "compression-preview/manifest.json", "conflictPolicy", "Destination conflict", "Overwrite", "data-rule-help"):
             self.assertIn(marker, self.management + self.details + self.html)
         self.assertIn("compression-preview-v1", (self.root / "assets" / "compression-preview" / "manifest.json").read_text(encoding="utf-8"))
         self.assertIn("comparison-slider-frame", self.details)
