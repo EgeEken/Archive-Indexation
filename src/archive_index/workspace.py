@@ -154,6 +154,10 @@ class Workspace:
         return str(self.configuration()["embedding_provider"])
 
     def set_quality_provider(self, provider: str) -> None:
+        from .file_management_executor import has_active_execution
+
+        if has_active_execution(self):
+            raise WorkspaceError("workspace configuration cannot change while a File Management execution is active")
         if provider not in QUALITY_PROVIDERS:
             raise WorkspaceError(f"unsupported quality provider: {provider}")
         with self.transaction() as connection:
@@ -180,6 +184,10 @@ class Workspace:
 
     def apply_configuration(self, value: dict[str, object]) -> dict[str, object]:
         from .configuration import path_in_scope
+        from .file_management_executor import has_active_execution
+
+        if has_active_execution(self):
+            raise WorkspaceError("workspace configuration cannot change while a File Management execution is active")
 
         with self.transaction() as connection:
             active = connection.execute(

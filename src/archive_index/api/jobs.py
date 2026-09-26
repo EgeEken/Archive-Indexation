@@ -76,6 +76,12 @@ def _workspace_has_indexed_media(workspace: Workspace) -> bool:
         connection.close()
 
 
+def _file_management_active(workspace: Workspace) -> bool:
+    from ..file_management_executor import has_active_execution
+
+    return has_active_execution(workspace)
+
+
 def _indexing_mode(workspace: Workspace) -> str:
     return "reindexing" if _workspace_has_indexed_media(workspace) else "indexing"
 
@@ -97,6 +103,8 @@ def _new_indexing_context(workspace: Workspace, plan: dict[str, object] | None =
 
 def start_indexing(host, handle: str) -> str | None:
     _, workspace = host.resolve_workspace(handle)
+    if _file_management_active(workspace):
+        return None
     try:
         from .workspaces import _workspace_plan
         plan = _workspace_plan(workspace, workspace.configuration())
@@ -195,6 +203,8 @@ def indexing_runtime_status(host, handle: str, jobs: list[dict[str, object]]) ->
 
 def start_group_rebuild(host, handle: str) -> str | None:
     _, workspace = host.resolve_workspace(handle)
+    if _file_management_active(workspace):
+        return None
     with host._active_lock:
         thread = host._active_threads.get(handle)
         if thread is not None and thread.is_alive():
@@ -210,6 +220,8 @@ def start_group_rebuild(host, handle: str) -> str | None:
 
 def start_recommendation_rebuild(host, handle: str) -> str | None:
     _, workspace = host.resolve_workspace(handle)
+    if _file_management_active(workspace):
+        return None
     with host._active_lock:
         thread = host._active_threads.get(handle)
         if thread is not None and thread.is_alive():
@@ -225,6 +237,8 @@ def start_recommendation_rebuild(host, handle: str) -> str | None:
 
 def start_embedding_rebuild(host, handle: str) -> str | None:
     _, workspace = host.resolve_workspace(handle)
+    if _file_management_active(workspace):
+        return None
     with host._active_lock:
         thread = host._active_threads.get(handle)
         if thread is not None and thread.is_alive():
@@ -240,6 +254,8 @@ def start_embedding_rebuild(host, handle: str) -> str | None:
 
 def start_reconciliation(host, handle: str) -> str | None:
     _, workspace = host.resolve_workspace(handle)
+    if _file_management_active(workspace):
+        return None
     with host._active_lock:
         thread = host._active_threads.get(handle)
         if thread is not None and thread.is_alive():

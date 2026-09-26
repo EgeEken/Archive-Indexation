@@ -28,6 +28,9 @@ from .errors import InvalidRequest, ResourceNotFound
 def register_workspace(host, workspace: Workspace) -> str:
     handle = workspace_id(workspace)
     host._workspaces[handle] = workspace
+    from ..file_management_executor import recover_workspace
+
+    recover_workspace(workspace)
     if handle not in host._recovered_workspaces:
         JobStore(workspace).recover_interrupted()
         host._recovered_workspaces.add(handle)

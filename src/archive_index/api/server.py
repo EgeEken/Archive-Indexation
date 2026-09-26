@@ -54,6 +54,17 @@ from ..file_management import (
     set_active_ruleset,
 )
 from ..file_management_previews import cached_preview_file, custom_profile_preview
+from ..file_management_executor import (
+    ExecutionConflict,
+    ExecutionNotFound,
+    cancel_execution,
+    get_active_execution,
+    get_execution,
+    prepare_execution,
+    retry_failed,
+    resume_execution,
+    start_execution,
+)
 from ..indexing.representations import preferred_physical
 from .errors import InvalidRequest, ResourceNotFound
 from .comparison import comparison_data, comparison_difference, comparison_preview
@@ -379,6 +390,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, build_dry_run_plan(workspace, _first(query, "ruleset_id", "") or None))
             elif request.path == "/api/file-management/plan/status":
                 self._send_json(200, plan_analysis_status(workspace, _first(query, "session_id", "")))
+            elif request.path == "/api/file-management/executions/active":
+                self._send_json(200, {"execution": get_active_execution(workspace)})
+            elif request.path.startswith("/api/file-management/executions/"):
+                execution_id = request.path.rsplit("/", 1)[-1]
+                self._send_json(200, {"execution": get_execution(workspace, execution_id)})
             elif request.path == "/api/exports/selected.zip":
                 archive, _, _ = selected_zip(workspace)
                 try:
@@ -429,6 +445,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(error)})
         except ResourceNotFound as error:
             self._send_json(404, {"error": str(error)})
+        except (ExecutionConflict, ExecutionNotFound) as error:
+            self._send_json(409 if isinstance(error, ExecutionConflict) else 404, {"error": str(error)})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
         except Exception as error:
@@ -479,6 +497,32 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 session_id = str(body.get("session_id") or "")
                 cancelled = cancel_plan_analysis(workspace, session_id)
                 self._send_json(202 if cancelled else 200, {"session_id": session_id, "cancelled": cancelled})
+                return
+            if request.path == "/api/file-management/executions":
+                body = self._json_body()
+                _, workspace = self._workspace(query)
+                ruleset_id = body.get("ruleset_id")
+                if ruleset_id is not None and not isinstance(ruleset_id, str):
+                    raise InvalidRequest("ruleset_id must be a string or null")
+                self._send_json(201, {"execution": prepare_execution(workspace, ruleset_id, body.get("plan_digest"))})
+                return
+            execution_prefix = "/api/file-management/executions/"
+            if request.path.startswith(execution_prefix):
+                _, workspace = self._workspace(query)
+                parts = request.path[len(execution_prefix):].split("/")
+                if len(parts) != 2:
+                    raise ResourceNotFound("execution route not found")
+                execution_id, action = parts
+                actions = {
+                    "start": start_execution,
+                    "cancel": cancel_execution,
+                    "resume": resume_execution,
+                    "retry-failed": retry_failed,
+                }
+                handler = actions.get(action)
+                if handler is None:
+                    raise ResourceNotFound("execution route not found")
+                self._send_json(202, {"execution": handler(workspace, execution_id)})
                 return
             if request.path == "/api/workspaces/apply":
                 body = self._json_body()
@@ -688,6 +732,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(202, {"job_id": job_id, "status": "cancellation_requested"})
                 return
             raise ResourceNotFound("route not found")
+        except (ExecutionConflict, ExecutionNotFound) as error:
+            self._send_json(409 if isinstance(error, ExecutionConflict) else 404, {"error": str(error)})
         except InvalidRequest as error:
             self._send_json(400, {"error": str(error)})
         except ResourceNotFound as error:
