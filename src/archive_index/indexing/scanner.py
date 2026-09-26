@@ -244,6 +244,8 @@ def _discover_files(workspace: Workspace) -> tuple[list[Path], list[tuple[str, O
                     try:
                         if _is_reparse_point(entry):
                             continue
+                        if _is_executor_temp_name(entry.name):
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             pending_directories.append(entry_path)
                         elif entry.is_file(follow_symlinks=False) and media_type_for(entry_path):
@@ -255,6 +257,10 @@ def _discover_files(workspace: Workspace) -> tuple[list[Path], list[tuple[str, O
 
     paths.sort(key=lambda path: workspace.relative_path(path).casefold())
     return paths, issues
+
+
+def _is_executor_temp_name(name: str) -> bool:
+    return name.startswith(".") and ".archive-index-" in name and name.endswith(".tmp")
 
 
 def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
