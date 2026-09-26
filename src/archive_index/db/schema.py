@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -744,6 +744,36 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_mtime_ns INTEGER",
         "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_sha256 TEXT",
         "ALTER TABLE file_management_execution_operation ADD COLUMN target_expected_file_type TEXT",
+    ),
+    27: (
+        """
+        CREATE TABLE IF NOT EXISTS managed_derivative (
+            id TEXT PRIMARY KEY,
+            execution_operation_id TEXT NOT NULL UNIQUE REFERENCES file_management_execution_operation(id) ON DELETE CASCADE,
+            source_physical_file_id TEXT REFERENCES physical_file(id) ON DELETE SET NULL,
+            source_logical_asset_id TEXT REFERENCES logical_asset(id) ON DELETE SET NULL,
+            source_relative_path TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            output_relative_path TEXT NOT NULL,
+            output_sha256 TEXT NOT NULL,
+            codec TEXT NOT NULL,
+            container TEXT NOT NULL,
+            profile_id TEXT,
+            profile_name TEXT,
+            settings_json TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            algorithm_version TEXT NOT NULL,
+            encoder_version TEXT,
+            source_disposition TEXT NOT NULL,
+            metadata_contract_json TEXT NOT NULL,
+            physical_file_id TEXT REFERENCES physical_file(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS managed_derivative_output_idx ON managed_derivative(output_relative_path)",
+        "CREATE INDEX IF NOT EXISTS managed_derivative_source_idx ON managed_derivative(source_physical_file_id, source_logical_asset_id)",
+        "CREATE INDEX IF NOT EXISTS managed_derivative_physical_idx ON managed_derivative(physical_file_id)",
     ),
 }
 

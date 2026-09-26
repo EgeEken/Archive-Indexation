@@ -52,11 +52,13 @@ def av1_capability() -> dict[str, object]:
     if capability["av1_available"]:
         return {
             "available": True,
+            "production_ready": False,
             "encoders": capability["av1_encoders"],
-            "message": "AV1 encoder capability is available in the current FFmpeg runtime.",
+            "message": "AV1 candidates are available, but production execution remains blocked pending stream, color, packaging, and recovery validation.",
         }
     return {
         "available": False,
+        "production_ready": False,
         "encoders": [],
         "message": "AV1 encoder is unavailable in the current FFmpeg runtime.",
     }

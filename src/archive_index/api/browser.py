@@ -174,6 +174,7 @@ def asset_detail(
                 "extension": row["extension"],
                 "media_type": row["media_type"],
                 "role": row["role"],
+                "managed_derivative": managed_derivative_payload(row),
                 "is_preferred": preferred is not None and row["id"] == preferred["id"],
                 "relationships": relationships.get(row["id"], []),
                 "representation_label": representation_label(row, relationships.get(row["id"], [])),
@@ -243,12 +244,16 @@ def physical_rows(workspace: Workspace, asset_id: str):
                    display_preview.output_path AS display_preview_output_path,
                    display_preview.version AS display_preview_version,
                    display_preview.input_fingerprint AS display_preview_fingerprint,
+                   managed.id AS managed_derivative_id, managed.profile_name AS managed_derivative_profile_name,
+                   managed.source_relative_path AS managed_derivative_source_path,
+                   managed.output_sha256 AS managed_derivative_output_sha256,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
             LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
+            LEFT JOIN managed_derivative AS managed ON managed.physical_file_id = pf.id
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE pf.logical_asset_id = ?
             ORDER BY pf.is_online DESC, pf.relative_path
@@ -276,12 +281,16 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
                    display_preview.output_path AS display_preview_output_path,
                    display_preview.version AS display_preview_version,
                    display_preview.input_fingerprint AS display_preview_fingerprint,
+                   managed.id AS managed_derivative_id, managed.profile_name AS managed_derivative_profile_name,
+                   managed.source_relative_path AS managed_derivative_source_path,
+                   managed.output_sha256 AS managed_derivative_output_sha256,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
             LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
+            LEFT JOIN managed_derivative AS managed ON managed.physical_file_id = pf.id
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE pf.logical_asset_id IN ({placeholders}) AND pf.in_scope = 1
             ORDER BY pf.logical_asset_id, pf.is_online DESC, pf.relative_path
@@ -328,6 +337,8 @@ def current_relationships(workspace: Workspace, physical_ids: list[str]) -> dict
 
 
 def representation_label(row, relationships: list[str]) -> str:
+    if row["managed_derivative_id"]:
+        return f"JPEG XL derivative · {row['managed_derivative_profile_name'] or 'managed profile'}"
     if row["role"] == "camera_raw":
         return "RAW source"
     if row["role"] == "camera_jpeg":
@@ -335,6 +346,17 @@ def representation_label(row, relationships: list[str]) -> str:
     if relationships:
         return relationships[0]
     return "Physical file"
+
+
+def managed_derivative_payload(row) -> dict[str, object] | None:
+    if not row["managed_derivative_id"]:
+        return None
+    return {
+        "id": row["managed_derivative_id"],
+        "profile_name": row["managed_derivative_profile_name"],
+        "source_relative_path": row["managed_derivative_source_path"],
+        "output_sha256": row["managed_derivative_output_sha256"],
+    }
 
 
 def component_info(row, component: str) -> dict[str, object]:

@@ -12,8 +12,8 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
 
-from .file_management import quality_to_distance
 from .media.image_decode import load_full_image
+from .media.jpegxl import encode as encode_jxl
 from .workspace import Workspace
 
 PREVIEW_VERSION = "compression-preview-v1"
@@ -95,14 +95,7 @@ def _encode(image: Image.Image, profile: dict[str, object]) -> bytes:
 
     array = np.asarray(image.convert("RGB"))
     if profile["codec"] == "jpeg-xl":
-        import imagecodecs
-
-        settings = profile.get("settings") or {}
-        return imagecodecs.jpegxl_encode(
-            array,
-            distance=quality_to_distance(float(settings.get("quality", 60))),
-            effort=int(settings.get("effort", 7)),
-        )
+        return encode_jxl(image.convert("RGB"), profile)
     try:
         import imagecodecs
 

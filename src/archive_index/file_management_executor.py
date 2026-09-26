@@ -1,4 +1,4 @@
-"""Persistent, sequential File Management execution for Copy, Move, and Delete."""
+"""Persistent, sequential File Management execution for Copy, Compress, Move, and Delete."""
 
 from __future__ import annotations
 
@@ -17,13 +17,15 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .file_management import build_dry_run_plan
+from .file_management_provenance import link_managed_derivatives, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
+from .media.jpegxl import JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
 from .workspace import INDEX_DIRECTORY, Workspace, WorkspaceError, _is_reparse_point
 
 LOGGER = logging.getLogger(__name__)
 CHUNK_SIZE = 4 * 1024 * 1024
-SUPPORTED_OPERATIONS = ("copy", "move", "delete")
+SUPPORTED_OPERATIONS = ("copy", "compress", "move", "delete")
 RUN_MUTATING = {"running", "cancelling"}
 RUN_UNRESOLVED = {"draft", "running", "cancelling", "interrupted"}
 RUN_TERMINAL = {"cancelled", "completed", "completed_with_errors", "failed", "superseded", "abandoned"}
@@ -97,8 +99,15 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
             operation for _, operation in operations
             if _operation_status(operation) == "pending"
         ]
-        estimated_written = sum(int(operation.get("bytes") or 0) for operation in executable if operation.get("operation") == "copy")
-        estimated_removed = sum(int(operation.get("bytes") or 0) for operation in executable if operation.get("operation") == "delete")
+        estimated_written = sum(
+            int(operation.get("bytes") or 0) if operation.get("operation") == "copy" else int(operation.get("estimated_output_bytes") or 0)
+            for operation in executable if operation.get("operation") in {"copy", "compress"}
+        )
+        estimated_removed = sum(
+            int(operation.get("bytes") or 0)
+            for operation in executable
+            if operation.get("operation") == "delete" or (operation.get("operation") == "compress" and operation.get("source_disposition") == "replace")
+        )
         estimated_delta = sum(int(operation.get("estimated_storage_delta_bytes") or 0) for operation in executable)
         summary = dict(plan.get("summary") or {})
         summary["execution_executable_count"] = len(executable)
@@ -406,18 +415,155 @@ def _run_execution(workspace: Workspace, execution_id: str, cancel: threading.Ev
 
 def _execute_operation(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
     operation = dict(operation)
+    operation["profile_snapshot"] = _parse_json(operation.get("profile_snapshot_json")) or {}
     recovery_eligible = operation.get("stage") == "resume"
     operation["recovery_eligible"] = recovery_eligible
     _set_operation(workspace, operation["id"], status="running", stage="starting", increment_attempt=True)
     kind = operation["operation"]
     if kind == "copy":
         _copy(workspace, execution_id, operation, cancel)
+    elif kind == "compress":
+        _compress_jxl(workspace, execution_id, operation, cancel)
     elif kind == "move":
         _move(workspace, execution_id, operation, cancel)
     elif kind == "delete":
         _delete(workspace, execution_id, operation)
     else:
-        raise OperationFailure("Production compression execution is not enabled until Phase 10C.")
+        raise OperationFailure("Unsupported production operation.")
+
+
+def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
+    profile = operation.get("profile_snapshot") or {}
+    if profile.get("codec") != "jpeg-xl":
+        raise OperationFailure("Only JPEG XL compression is enabled for production execution.")
+    if not production_capability().get("production_encoder_available"):
+        raise OperationFailure("JPEG XL encoder is unavailable.")
+    if Path(operation["source_relative_path"]).suffix.casefold() not in JXL_SUPPORTED_EXTENSIONS:
+        raise OperationFailure("This source format is not supported by production JPEG XL compression.")
+    source = _validate_source(workspace, operation)
+    target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None:
+        if operation.get("recovery_eligible") and _matches_compressed_output(occupied, operation):
+            _recover_compressed_final(workspace, execution_id, operation, occupied)
+            return
+        if operation.get("conflict_policy") == "skip":
+            _skip_operation(workspace, operation["id"], "Skipped because the destination already exists.")
+            return
+        if operation.get("conflict_policy") == "overwrite":
+            _validate_authorized_target(workspace, operation, occupied)
+        else:
+            raise OperationFailure("Destination now exists.")
+    _ensure_target_directory(workspace, operation["target_relative_path"])
+    target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None:
+        if operation.get("conflict_policy") == "overwrite":
+            _validate_authorized_target(workspace, operation, occupied)
+        else:
+            raise OperationFailure("Destination now exists.")
+    _ensure_operation_space(workspace, max(int(operation.get("estimated_output_bytes") or 0), int(operation["source_size_bytes"] or 0)))
+    if cancel.is_set() or _cancel_requested(workspace, execution_id):
+        raise OperationCancelled("Execution cancelled.")
+    image = None
+    temp = _owned_temp_path(workspace, execution_id, operation)
+    _set_temp(workspace, operation["id"], temp)
+    _remove_owned_temp(workspace, temp)
+    try:
+        image, metadata = load_source(source)
+        encoded = encode_jxl(image, profile)
+        if cancel.is_set() or _cancel_requested(workspace, execution_id):
+            raise OperationCancelled("Execution cancelled after JPEG XL encoding.")
+        validation = validate_jxl(encoded, image)
+        if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
+            _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
+            return
+        with temp.open("xb") as output_file:
+            output_file.write(encoded)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        shutil.copystat(source, temp, follow_symlinks=False)
+        _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
+        _update_progress(workspace, operation["id"], int(operation["source_size_bytes"] or 0), force=True)
+        _set_stage(workspace, operation["id"], "finalizing")
+        _validate_source(workspace, operation)
+        _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+        occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+        if operation.get("conflict_policy") == "overwrite" and occupied is not None:
+            _atomic_replace_authorized(workspace, temp, target, operation)
+        else:
+            if occupied is not None:
+                raise OperationFailure("Destination now exists.")
+            _atomic_no_replace(temp, target, remove_source=False)
+        final_validation = _validate_final_jxl(target, validation)
+        record_managed_derivative(
+            workspace,
+            operation,
+            final_validation,
+            {**metadata, "output": final_validation},
+            profile.get("settings", {}).get("encoder_version"),
+        )
+        replaced_bytes = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
+        if operation.get("source_disposition") == "replace":
+            if cancel.is_set() or _cancel_requested(workspace, execution_id):
+                raise OperationCancelled("Execution cancelled after output finalization.")
+            _validate_source(workspace, operation)
+            _set_stage(workspace, operation["id"], "deleting")
+            _unlink_source(workspace, operation)
+            replaced_bytes += int(operation["source_size_bytes"] or 0)
+        _complete_operation(
+            workspace, execution_id, operation, final_validation["size_bytes"], final_validation["sha256"],
+            int(operation["source_size_bytes"] or 0), final_validation["size_bytes"], 0, replaced_bytes,
+        )
+    except Exception:
+        if temp.exists():
+            _remove_owned_temp(workspace, temp)
+        raise
+    finally:
+        if image is not None:
+            image.close()
+
+
+def _validate_final_jxl(target: Path, expected: dict[str, object]) -> dict[str, object]:
+    try:
+        encoded = target.read_bytes()
+        decoded = decode_jxl(encoded)
+        decoded.close()
+    except Exception as error:
+        raise OperationFailure("Final JPEG XL output failed decode validation.") from error
+    validation = {"size_bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+    if validation != {key: expected[key] for key in ("size_bytes", "sha256")}:
+        raise OperationFailure("Final JPEG XL output changed during finalization.")
+    return validation
+
+
+def _matches_compressed_output(path: Path, operation) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size != int(operation.get("actual_output_size_bytes") or 0):
+            return False
+        if hash_file(path) != operation.get("actual_output_sha256"):
+            return False
+        decoded = decode_jxl(path.read_bytes())
+        decoded.close()
+        return True
+    except (OSError, ValueError, OperationFailure):
+        return False
+
+
+def _recover_compressed_final(workspace, execution_id, operation, target) -> None:
+    final = _validate_final_jxl(target, {"size_bytes": operation["actual_output_size_bytes"], "sha256": operation["actual_output_sha256"]})
+    record_managed_derivative(workspace, operation, final, {"recovered": True}, None)
+    removed = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
+    if operation.get("source_disposition") == "replace":
+        source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+        if source.exists():
+            _validate_source(workspace, operation)
+            _set_stage(workspace, operation["id"], "deleting")
+            _unlink_source(workspace, operation)
+            removed += int(operation["source_size_bytes"] or 0)
+        else:
+            removed += int(operation["source_size_bytes"] or 0)
+    _complete_operation(workspace, execution_id, operation, final["size_bytes"], final["sha256"], int(operation["source_size_bytes"] or 0), final["size_bytes"], 0, removed)
 
 
 def _copy(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
@@ -699,7 +845,7 @@ def _atomic_no_replace(source: Path, target: Path, *, remove_source: bool) -> No
 def _accept_existing_copy(workspace, execution_id, operation, source, target) -> None:
     if not _matches_expected(target, operation):
         raise OperationFailure("Destination now exists.")
-    _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], 0, 0, 0, 0)
+    _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], target.stat().st_size, target.stat().st_size, 0, 0)
 
 
 def _matches_expected(path: Path, operation) -> bool:
@@ -796,6 +942,24 @@ def _set_temp(workspace, operation_id, temp: Path) -> None:
         )
 
 
+def _set_output(workspace, operation_id: str, size_bytes: int, sha256: str) -> None:
+    with workspace.transaction() as connection:
+        connection.execute(
+            "UPDATE file_management_execution_operation SET actual_output_size_bytes = ?, actual_output_sha256 = ?, updated_at = ? WHERE id = ?",
+            (size_bytes, sha256, _timestamp(), operation_id),
+        )
+
+
+def _skip_operation(workspace, operation_id: str, reason: str) -> None:
+    with _progress_lock:
+        _progress_marks.pop(operation_id, None)
+    with workspace.transaction() as connection:
+        connection.execute(
+            "UPDATE file_management_execution_operation SET status = 'skipped', stage = 'skipped', error_message = ?, bytes_completed = 0, updated_at = ? WHERE id = ?",
+            (reason, _timestamp(), operation_id),
+        )
+
+
 def _update_progress(workspace, operation_id, bytes_completed: int, *, force: bool = False) -> None:
     now_monotonic = time.monotonic()
     with _progress_lock:
@@ -853,6 +1017,7 @@ def _refresh_catalog(workspace, execution_id) -> None:
     try:
         scan(workspace)
         reconcile_workspace(workspace)
+        link_managed_derivatives(workspace)
     except Exception as error:
         LOGGER.exception("catalog refresh failed after File Management execution %s", execution_id)
         with workspace.transaction() as connection:
@@ -886,6 +1051,7 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
         operations = connection.execute("SELECT * FROM file_management_execution_operation WHERE execution_id = ? ORDER BY position", (execution_id,)).fetchall()
     finally:
         connection.close()
+    recovered_change = False
     for operation in operations:
         if operation["status"] not in {"running", "interrupted"}:
             continue
@@ -893,7 +1059,8 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
             if operation["operation"] == "copy":
                 target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
                 if operation["stage"] in {"finalizing", "deleting"} and target.exists() and _matches_expected(target, operation):
-                    _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], target.stat().st_size, 0, 0, 0)
+                    _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], target.stat().st_size, target.stat().st_size, 0, 0)
+                    recovered_change = True
                 else:
                     _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to retry from a safe boundary.")
             elif operation["operation"] == "move":
@@ -901,18 +1068,46 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
                 source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
                 if operation["stage"] in {"finalizing", "deleting"} and target.exists() and _matches_expected(target, operation) and not source.exists():
                     _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], 0, 0, int(operation["source_size_bytes"] or 0), 0)
+                    recovered_change = True
                 else:
                     _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to reconcile this Move.")
             elif operation["operation"] == "delete":
                 source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
                 if operation["stage"] == "deleting" and not source.exists():
                     _complete_operation(workspace, execution_id, operation, None, None, 0, 0, 0, int(operation["source_size_bytes"] or 0))
+                    recovered_change = True
                 else:
                     _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to retry this Delete.")
+            elif operation["operation"] == "compress":
+                operation = dict(operation)
+                operation["profile_snapshot"] = _parse_json(operation.get("profile_snapshot_json")) or {}
+                target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+                if operation["stage"] in {"finalizing", "deleting"} and target.exists() and _matches_compressed_output(target, operation):
+                    _recover_compressed_final(workspace, execution_id, operation, target)
+                    recovered_change = True
+                else:
+                    _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to reconcile this JPEG XL output.")
         except Exception as error:
             _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error=str(error))
-    with workspace.transaction() as connection:
-        connection.execute("UPDATE file_management_execution SET status = 'interrupted', updated_at = ? WHERE id = ?", (_timestamp(), execution_id))
+    connection = workspace.connect()
+    try:
+        state = connection.execute(
+            "SELECT status, COUNT(*) AS count FROM file_management_execution_operation WHERE execution_id = ? GROUP BY status",
+            (execution_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    counts = {row["status"]: row["count"] for row in state}
+    unresolved = any(counts.get(status, 0) for status in ("pending", "running", "interrupted", "cancelled"))
+    if unresolved:
+        with workspace.transaction() as connection:
+            connection.execute("UPDATE file_management_execution SET status = 'interrupted', updated_at = ? WHERE id = ?", (_timestamp(), execution_id))
+    else:
+        status = "completed_with_errors" if counts.get("failed", 0) else "completed"
+        with workspace.transaction() as connection:
+            connection.execute("UPDATE file_management_execution SET status = ?, finished_at = ?, updated_at = ? WHERE id = ?", (status, _timestamp(), _timestamp(), execution_id))
+        if recovered_change:
+            _refresh_catalog(workspace, execution_id)
 
 
 def _execution_payload(execution, operations) -> dict[str, object]:
@@ -920,7 +1115,7 @@ def _execution_payload(execution, operations) -> dict[str, object]:
     counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("completed", "failed", "skipped", "pending", "interrupted", "cancelled", "excluded")}
     total = sum(1 for row in rows if row["status"] not in {"excluded", "skipped"})
     completed = counts["completed"]
-    bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["status"] not in {"excluded", "skipped"} and row["operation"] in {"copy", "move"})
+    bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["status"] not in {"excluded", "skipped"} and row["operation"] in {"copy", "compress", "move"})
     bytes_done = sum(int(row["bytes_completed"] or 0) for row in rows)
     elapsed = _elapsed(execution)
     written = int(execution["actual_bytes_written"] or 0)

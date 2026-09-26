@@ -76,7 +76,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(args.verbose)
 
     if args.command == "doctor":
+        from .media.capabilities import ffmpeg_capabilities
+        from .media.codec_benchmark import codec_capabilities
+
+        codecs = codec_capabilities()
+        jxl = codecs["jpeg_xl"]
+        ffmpeg = ffmpeg_capabilities()
         print(f"{APP_NAME} {__version__}: ready")
+        print(f"JPEG XL decode: {'ready' if jxl.get('decoder_available') else 'unavailable'} ({jxl.get('decoder_version') or 'not installed'})")
+        print(f"JPEG XL production encode: {'ready' if jxl.get('production_encoder_available') else 'unavailable'}")
+        print(f"JPEG XL source replacement: {'ready' if jxl.get('source_replacement_available') else 'blocked'}")
+        print(f"FFmpeg: {'ready' if ffmpeg.get('ffmpeg_available') else 'unavailable'} ({ffmpeg.get('version') or 'not installed'})")
+        print(f"AV1 candidates: {', '.join(ffmpeg.get('av1_encoders') or []) or 'none'} (production execution blocked)")
         return 0
 
     if args.command == "index":

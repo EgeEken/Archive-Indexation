@@ -7,18 +7,18 @@ from time import perf_counter
 
 
 def codec_capabilities() -> dict[str, object]:
+    from .jpegxl import production_capability
+
+    capability = {**production_capability()}
+    capability["available"] = bool(capability.get("decoder_available"))
     try:
         import imagecodecs
     except ImportError:
-        return {"jpeg_xl": {"available": False}, "avif": {"available": False}}
-    result = {
-        "jpeg_xl": {
-            "available": True,
-            "decoder_version": str(imagecodecs.jpegxl_version()),
-        },
-        "avif": {"available": bool(getattr(imagecodecs, "avif_encode", None))},
+        return {"jpeg_xl": capability, "avif": {"available": False}}
+    return {
+        "jpeg_xl": capability,
+        "avif": {"available": bool(getattr(imagecodecs, "avif_encode", None)), "production_enabled": False},
     }
-    return result
 
 
 def benchmark_jpeg_xl_decode(source: Path, iterations: int = 3) -> dict[str, object]:

@@ -14,35 +14,42 @@ from pathlib import Path, PurePosixPath
 
 from .workspace import Workspace, WorkspaceError, _is_reparse_point
 from .media.capabilities import av1_capability
+from .media.jpegxl import (
+    JXL_SOURCE_REPLACEMENT_BLOCKER,
+    JXL_SUPPORTED_EXTENSIONS,
+    distance_to_quality,
+    production_capability,
+    profile_settings,
+    quality_to_distance,
+    source_blocker,
+)
 
 BUILTIN_HIGH_QUALITY_PROFILE_ID = "builtin-jxl-high-quality"
 BUILTIN_BALANCED_PROFILE_ID = "builtin-jxl-balanced"
 BUILTIN_HIGH_COMPRESSION_PROFILE_ID = "builtin-jxl-high-compression"
 BUILTIN_ARCHIVE_CLEANUP_ID = "builtin-archive-cleanup"
 BUILTIN_KEEP_SELECTED_ID = "builtin-keep-selected-only"
-BUILTIN_AV1_PROFILE_ID = "builtin-av1-archival"
+BUILTIN_AV1_PROFILE_ID = "builtin-av1-4k120-very-fast"
+LEGACY_BUILTIN_AV1_PROFILE_ID = "builtin-av1-archival"
+BUILTIN_AV1_PROFILE_IDS = {
+    "builtin-av1-1080p60-fast",
+    "builtin-av1-1080p60-very-fast",
+    "builtin-av1-4k120-fast",
+    BUILTIN_AV1_PROFILE_ID,
+    LEGACY_BUILTIN_AV1_PROFILE_ID,
+}
 BUILTIN_PROFILE_IDS = {
     BUILTIN_HIGH_QUALITY_PROFILE_ID,
     BUILTIN_BALANCED_PROFILE_ID,
     BUILTIN_HIGH_COMPRESSION_PROFILE_ID,
-    BUILTIN_AV1_PROFILE_ID,
+    *BUILTIN_AV1_PROFILE_IDS,
 }
 BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
-COMPRESSION_EXECUTION_BLOCKER = "Production compression execution is not enabled until Phase 10C."
+AV1_EXECUTION_BLOCKER = "AV1 execution remains blocked until benchmark, stream, color, and recovery validation is complete."
+AVIF_EXECUTION_BLOCKER = "AVIF archival execution is not enabled; AVIF remains preview-only."
 CONFLICT_POLICIES = {"rename", "skip", "overwrite"}
 _plan_runs = {}
 _plan_runs_lock = threading.Lock()
-
-
-def quality_to_distance(quality: float) -> float:
-    """Map the user-facing quality scale to the native JPEG XL distance scale."""
-    value = max(0.0, min(100.0, float(quality)))
-    return round((100.0 - value) * 1.5 / 40.0, 4)
-
-
-def distance_to_quality(distance: float) -> float:
-    """Read legacy/custom native-distance settings without changing their meaning."""
-    return round(max(0.0, min(100.0, 100.0 - float(distance) * 40.0 / 1.5)), 2)
 
 
 def list_profiles(workspace: Workspace, *, seed: bool = True) -> list[dict[str, object]]:
@@ -313,9 +320,26 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             if target_validation_error:
                 item_conflicts.append(target_validation_error)
             if operation == "compress":
-                item_blockers.append(COMPRESSION_EXECUTION_BLOCKER)
                 if profile is None:
-                    item_blockers.append("compression profile is missing")
+                    item_blockers.append("compression profile is missing; supported Phase 10C compression is required")
+                elif profile.get("codec") == "jpeg-xl":
+                    capability = production_capability()
+                    if not capability.get("production_encoder_available"):
+                        item_blockers.append(str(capability.get("message") or "JPEG XL encoder is unavailable."))
+                    if row["extension"].casefold() not in JXL_SUPPORTED_EXTENSIONS:
+                        item_blockers.append("This source format is not supported by production JPEG XL compression.")
+                    else:
+                        source_issue = source_blocker(workspace.absolute_path(source))
+                        if source_issue:
+                            item_blockers.append(source_issue)
+                    if action.get("source_disposition", "keep") == "replace" and not capability.get("source_replacement_available"):
+                        item_blockers.append(JXL_SOURCE_REPLACEMENT_BLOCKER)
+                elif profile.get("codec") == "av1":
+                    item_blockers.append(AV1_EXECUTION_BLOCKER)
+                elif profile.get("codec") == "avif":
+                    item_blockers.append(AVIF_EXECUTION_BLOCKER)
+                else:
+                    item_blockers.append("This compression codec is not supported for production execution.")
             if operation not in {"compress", "copy", "move", "delete"}:
                 item_conflicts.append(f"unsupported planned operation: {operation}")
             if operation in {"compress", "copy", "move"} and target is None and target_validation_error is None:
@@ -411,7 +435,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
         "conflicts": conflicts,
         "blockers": list(blockers.values()),
         "summary": summary,
-        "executor": {"available": True, "supported_operations": ["copy", "move", "delete"], "message": "Copy, Move, and Delete execution is available. Compression remains blocked until Phase 10C."},
+        "executor": {"available": True, "supported_operations": ["copy", "compress", "move", "delete"], "message": "Phase 10C JPEG XL keep-source execution is available. Source replacement, AV1, and AVIF remain blocked."},
     }
 
 
@@ -874,11 +898,15 @@ def _is_plan_executable(operation: dict[str, object]) -> bool:
 def _profile_snapshot(profile: dict[str, object] | None) -> dict[str, object] | None:
     if profile is None:
         return None
+    settings = profile_settings(profile) if profile.get("codec") == "jpeg-xl" else profile.get("settings") or {}
+    if profile.get("codec") == "jpeg-xl":
+        settings = {**settings, "encoder_version": production_capability().get("encoder_version")}
     return {
         "id": profile.get("id"),
+        "name": profile.get("name"),
         "codec": profile.get("codec"),
         "container": profile.get("container"),
-        "settings": profile.get("settings") or {},
+        "settings": settings,
     }
 
 
@@ -996,37 +1024,41 @@ def _empty_plan(reason: str):
         },
         "empty_reason": reason,
         "plan_digest": _plan_digest([], None),
-        "executor": {"available": True, "supported_operations": ["copy", "move", "delete"], "message": "Copy, Move, and Delete execution is available. Compression remains blocked until Phase 10C."},
+        "executor": {"available": True, "supported_operations": ["copy", "compress", "move", "delete"], "message": "Phase 10C JPEG XL keep-source execution is available. Source replacement, AV1, and AVIF remain blocked."},
     }
 
 
 def _ensure_builtins(workspace: Workspace) -> None:
     now = _timestamp()
     profiles = [
-        (BUILTIN_HIGH_QUALITY_PROFILE_ID, "JXL High Quality", {"quality": 80, "distance": quality_to_distance(80), "effort": 7}),
-        (BUILTIN_BALANCED_PROFILE_ID, "JXL Balanced", {"quality": 60, "distance": quality_to_distance(60), "effort": 7}),
-        (BUILTIN_HIGH_COMPRESSION_PROFILE_ID, "JXL High Compression", {"quality": 40, "distance": quality_to_distance(40), "effort": 7}),
-        (BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", {"status": "pending"}),
+        (BUILTIN_HIGH_QUALITY_PROFILE_ID, "JXL High Quality", "jpeg-xl", "jxl", {"quality": 80, "distance": quality_to_distance(80), "effort": 7}),
+        (BUILTIN_BALANCED_PROFILE_ID, "JXL Balanced", "jpeg-xl", "jxl", {"quality": 60, "distance": quality_to_distance(60), "effort": 7}),
+        (BUILTIN_HIGH_COMPRESSION_PROFILE_ID, "JXL High Compression", "jpeg-xl", "jxl", {"quality": 40, "distance": quality_to_distance(40), "effort": 7}),
+        ("builtin-av1-1080p60-fast", "AV1 1080p60 Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast", "contract_version": "av1-pending-v1"}),
+        ("builtin-av1-1080p60-very-fast", "AV1 1080p60 Very Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "very_fast", "contract_version": "av1-pending-v1"}),
+        ("builtin-av1-4k120-fast", "AV1 4K120 Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "fast", "contract_version": "av1-pending-v1"}),
+        (BUILTIN_AV1_PROFILE_ID, "AV1 4K120 Very Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "very_fast", "contract_version": "av1-pending-v1"}),
+        (LEGACY_BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", "av1", "mp4", {"alias_of": BUILTIN_AV1_PROFILE_ID, "contract_version": "av1-pending-v1"}),
     ]
     cleanup_rules = [
         {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "move", "destination_dir": "raws", "preserve_relative_structure": False, "conflict_policy": "rename"}},
         {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename"}},
-        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "keep", "compress_in_place": True, "conflict_policy": "rename"}},
         {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "keep", "compress_in_place": True, "conflict_policy": "rename"}},
     ]
     selected_rules = [
         {"enabled": True, "match": {"selection_state": "rejected"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "undecided"}, "action": {"operation": "delete"}},
     ]
     with workspace.transaction() as connection:
-        for profile_id, name, settings in profiles:
+        for profile_id, name, codec, container, settings in profiles:
             connection.execute(
                 "INSERT INTO compression_profile(id, name, codec, container, settings_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, codec=excluded.codec, container=excluded.container, settings_json=excluded.settings_json, updated_at=excluded.updated_at",
-                (profile_id, name, "jpeg-xl" if profile_id != BUILTIN_AV1_PROFILE_ID else "av1", "jxl" if profile_id != BUILTIN_AV1_PROFILE_ID else "mp4", json.dumps(settings, sort_keys=True), now, now),
+                (profile_id, name, codec, container, json.dumps(settings, sort_keys=True), now, now),
             )
         for ruleset_id, name, description, rules in (
             (BUILTIN_ARCHIVE_CLEANUP_ID, "Archive cleanup", "Conservative archive cleanup planning", cleanup_rules),
