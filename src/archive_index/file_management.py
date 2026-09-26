@@ -1045,7 +1045,7 @@ def _ensure_builtins(workspace: Workspace) -> None:
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "move", "destination_dir": "raws", "preserve_relative_structure": False, "conflict_policy": "rename"}},
         {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename"}},
-        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "keep", "compress_in_place": True, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
         {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "keep", "compress_in_place": True, "conflict_policy": "rename"}},

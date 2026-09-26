@@ -289,6 +289,8 @@ def _raw_jpeg_candidates(assets, physical, canonical):
     for row in physical:
         if row["media_type"] != "image":
             continue
+        if str(row["role"] or "").casefold().startswith(("managed", "derived")):
+            continue
         asset_id = canonical.get(row["logical_asset_id"], row["logical_asset_id"])
         files_by_asset[asset_id].append(row)
         stem = row["filename"].rsplit(".", 1)[0].casefold()
@@ -335,6 +337,8 @@ def _rendered_jxl_candidates(workspace, assets, physical, canonical):
     groups: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"jxl": set(), "rendered": set()})
     for row in physical:
         if row["media_type"] != "image":
+            continue
+        if str(row["role"] or "").casefold().startswith(("managed", "derived")):
             continue
         asset_id = canonical.get(row["logical_asset_id"], row["logical_asset_id"])
         files_by_asset[asset_id].append(row)

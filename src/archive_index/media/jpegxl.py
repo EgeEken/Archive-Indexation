@@ -16,6 +16,9 @@ JXL_SUPPORTED_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
 JXL_SOURCE_REPLACEMENT_BLOCKER = (
     "Source replacement is disabled because the current JPEG XL encoder cannot preserve required source metadata."
 )
+JXL_ICC_BLOCKER = (
+    "JPEG XL compression is unavailable for this image because its embedded ICC color profile cannot currently be preserved safely."
+)
 
 
 def quality_to_distance(quality: float) -> float:
@@ -53,6 +56,7 @@ def production_capability() -> dict[str, object]:
             "decoder_available": False,
             "production_encoder_available": False,
             "source_replacement_available": False,
+            "icc_preservation_available": False,
             "decoder_version": None,
             "encoder_version": None,
             "message": "JPEG XL encoder is unavailable because imagecodecs is not installed.",
@@ -65,6 +69,7 @@ def production_capability() -> dict[str, object]:
             "decoder_available": decoder is not None,
             "production_encoder_available": False,
             "source_replacement_available": False,
+            "icc_preservation_available": False,
             "decoder_version": None,
             "encoder_version": None,
             "message": "JPEG XL encoder is unavailable in the current imagecodecs runtime.",
@@ -77,6 +82,7 @@ def production_capability() -> dict[str, object]:
             "decoder_available": True,
             "production_encoder_available": False,
             "source_replacement_available": False,
+            "icc_preservation_available": False,
             "decoder_version": str(imagecodecs.jpegxl_version()),
             "encoder_version": str(imagecodecs.jpegxl_version()),
             "message": "JPEG XL encoder probe failed in the current runtime.",
@@ -86,6 +92,7 @@ def production_capability() -> dict[str, object]:
         "decoder_available": True,
         "production_encoder_available": True,
         "source_replacement_available": False,
+        "icc_preservation_available": False,
         "decoder_version": str(imagecodecs.jpegxl_version()),
         "encoder_version": str(imagecodecs.jpegxl_version()),
         "message": JXL_SOURCE_REPLACEMENT_BLOCKER,
@@ -108,6 +115,8 @@ def source_blocker(source: Path) -> str | None:
         with Image.open(source) as image:
             if image.mode not in {"RGB", "RGBA"}:
                 return "Production JPEG XL supports 8-bit RGB and RGBA JPEG/PNG sources only."
+            if image.info.get("icc_profile"):
+                return JXL_ICC_BLOCKER
     except Exception as error:
         return f"Source cannot be read by production JPEG XL: {error}"
     return None
@@ -156,6 +165,11 @@ def validate(encoded: bytes, expected: Image.Image) -> dict[str, object]:
             raise ValueError("JPEG XL output dimensions did not match the source.")
         if expected_channels != decoded_channels:
             raise ValueError("JPEG XL output channel/alpha semantics did not match the source.")
+        alpha_exact = None
+        if "A" in expected.getbands():
+            alpha_exact = _alpha_equal(expected, decoded)
+            if not alpha_exact:
+                raise ValueError("JPEG XL output alpha did not match the source exactly.")
         mse = _mse(expected, decoded)
         if _catastrophic(expected, decoded):
             raise ValueError("JPEG XL output failed catastrophic visual validation.")
@@ -166,6 +180,7 @@ def validate(encoded: bytes, expected: Image.Image) -> dict[str, object]:
             "height": decoded.height,
             "channels": decoded_channels,
             "mse": round(mse, 6) if math.isfinite(mse) else None,
+            "alpha_exact": alpha_exact,
             "metadata_contract": "source-retained; encoder does not embed required EXIF/ICC/XMP metadata",
         }
     finally:
@@ -184,6 +199,14 @@ def _metadata_contract(image: Image.Image) -> dict[str, object]:
         "mode": image.mode,
         "metadata_policy": "source-retained",
     }
+
+
+def _alpha_equal(left: Image.Image, right: Image.Image) -> bool:
+    difference = ImageChops.difference(left.getchannel("A"), right.getchannel("A"))
+    try:
+        return difference.getbbox() is None
+    finally:
+        difference.close()
 
 
 def _mse(left: Image.Image, right: Image.Image) -> float:

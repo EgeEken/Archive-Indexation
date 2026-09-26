@@ -20,7 +20,7 @@ from .file_management import build_dry_run_plan
 from .file_management_provenance import link_managed_derivatives, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
-from .media.jpegxl import JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
+from .media.jpegxl import JXL_ICC_BLOCKER, JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
 from .workspace import INDEX_DIRECTORY, Workspace, WorkspaceError, _is_reparse_point
 
 LOGGER = logging.getLogger(__name__)
@@ -471,10 +471,15 @@ def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: th
     _remove_owned_temp(workspace, temp)
     try:
         image, metadata = load_source(source)
+        if metadata.get("has_icc"):
+            raise OperationFailure(JXL_ICC_BLOCKER)
+        _set_metadata_contract(workspace, operation["id"], metadata)
         encoded = encode_jxl(image, profile)
         if cancel.is_set() or _cancel_requested(workspace, execution_id):
             raise OperationCancelled("Execution cancelled after JPEG XL encoding.")
         validation = validate_jxl(encoded, image)
+        metadata_contract = {**metadata, "output": validation}
+        _set_metadata_contract(workspace, operation["id"], metadata_contract)
         if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
             _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
             return
@@ -500,7 +505,7 @@ def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: th
             workspace,
             operation,
             final_validation,
-            {**metadata, "output": final_validation},
+            metadata_contract,
             profile.get("settings", {}).get("encoder_version"),
         )
         replaced_bytes = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
@@ -552,7 +557,19 @@ def _matches_compressed_output(path: Path, operation) -> bool:
 
 def _recover_compressed_final(workspace, execution_id, operation, target) -> None:
     final = _validate_final_jxl(target, {"size_bytes": operation["actual_output_size_bytes"], "sha256": operation["actual_output_sha256"]})
-    record_managed_derivative(workspace, operation, final, {"recovered": True}, None)
+    metadata_contract = _parse_json(operation.get("metadata_contract_json")) or {}
+    if not metadata_contract:
+        source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+        if source.is_file():
+            try:
+                image, metadata_contract = load_source(source)
+                image.close()
+            except Exception:
+                metadata_contract = {}
+    metadata_contract = metadata_contract or {"metadata_policy": "source-retained"}
+    metadata_contract = {**metadata_contract, "output": {**(metadata_contract.get("output") or {}), **final}, "recovered": True}
+    encoder_version = (operation.get("profile_snapshot") or {}).get("settings", {}).get("encoder_version")
+    record_managed_derivative(workspace, operation, final, metadata_contract, encoder_version)
     removed = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
     if operation.get("source_disposition") == "replace":
         source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
@@ -950,6 +967,14 @@ def _set_output(workspace, operation_id: str, size_bytes: int, sha256: str) -> N
         )
 
 
+def _set_metadata_contract(workspace, operation_id: str, metadata_contract: dict[str, object]) -> None:
+    with workspace.transaction() as connection:
+        connection.execute(
+            "UPDATE file_management_execution_operation SET metadata_contract_json = ?, updated_at = ? WHERE id = ?",
+            (_json(metadata_contract), _timestamp(), operation_id),
+        )
+
+
 def _skip_operation(workspace, operation_id: str, reason: str) -> None:
     with _progress_lock:
         _progress_marks.pop(operation_id, None)
@@ -1016,8 +1041,8 @@ def _refresh_catalog(workspace, execution_id) -> None:
         connection.execute("UPDATE file_management_execution SET catalog_refresh_status = 'running', updated_at = ? WHERE id = ?", (_timestamp(), execution_id))
     try:
         scan(workspace)
-        reconcile_workspace(workspace)
         link_managed_derivatives(workspace)
+        reconcile_workspace(workspace)
     except Exception as error:
         LOGGER.exception("catalog refresh failed after File Management execution %s", execution_id)
         with workspace.transaction() as connection:

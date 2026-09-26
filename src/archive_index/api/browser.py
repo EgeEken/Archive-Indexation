@@ -253,7 +253,15 @@ def physical_rows(workspace: Workspace, asset_id: str):
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
             LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
-            LEFT JOIN managed_derivative AS managed ON managed.physical_file_id = pf.id
+            LEFT JOIN managed_derivative AS managed ON managed.id = (
+                SELECT current.id
+                FROM managed_derivative AS current
+                WHERE current.physical_file_id = pf.id
+                  AND current.output_relative_path = pf.relative_path
+                  AND current.output_sha256 = pf.sha256
+                ORDER BY current.created_at DESC, current.id DESC
+                LIMIT 1
+            )
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE pf.logical_asset_id = ?
             ORDER BY pf.is_online DESC, pf.relative_path
@@ -290,7 +298,15 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
             LEFT JOIN component_state AS metadata ON metadata.physical_file_id = pf.id AND metadata.component = 'metadata'
             LEFT JOIN component_state AS thumbnail ON thumbnail.physical_file_id = pf.id AND thumbnail.component = 'thumbnail'
             LEFT JOIN display_preview ON display_preview.physical_file_id = pf.id
-            LEFT JOIN managed_derivative AS managed ON managed.physical_file_id = pf.id
+            LEFT JOIN managed_derivative AS managed ON managed.id = (
+                SELECT current.id
+                FROM managed_derivative AS current
+                WHERE current.physical_file_id = pf.id
+                  AND current.output_relative_path = pf.relative_path
+                  AND current.output_sha256 = pf.sha256
+                ORDER BY current.created_at DESC, current.id DESC
+                LIMIT 1
+            )
             LEFT JOIN component_state AS quality ON quality.physical_file_id = pf.id AND quality.component = 'quality'
             WHERE pf.logical_asset_id IN ({placeholders}) AND pf.in_scope = 1
             ORDER BY pf.logical_asset_id, pf.is_online DESC, pf.relative_path
