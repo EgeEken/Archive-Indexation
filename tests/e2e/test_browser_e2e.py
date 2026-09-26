@@ -27,7 +27,7 @@ except ImportError:
 
 from archive_index.api.server import WorkspaceHTTPServer
 from archive_index.app_state import WorkspaceRegistry, workspace_id
-from archive_index.file_management import save_ruleset, set_active_ruleset
+from archive_index.file_management import list_profiles, save_ruleset, set_active_ruleset
 from archive_index.indexing.grouping import build_groups, extract_visual_features
 from archive_index.indexing.media_pipeline import index_workspace
 from archive_index.indexing.projection import build_semantic_projection
@@ -1336,6 +1336,81 @@ class Phase10BFileManagementE2ETests(unittest.TestCase):
         self.assertEqual((self.workspace_root / "moved" / "move.png").read_bytes(), b"move fixture")
         self.assertFalse((self.workspace_root / "move.png").exists())
         self.assertFalse((self.workspace_root / "delete.webp").exists())
+        self.assertFalse(list(self.workspace_root.rglob(".*.archive-index-*.tmp")))
+
+
+@unittest.skipUnless(sync_playwright is not None and imagecodecs is not None, "Playwright and imagecodecs are required")
+class Phase10CCompressionE2ETests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary_directory = tempfile.TemporaryDirectory(prefix="archive-index-phase10c-e2e-")
+        root = Path(cls.temporary_directory.name)
+        cls.workspace_root = root / "workspace"
+        cls.workspace_root.mkdir()
+        Image.effect_noise((800, 600), 100).convert("RGB").save(cls.workspace_root / "photo.jpg", quality=95)
+        cls.workspace = Workspace.create(cls.workspace_root)
+        scan(cls.workspace)
+        profile = next(profile for profile in list_profiles(cls.workspace) if profile["name"] == "JXL Balanced")
+        cls.ruleset = save_ruleset(
+            cls.workspace,
+            name="Phase 10C browser fixture",
+            rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep", "destination_dir": "derivatives"}}],
+        )
+        set_active_ruleset(cls.workspace, cls.ruleset["id"])
+        cls.handle = workspace_id(cls.workspace)
+        cls.registry_path = root / "registry.json"
+        registry = WorkspaceRegistry(cls.registry_path)
+        registry.add(cls.workspace)
+        cls.server = WorkspaceHTTPServer(("127.0.0.1", 0), registry_path=cls.registry_path)
+        cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.server_thread.start()
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(headless=True, args=["--disable-gpu", "--disable-dev-shm-usage"])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.browser.close()
+        cls.playwright.stop()
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.server_thread.join(timeout=5)
+        cls.temporary_directory.cleanup()
+
+    def setUp(self) -> None:
+        self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        self.page = self.context.new_page()
+
+    def tearDown(self) -> None:
+        self.context.close()
+
+    def test_jxl_keep_source_review_execute_and_catalog_link(self) -> None:
+        self.page.goto(f"{self.base_url}/?workspace={self.handle}", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
+        self.page.locator("#file-management-button").click()
+        self.page.locator("#file-management-dialog[open]").wait_for()
+        self.page.locator("#file-management-ruleset-select").select_option(self.ruleset["id"])
+        self.page.get_by_role("button", name="Analyze plan").click()
+        self.page.locator("#file-management-plan-summary").wait_for()
+        self.assertEqual(self.page.locator(".plan-summary-callouts [aria-label^='Current free disk space']").count(), 1)
+        self.assertIn("→", self.page.locator(".plan-summary-callouts").inner_text())
+        self.page.locator("[data-review-execution]").click()
+        review = self.page.locator(".execution-review")
+        review.wait_for()
+        self.assertIn("Compress", review.inner_text())
+        self.assertEqual(review.locator("[data-execution-ack]").count(), 0)
+        review.locator("[data-execution-start]").click()
+        self.page.wait_for_function("() => document.querySelector('#file-management-execution-panel h3')?.innerText.includes('completed')", timeout=20000)
+        self.assertTrue((self.workspace_root / "photo.jpg").exists())
+        self.assertTrue((self.workspace_root / "derivatives" / "photo.jxl").exists())
+        response = self.page.request.get(f"{self.base_url}/api/browser?workspace={self.handle}&limit=60")
+        self.assertEqual(response.status, 200)
+        files = []
+        for asset in response.json()["items"]:
+            detail = self.page.request.get(f"{self.base_url}/api/assets/{asset['asset_id']}?workspace={self.handle}")
+            self.assertEqual(detail.status, 200)
+            files.extend(detail.json().get("physical_files", []))
+        self.assertTrue(any(file.get("representation_label", "").startswith("JPEG XL derivative") for file in files))
         self.assertFalse(list(self.workspace_root.rglob(".*.archive-index-*.tmp")))
 
 
