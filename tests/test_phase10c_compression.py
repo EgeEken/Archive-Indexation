@@ -224,6 +224,22 @@ class Phase10CCompressionTests(unittest.TestCase):
         current = next(row for row in rows if row["relative_path"] == "derivatives/photo.jxl")
         self.assertIsNone(current["managed_derivative_id"])
 
+    def test_relinking_unchanged_output_is_idempotent(self):
+        self._run({"source_disposition": "keep", "destination_dir": "derivatives"})
+        connection = self.workspace.connect()
+        try:
+            before = connection.execute("SELECT physical_file_id, updated_at FROM managed_derivative").fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(before["physical_file_id"])
+        link_managed_derivatives(self.workspace)
+        connection = self.workspace.connect()
+        try:
+            after = connection.execute("SELECT physical_file_id, updated_at FROM managed_derivative").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(dict(after), dict(before))
+
     def test_deleted_and_recreated_output_requires_exact_hash(self):
         _, result = self._run({"source_disposition": "keep", "destination_dir": "derivatives"})
         output = self.root / "derivatives" / "photo.jxl"

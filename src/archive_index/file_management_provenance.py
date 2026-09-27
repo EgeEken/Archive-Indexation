@@ -65,7 +65,7 @@ def link_managed_derivatives(workspace: Workspace) -> int:
     linked = 0
     with workspace.transaction() as connection:
         physical = connection.execute(
-            "SELECT id, relative_path, sha256, logical_asset_id FROM physical_file WHERE is_online = 1 AND in_scope = 1"
+            "SELECT id, relative_path, sha256, logical_asset_id, role FROM physical_file WHERE is_online = 1 AND in_scope = 1"
         ).fetchall()
         by_identity = {
             (row["relative_path"].casefold(), row["sha256"]): row
@@ -81,28 +81,30 @@ def link_managed_derivatives(workspace: Workspace) -> int:
             ORDER BY COALESCE(execution.created_at, md.created_at) DESC, md.created_at DESC, md.id DESC
             """
         ).fetchall()
-        connection.execute(
-            "UPDATE managed_derivative SET physical_file_id = NULL, updated_at = ? WHERE physical_file_id IS NOT NULL",
-            (_timestamp(),),
-        )
         winners = {}
         for row in derivatives:
             output = by_identity.get((row["output_relative_path"].casefold(), row["output_sha256"]))
             if output is not None and output["id"] not in winners:
                 winners[output["id"]] = row
+        desired_links = {row["id"]: output_id for output_id, row in winners.items()}
+        timestamp = _timestamp()
+        for row in derivatives:
+            current = row["physical_file_id"]
+            desired = desired_links.get(row["id"])
+            if current != desired:
+                connection.execute(
+                    "UPDATE managed_derivative SET physical_file_id = ?, updated_at = ? WHERE id = ?",
+                    (desired, timestamp, row["id"]),
+                )
         for output_id, row in winners.items():
             output = next(item for item in physical if item["id"] == output_id)
-            connection.execute(
-                "UPDATE managed_derivative SET physical_file_id = ?, updated_at = ? WHERE id = ?",
-                (output_id, _timestamp(), row["id"]),
-            )
             old_asset_id = output["logical_asset_id"]
             if row["source_logical_asset_id"] and old_asset_id != row["source_logical_asset_id"]:
                 connection.execute(
                     "UPDATE physical_file SET logical_asset_id = ?, role = 'managed_jxl' WHERE id = ?",
                     (row["source_logical_asset_id"], output_id),
                 )
-            else:
+            elif output["role"] != "managed_jxl":
                 connection.execute(
                     "UPDATE physical_file SET role = 'managed_jxl' WHERE id = ?",
                     (output_id,),
