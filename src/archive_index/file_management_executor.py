@@ -20,7 +20,9 @@ from .file_management import build_dry_run_plan
 from .file_management_provenance import link_managed_derivatives, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
+from .media.av1 import analyze_source as analyze_av1, encode as encode_av1, metadata_summary as av1_metadata_summary, profile_settings as av1_profile_settings, validate as validate_av1
 from .media.jpegxl import JXL_ICC_BLOCKER, JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
+from .media.jpegxl_tools import encode as encode_archival_jxl, validate as validate_archival_jxl
 from .workspace import INDEX_DIRECTORY, Workspace, WorkspaceError, _is_reparse_point
 
 LOGGER = logging.getLogger(__name__)
@@ -426,8 +428,10 @@ def _execute_operation(workspace: Workspace, execution_id: str, operation, cance
         codec = (operation.get("profile_snapshot") or {}).get("codec")
         if codec == "jpeg-xl":
             _compress_jxl(workspace, execution_id, operation, cancel)
+        elif codec == "av1":
+            _compress_av1(workspace, execution_id, operation, cancel)
         else:
-            raise OperationFailure("Only validated JPEG XL compression is enabled for production execution.")
+            raise OperationFailure("Only validated JPEG XL and AV1 compression are enabled for production execution.")
     elif kind == "move":
         _move(workspace, execution_id, operation, cancel)
     elif kind == "delete":
@@ -443,7 +447,8 @@ def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: th
     if not production_capability().get("production_encoder_available"):
         raise OperationFailure("JPEG XL encoder is unavailable.")
     if operation.get("source_disposition") == "replace":
-        raise OperationFailure("Source replacement is disabled because the current JPEG XL encoder cannot preserve required source metadata.")
+        _compress_jxl_replacement(workspace, execution_id, operation, cancel)
+        return
     if Path(operation["source_relative_path"]).suffix.casefold() not in JXL_SUPPORTED_EXTENSIONS:
         raise OperationFailure("This source format is not supported by production JPEG XL compression.")
     source = _validate_source(workspace, operation)
@@ -548,12 +553,172 @@ def _validate_final_jxl(target: Path, expected: dict[str, object]) -> dict[str, 
     return validation
 
 
+def _compress_jxl_replacement(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
+    profile = operation.get("profile_snapshot") or {}
+    if not production_capability().get("source_replacement_available"):
+        raise OperationFailure("JPEG XL source replacement is unavailable because the metadata-preserving libjxl runtime is not ready.")
+    source = _validate_source(workspace, operation)
+    in_place = operation["target_relative_path"].casefold() == operation["source_relative_path"].casefold()
+    target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None:
+        if operation.get("recovery_eligible") and _matches_compressed_output(occupied, operation):
+            _recover_compressed_final(workspace, execution_id, operation, occupied)
+            return
+        if operation.get("conflict_policy") == "skip":
+            _skip_operation(workspace, operation["id"], "Skipped because the destination already exists.")
+            return
+        if operation.get("conflict_policy") != "overwrite":
+            raise OperationFailure("Destination now exists.")
+        _validate_authorized_target(workspace, operation, occupied)
+    _ensure_target_directory(workspace, operation["target_relative_path"])
+    target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None and operation.get("conflict_policy") == "overwrite":
+        _validate_authorized_target(workspace, operation, occupied)
+    elif occupied is not None:
+        raise OperationFailure("Destination now exists.")
+    _ensure_operation_space(workspace, max(int(operation.get("estimated_output_bytes") or 0), int(operation["source_size_bytes"] or 0)))
+    if cancel.is_set() or _cancel_requested(workspace, execution_id):
+        raise OperationCancelled("Execution cancelled.")
+    temp = _owned_temp_path(workspace, execution_id, operation)
+    _set_temp(workspace, operation["id"], temp)
+    _remove_owned_temp(workspace, temp)
+    try:
+        source_metadata = {}
+        result = encode_archival_jxl(source, temp, profile, temp.parent)
+        source_metadata = result.get("metadata_contract") or {}
+        if cancel.is_set() or _cancel_requested(workspace, execution_id):
+            raise OperationCancelled("Execution cancelled after JPEG XL encoding.")
+        validation = validate_archival_jxl(source, temp, result)
+        if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
+            _remove_owned_temp(workspace, temp)
+            _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
+            return
+        with temp.open("ab") as output_file:
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        shutil.copystat(source, temp, follow_symlinks=False)
+        metadata_contract = {**source_metadata, "output": validation, "source_retained": False}
+        _set_metadata_contract(workspace, operation["id"], metadata_contract)
+        _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
+        _update_progress(workspace, operation["id"], int(operation["source_size_bytes"] or 0), force=True)
+        _set_stage(workspace, operation["id"], "finalizing")
+        _validate_source(workspace, operation)
+        _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+        occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+        if operation.get("conflict_policy") == "overwrite" and occupied is not None:
+            _atomic_replace_authorized(workspace, temp, target, operation)
+        elif occupied is None:
+            _atomic_no_replace(temp, target, remove_source=False)
+        else:
+            raise OperationFailure("Destination now exists.")
+        final_validation = validate_archival_jxl(source, target, validation)
+        record_managed_derivative(workspace, operation, final_validation, {**metadata_contract, "output": final_validation}, result.get("encoder_version"))
+        _validate_source(workspace, operation)
+        if cancel.is_set() or _cancel_requested(workspace, execution_id):
+            raise OperationCancelled("Execution cancelled after output finalization.")
+        _set_stage(workspace, operation["id"], "deleting")
+        _unlink_source(workspace, operation)
+        replaced_bytes = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
+        _complete_operation(workspace, execution_id, operation, final_validation["size_bytes"], final_validation["sha256"], int(operation["source_size_bytes"] or 0), final_validation["size_bytes"], 0, replaced_bytes + int(operation["source_size_bytes"] or 0))
+    except Exception:
+        if temp.exists():
+            _remove_owned_temp(workspace, temp)
+        raise
+
+
+def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
+    profile = operation.get("profile_snapshot") or {}
+    source = _validate_source(workspace, operation)
+    in_place = operation["target_relative_path"].casefold() == operation["source_relative_path"].casefold() and operation.get("source_disposition") == "replace"
+    if operation.get("target_relative_path", "").casefold().endswith(".jxl"):
+        raise OperationFailure("AV1 output target must be an MP4 file.")
+    info = analyze_av1(source)
+    target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if occupied is not None:
+        if operation.get("recovery_eligible") and _matches_compressed_output(occupied, operation):
+            _recover_compressed_final(workspace, execution_id, operation, occupied)
+            return
+        if in_place and _matches_expected(occupied, operation):
+            pass
+        elif operation.get("conflict_policy") == "skip":
+            _skip_operation(workspace, operation["id"], "Skipped because the destination already exists.")
+            return
+        if not in_place and operation.get("conflict_policy") != "overwrite":
+            raise OperationFailure("Destination now exists.")
+        if not in_place:
+            _validate_authorized_target(workspace, operation, occupied)
+    _ensure_target_directory(workspace, operation["target_relative_path"])
+    target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+    occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+    if in_place and occupied is not None:
+        if not _matches_expected(occupied, operation):
+            raise OperationFailure("Source changed since the plan was confirmed.")
+    elif occupied is not None and operation.get("conflict_policy") == "overwrite":
+        _validate_authorized_target(workspace, operation, occupied)
+    elif occupied is not None:
+        raise OperationFailure("Destination now exists.")
+    _ensure_operation_space(workspace, max(int(operation.get("estimated_output_bytes") or 0), int(operation["source_size_bytes"] or 0)))
+    temp = _owned_temp_path(workspace, execution_id, operation)
+    _set_temp(workspace, operation["id"], temp)
+    _remove_owned_temp(workspace, temp)
+    try:
+        progress = lambda fraction: _update_progress(workspace, operation["id"], int(int(operation["source_size_bytes"] or 0) * fraction))
+        result = encode_av1(source, temp, info, profile, cancel, progress)
+        validation = validate_av1(source, temp, info, profile)
+        if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
+            _remove_owned_temp(workspace, temp)
+            _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
+            return
+        with temp.open("ab") as output_file:
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        metadata_contract = {"source": av1_metadata_summary(info), "output": validation, "source_retained": operation.get("source_disposition") != "replace"}
+        _set_metadata_contract(workspace, operation["id"], metadata_contract)
+        _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
+        _set_stage(workspace, operation["id"], "finalizing")
+        _validate_source(workspace, operation)
+        _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
+        occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
+        if in_place:
+            if occupied is None or not _matches_expected(occupied, operation):
+                raise OperationFailure("Source changed since the plan was confirmed.")
+            os.replace(temp, occupied)
+        elif operation.get("conflict_policy") == "overwrite" and occupied is not None:
+            _atomic_replace_authorized(workspace, temp, target, operation)
+        elif occupied is None:
+            _atomic_no_replace(temp, target, remove_source=False)
+        else:
+            raise OperationFailure("Destination now exists.")
+        final_validation = validate_av1(target if in_place else source, target, info, profile)
+        record_managed_derivative(workspace, operation, final_validation, {**metadata_contract, "output": final_validation}, profile.get("settings", {}).get("encoder_version"))
+        removed = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
+        if operation.get("source_disposition") == "replace" and not in_place:
+            _validate_source(workspace, operation)
+            if cancel.is_set() or _cancel_requested(workspace, execution_id):
+                raise OperationCancelled("Execution cancelled after output finalization.")
+            _set_stage(workspace, operation["id"], "deleting")
+            _unlink_source(workspace, operation)
+            removed += int(operation["source_size_bytes"] or 0)
+        if in_place:
+            removed += int(operation["source_size_bytes"] or 0)
+        _complete_operation(workspace, execution_id, operation, final_validation["size_bytes"], final_validation["sha256"], int(operation["source_size_bytes"] or 0), final_validation["size_bytes"], 0, removed)
+    except Exception:
+        if temp.exists():
+            _remove_owned_temp(workspace, temp)
+        raise
+
+
 def _matches_compressed_output(path: Path, operation) -> bool:
     try:
         if not path.is_file() or path.stat().st_size != int(operation.get("actual_output_size_bytes") or 0):
             return False
         if hash_file(path) != operation.get("actual_output_sha256"):
             return False
+        if (_parse_json(operation.get("profile_snapshot_json")) or {}).get("codec") == "av1":
+            return analyze_av1(path).get("codec") == "av1"
         decoded = decode_jxl(path.read_bytes())
         decoded.close()
         return True
@@ -562,6 +727,32 @@ def _matches_compressed_output(path: Path, operation) -> bool:
 
 
 def _recover_compressed_final(workspace, execution_id, operation, target) -> None:
+    profile = operation.get("profile_snapshot") or _parse_json(operation.get("profile_snapshot_json")) or {}
+    if profile.get("codec") == "av1":
+        final = {"size_bytes": target.stat().st_size, "sha256": hash_file(target)}
+        if final["size_bytes"] != int(operation.get("actual_output_size_bytes") or 0) or final["sha256"] != operation.get("actual_output_sha256"):
+            raise OperationFailure("Final AV1 output changed during recovery.")
+        output_info = analyze_av1(target)
+        if output_info.get("codec") != "av1":
+            raise OperationFailure("Final AV1 output failed recovery validation.")
+        metadata_contract = _parse_json(operation.get("metadata_contract_json")) or {}
+        metadata_contract = {**metadata_contract, "output": {**(metadata_contract.get("output") or {}), **final}, "recovered": True}
+        record_managed_derivative(workspace, operation, final, metadata_contract, profile.get("settings", {}).get("encoder_version"))
+        removed = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
+        in_place = operation["target_relative_path"].casefold() == operation["source_relative_path"].casefold() and operation.get("source_disposition") == "replace"
+        if operation.get("source_disposition") == "replace" and not in_place:
+            source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+            if source.exists():
+                _validate_source(workspace, operation)
+                _set_stage(workspace, operation["id"], "deleting")
+                _unlink_source(workspace, operation)
+                removed += int(operation["source_size_bytes"] or 0)
+            else:
+                removed += int(operation["source_size_bytes"] or 0)
+        elif in_place:
+            removed += int(operation["source_size_bytes"] or 0)
+        _complete_operation(workspace, execution_id, operation, final["size_bytes"], final["sha256"], int(operation["source_size_bytes"] or 0), final["size_bytes"], 0, removed)
+        return
     final = _validate_final_jxl(target, {"size_bytes": operation["actual_output_size_bytes"], "sha256": operation["actual_output_sha256"]})
     metadata_contract = _parse_json(operation.get("metadata_contract_json")) or {}
     if not metadata_contract:
@@ -1117,7 +1308,7 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
                     _recover_compressed_final(workspace, execution_id, operation, target)
                     recovered_change = True
                 else:
-                    _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to reconcile this JPEG XL output.")
+                    _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to reconcile this compression output.")
         except Exception as error:
             _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error=str(error))
     connection = workspace.connect()

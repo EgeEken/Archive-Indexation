@@ -1430,7 +1430,7 @@ class Phase10CCompressionE2ETests(unittest.TestCase):
         self.assertTrue(any(file.get("representation_label", "").startswith("JPEG XL derivative") for file in files))
         self.assertFalse(list(self.workspace_root.rglob(".*.archive-index-*.tmp")))
 
-    def test_archive_cleanup_keeps_replace_source_and_shows_metadata_blocker(self) -> None:
+    def test_archive_cleanup_uses_replace_source_when_runtime_is_ready(self) -> None:
         self.page.goto(f"{self.base_url}/?workspace={self.handle}", wait_until="domcontentloaded")
         self.page.locator("#workspace-view").wait_for(state="visible")
         self.page.locator("#file-management-button").click()
@@ -1440,13 +1440,13 @@ class Phase10CCompressionE2ETests(unittest.TestCase):
         self.assertFalse(compression_rule.locator('[data-rule-field="disposition"]').is_checked())
         self.page.get_by_role("button", name="Analyze plan").click()
         self.page.locator("#file-management-plan-summary").wait_for()
-        self.assertIn("metadata", self.page.locator("#file-management-plan-blockers").inner_text().lower())
+        self.assertNotIn("metadata", self.page.locator("#file-management-plan-blockers").inner_text().lower())
         self.assertIn("COMPRESS", self.page.locator("#file-management-plan-summary").inner_text())
         self.assertIn("planned", self.page.locator("#file-management-plan-summary").inner_text())
         status = self.page.locator("[data-plan-status]").first
         status.wait_for(state="attached")
-        self.assertIn("Blocked", status.text_content() or "")
-        self.assertIn("Nothing currently needs execution", self.page.locator("[data-no-execution]").inner_text())
+        self.assertNotIn("Blocked", status.text_content() or "")
+        self.assertEqual(self.page.locator("[data-no-execution]").count(), 0)
 
 
 def _float16_blob(values: tuple[float, ...]) -> bytes:

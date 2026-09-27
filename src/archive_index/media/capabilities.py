@@ -51,20 +51,50 @@ def ffmpeg_capabilities() -> dict[str, object]:
     }
 
 
+@lru_cache(maxsize=1)
 def av1_capability() -> dict[str, object]:
     capability = ffmpeg_capabilities()
-    if capability["av1_available"]:
+    if "libsvtav1" in capability["av1_encoders"]:
+        try:
+            probe = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "color=c=black:s=64x64:r=1,format=yuv420p", "-frames:v", "1",
+                    "-c:v", "libsvtav1", "-preset", "10", "-crf", "30", "-f", "null", "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return {
+                "available": True,
+                "production_ready": False,
+                "encoders": capability["av1_encoders"],
+                "encoder": "libsvtav1",
+                "message": f"libsvtav1 was detected but the production probe failed: {error}",
+            }
+        if probe.returncode:
+            return {
+                "available": True,
+                "production_ready": False,
+                "encoders": capability["av1_encoders"],
+                "encoder": "libsvtav1",
+                "message": f"libsvtav1 was detected but the production probe failed: {(probe.stderr or '').strip()[-400:]}",
+            }
         return {
             "available": True,
-            "production_ready": False,
+            "production_ready": True,
             "encoders": capability["av1_encoders"],
-            "message": "AV1 candidates are available, but production execution remains blocked pending stream, color, packaging, and recovery validation.",
+            "encoder": "libsvtav1",
+            "message": "Production AV1 is available for the validated SDR single-video safe subset.",
         }
     return {
-        "available": False,
+        "available": bool(capability["ffmpeg_available"]),
         "production_ready": False,
-        "encoders": [],
-        "message": "AV1 encoder is unavailable in the current FFmpeg runtime.",
+        "encoders": capability["av1_encoders"],
+        "encoder": None,
+        "message": "Production AV1 requires libsvtav1 in the current FFmpeg runtime.",
     }
 
 
@@ -72,10 +102,19 @@ def av1_capability() -> dict[str, object]:
 def jpegxl_tool_capabilities() -> dict[str, object]:
     explicit = os.environ.get("ARCHIVE_INDEX_CODEC_DIR")
     search_directories = []
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        search_directories.append(Path(local_app_data) / "Archive Indexation" / "codecs")
+    package_root = Path(__file__).resolve().parent
+    search_directories.extend([
+        package_root / "codecs",
+        Path(sys.executable).resolve().parent / "codecs",
+    ])
     if explicit:
         search_directories.append(Path(explicit))
-    package_root = Path(__file__).resolve().parent
-    search_directories.extend([package_root / "codecs", Path(sys.executable).resolve().parent / "codecs"])
+    project_tools = Path(__file__).resolve().parents[3] / ".tools"
+    if project_tools.is_dir():
+        search_directories.extend(path.parent for path in project_tools.rglob("cjxl.exe"))
     tools: dict[str, str | None] = {}
     for name in ("cjxl", "djxl", "jxlinfo"):
         candidate = None
@@ -94,18 +133,22 @@ def jpegxl_tool_capabilities() -> dict[str, object]:
         try:
             result = subprocess.run([tools["cjxl"], "--version"], capture_output=True, text=True, timeout=10)
             version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else None
-            help_result = subprocess.run([tools["cjxl"], "--help"], capture_output=True, text=True, timeout=10)
+            help_result = subprocess.run([tools["cjxl"], "--help", "-v", "-v"], capture_output=True, text=True, timeout=10)
             help_text = f"{help_result.stdout}\n{help_result.stderr}"
         except (OSError, subprocess.SubprocessError):
             pass
     metadata_flags = {
         flag: flag in help_text
-        for flag in ("--icc_pathname", "--icc_in", "--metadata", "--exif", "--xmp")
+        for flag in ("icc_pathname", "icc_in", "metadata", "keys 'exif'", "keys 'xmp'")
     }
+    available = bool(tools["cjxl"] and tools["djxl"])
+    metadata_flags["keys 'xmp'"] = "'xmp'" in help_text
+    metadata_ready = available and metadata_flags["icc_pathname"] and metadata_flags["keys 'exif'"] and metadata_flags["keys 'xmp'"] and "--lossless_jpeg" in help_text
     return {
-        "available": bool(tools["cjxl"] and tools["djxl"]),
+        "available": available,
+        "metadata_ready": metadata_ready,
         "tools": tools,
         "version": version,
         "metadata_flags": metadata_flags,
-        "message": "cjxl/djxl runtime is available for further metadata-contract validation." if tools["cjxl"] and tools["djxl"] else "Metadata-preserving cjxl/djxl tools are not available in the configured application runtime.",
+        "message": "cjxl/djxl metadata runtime is available." if metadata_ready else "Metadata-preserving cjxl/djxl tools are not available in the configured application runtime.",
     }

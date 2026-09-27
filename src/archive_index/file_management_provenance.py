@@ -17,6 +17,13 @@ def record_managed_derivative(
     encoder_version: str | None,
 ) -> None:
     profile = operation.get("profile_snapshot") or _json(operation.get("profile_snapshot_json")) or {}
+    settings = dict(profile.get("settings") or {})
+    codec = profile.get("codec", "jpeg-xl")
+    algorithm = settings.get("algorithm", "imagecodecs-jpegxl-archival")
+    algorithm_version = settings.get("algorithm_version", "1")
+    if codec == "jpeg-xl" and metadata_contract.get("metadata_policy") == "standalone-jxl-container":
+        algorithm = "libjxl-cjxl-archival"
+        algorithm_version = "0.12.0"
     now = _timestamp()
     with workspace.transaction() as connection:
         connection.execute(
@@ -51,10 +58,9 @@ def record_managed_derivative(
             (
                 str(uuid.uuid4()), operation["id"], operation["physical_file_id"], operation["logical_asset_id"],
                 operation["source_relative_path"], operation["source_sha256"], operation["target_relative_path"],
-                validation["sha256"], profile.get("codec", "jpeg-xl"), profile.get("container", "jxl"),
+                validation["sha256"], codec, profile.get("container", "jxl"),
                 operation["profile_id"], profile.get("name"), json.dumps(profile.get("settings") or {}, sort_keys=True),
-                profile.get("settings", {}).get("algorithm", "imagecodecs-jpegxl-archival"),
-                profile.get("settings", {}).get("algorithm_version", "1"), encoder_version,
+                algorithm, algorithm_version, encoder_version,
                 operation.get("source_disposition", "keep"), json.dumps(metadata_contract, sort_keys=True),
                 now, now,
             ),

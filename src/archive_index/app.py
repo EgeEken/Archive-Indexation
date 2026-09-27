@@ -76,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(args.verbose)
 
     if args.command == "doctor":
-        from .media.capabilities import ffmpeg_capabilities
+        from .media.capabilities import av1_capability, ffmpeg_capabilities
         from .media.codec_benchmark import codec_capabilities
 
         codecs = codec_capabilities()
@@ -90,7 +90,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         tools = jxl.get("jpegxl_tools") or {}
         print(f"JPEG XL metadata-preserving cjxl replacement: {'ready' if jxl.get('source_replacement_available') else 'blocked'} ({tools.get('version') or 'cjxl/djxl runtime not validated'})")
         print(f"FFmpeg: {'ready' if ffmpeg.get('ffmpeg_available') else 'unavailable'} ({ffmpeg.get('version') or 'not installed'})")
-        print(f"AV1 candidates: {', '.join(ffmpeg.get('av1_encoders') or []) or 'none'} (production execution blocked)")
+        av1 = av1_capability()
+        print(f"AV1 candidates: {', '.join(ffmpeg.get('av1_encoders') or []) or 'none'}")
+        print(f"AV1 safe-subset production: {'ready' if av1.get('production_ready') else 'blocked'} ({av1.get('message')})")
         return 0
 
     if args.command == "index":

@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image, ImageOps
 from PIL import ImageCms
+from PIL.TiffImagePlugin import IFDRational
 
 from archive_index.api.browser import physical_rows
 from archive_index.file_management import build_dry_run_plan, list_profiles, list_rulesets, save_ruleset
@@ -18,6 +19,7 @@ from archive_index.file_management_provenance import link_managed_derivatives
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.jpegxl import decode, encode
+from archive_index.media.jpegxl_tools import encode as encode_archival_jxl, metadata_contract, validate as validate_archival_jxl
 from archive_index.workspace import Workspace
 
 
@@ -94,7 +96,18 @@ class Phase10CCompressionTests(unittest.TestCase):
         first_reconcile = reconcile_workspace(self.workspace)
         self.assertEqual(first_reconcile.run_id, reconcile_workspace(self.workspace).run_id)
 
-    def test_replace_source_is_blocked_when_metadata_cannot_be_preserved(self):
+    def test_replace_source_uses_metadata_preserving_runtime(self):
+        exif = Image.Exif()
+        exif[271] = "Archive Test Camera"
+        exif[272] = "Phase 10C"
+        exif[306] = "2026:09:27 12:34:56"
+        exif[36867] = "2026:09:27 12:34:56"
+        exif[34853] = {1: "N", 2: (IFDRational(41, 1), IFDRational(0, 1), IFDRational(0, 1)), 3: "E", 4: (IFDRational(29, 1), IFDRational(0, 1), IFDRational(0, 1))}
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB", colorTemp=5000)).tobytes()
+        xmp = b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description test="phase10c"/></x:xmpmeta>'
+        with Image.open(self.root / "photo.jpg") as image:
+            image.save(self.root / "photo.jpg", exif=exif.tobytes(), icc_profile=icc, xmp=xmp, quality=95)
+        scan(self.workspace)
         profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
         ruleset = save_ruleset(
             self.workspace,
@@ -102,18 +115,52 @@ class Phase10CCompressionTests(unittest.TestCase):
             rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
         )
         plan = build_dry_run_plan(self.workspace, ruleset["id"])
-        self.assertTrue(any("metadata" in blocker.lower() for blocker in plan["operations"][0]["blockers"]))
-        self.assertEqual(plan["summary"]["compress"]["file_count"], 0)
-        self.assertTrue((self.root / "photo.jpg").is_file())
+        self.assertFalse(plan["operations"][0]["blockers"])
+        self.assertEqual(plan["summary"]["compress"]["file_count"], 1)
+        _, result = self._run({"source_disposition": "replace"})
+        self.assertEqual(result["status"], "completed")
+        self.assertFalse((self.root / "photo.jpg").exists())
+        self.assertTrue((self.root / "photo.jxl").is_file())
+        connection = self.workspace.connect()
+        try:
+            contract = connection.execute("SELECT metadata_contract_json FROM managed_derivative").fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIn('"exif": true', contract)
+        self.assertIn('"gps": true', contract)
+        self.assertIn('"icc": true', contract)
+        self.assertIn('"xmp": true', contract)
 
-    def test_archive_cleanup_retains_replace_source_semantics_and_blocks_it(self):
+    def test_archival_jxl_round_trips_metadata_contract(self):
+        source = self.root / "metadata.jpg"
+        exif = Image.Exif()
+        exif[271] = "Archive Test Camera"
+        exif[272] = "Phase 10C"
+        exif[306] = "2026:09:27 12:34:56"
+        exif[34853] = {1: "N", 2: (IFDRational(41, 1), IFDRational(0, 1), IFDRational(0, 1)), 3: "E", 4: (IFDRational(29, 1), IFDRational(0, 1), IFDRational(0, 1))}
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        xmp = b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:Description test="phase10c"/></x:xmpmeta>'
+        with Image.new("RGB", (800, 600), (90, 120, 160)) as image:
+            image.save(source, exif=exif.tobytes(), icc_profile=icc, xmp=xmp, quality=95)
+        profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
+        output = self.root / "metadata.jxl"
+        with tempfile.TemporaryDirectory() as directory:
+            result = encode_archival_jxl(source, output, profile, Path(directory))
+            validation = validate_archival_jxl(source, output, result)
+        self.assertEqual(validation["metadata_contract"]["exif"], True)
+        self.assertEqual(validation["metadata_contract"]["gps"], True)
+        self.assertEqual(validation["metadata_contract"]["icc"], True)
+        self.assertEqual(validation["metadata_contract"]["xmp"], True)
+        self.assertEqual(validation["metadata_contract"]["orientation"], 1)
+
+    def test_archive_cleanup_retains_replace_source_semantics_when_runtime_is_ready(self):
         cleanup = next(item for item in list_rulesets(self.workspace) if item["name"] == "Archive cleanup")
         action = next(item["action"] for item in cleanup["rules"] if item["match"].get("formats") == ["jpeg", "png"] and item["match"].get("selection_state") == "undecided")
         self.assertEqual(action["source_disposition"], "replace")
         plan = build_dry_run_plan(self.workspace, cleanup["id"])
         operation = next(item for item in plan["operations"] if item["source_relative_path"] == "photo.jpg")
-        self.assertTrue(any("metadata" in blocker.lower() for blocker in operation["blockers"]))
-        self.assertEqual(plan["summary"]["compress"]["file_count"], 0)
+        self.assertFalse(operation["blockers"])
+        self.assertEqual(plan["summary"]["compress"]["file_count"], 1)
 
     def test_stale_source_fails_without_writing_derivative(self):
         profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
@@ -136,11 +183,11 @@ class Phase10CCompressionTests(unittest.TestCase):
         self.assertFalse((self.root / "derivatives" / "photo.jxl").exists())
 
     def test_png_alpha_is_preserved_in_keep_source_output(self):
-        source = Image.new("RGBA", (96, 64), (10, 120, 220, 0))
+        source = Image.effect_noise((800, 600), 100).convert("RGBA")
         pixels = source.load()
         for y in range(source.height):
             for x in range(source.width):
-                pixels[x, y] = (10, 120, 220, (x * 255) // (source.width - 1) if y % 2 else (y * 255) // (source.height - 1))
+                pixels[x, y] = (*pixels[x, y][:3], (x * 255) // (source.width - 1) if y % 2 else (y * 255) // (source.height - 1))
         source.save(self.root / "alpha.png")
         source.close()
         scan(self.workspace)
@@ -151,13 +198,34 @@ class Phase10CCompressionTests(unittest.TestCase):
         output = self.root / "derivatives" / "alpha.jxl"
         decoded = decode(output.read_bytes())
         try:
-            self.assertEqual(decoded.size, (96, 64))
+            self.assertEqual(decoded.size, (800, 600))
             self.assertEqual(len(decoded.getbands()), 4)
             with Image.open(self.root / "alpha.png") as original:
                 self.assertTrue(np.array_equal(np.asarray(original)[:, :, 3], np.asarray(decoded)[:, :, 3]))
         finally:
             decoded.close()
         self.assertEqual(result_operation["source_sha256"], png_operation["source_sha256"])
+
+    def test_png_alpha_is_preserved_before_replace_source_deletion(self):
+        source = Image.effect_noise((800, 600), 100).convert("RGBA")
+        pixels = source.load()
+        for y in range(source.height):
+            for x in range(source.width):
+                pixels[x, y] = (*pixels[x, y][:3], (x * 255) // (source.width - 1) if y % 2 else (y * 255) // (source.height - 1))
+        expected_alpha = np.asarray(source)[:, :, 3].copy()
+        source.save(self.root / "replace-alpha.png")
+        source.close()
+        scan(self.workspace)
+        plan, result = self._run({"source_disposition": "replace"}, source_format="png")
+        result_operation = next(item for item in result["operations"] if item["source_relative_path"] == "replace-alpha.png")
+        self.assertEqual(result_operation["status"], "completed")
+        self.assertFalse((self.root / "replace-alpha.png").exists())
+        decoded = decode((self.root / "replace-alpha.jxl").read_bytes())
+        try:
+            self.assertEqual(decoded.getbands(), ("R", "G", "B", "A"))
+            self.assertTrue(np.array_equal(expected_alpha, np.asarray(decoded)[:, :, 3]))
+        finally:
+            decoded.close()
 
     def test_exif_orientation_is_normalized_without_double_rotation(self):
         oriented = Image.effect_noise((600, 800), 100).convert("RGB")

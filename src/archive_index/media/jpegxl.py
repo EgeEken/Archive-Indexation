@@ -16,7 +16,7 @@ JXL_ALGORITHM = "imagecodecs-jpegxl-archival"
 JXL_ALGORITHM_VERSION = "1"
 JXL_SUPPORTED_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
 JXL_SOURCE_REPLACEMENT_BLOCKER = (
-    "Source replacement is disabled because the current JPEG XL encoder cannot preserve required source metadata."
+    "JPEG XL source replacement is unavailable because the metadata-preserving libjxl runtime is not ready."
 )
 JXL_ICC_BLOCKER = (
     "JPEG XL compression is unavailable for this image because its embedded ICC color profile cannot currently be preserved safely."
@@ -51,6 +51,7 @@ def profile_settings(profile: dict[str, object] | None) -> dict[str, object]:
 
 @lru_cache(maxsize=1)
 def production_capability() -> dict[str, object]:
+    tools = jpegxl_tool_capabilities()
     try:
         import imagecodecs
     except ImportError as error:
@@ -61,7 +62,7 @@ def production_capability() -> dict[str, object]:
             "source_replacement_available": False,
             "metadata_preservation_available": False,
             "icc_preservation_available": False,
-            "jpegxl_tools": jpegxl_tool_capabilities(),
+            "jpegxl_tools": tools,
             "decoder_version": None,
             "encoder_version": None,
             "message": "JPEG XL encoder is unavailable because imagecodecs is not installed.",
@@ -77,7 +78,7 @@ def production_capability() -> dict[str, object]:
             "source_replacement_available": False,
             "metadata_preservation_available": False,
             "icc_preservation_available": False,
-            "jpegxl_tools": jpegxl_tool_capabilities(),
+            "jpegxl_tools": tools,
             "decoder_version": None,
             "encoder_version": None,
             "message": "JPEG XL encoder is unavailable in the current imagecodecs runtime.",
@@ -95,7 +96,7 @@ def production_capability() -> dict[str, object]:
             "icc_preservation_available": False,
             "decoder_version": str(imagecodecs.jpegxl_version()),
             "encoder_version": str(imagecodecs.jpegxl_version()),
-            "jpegxl_tools": jpegxl_tool_capabilities(),
+            "jpegxl_tools": tools,
             "message": "JPEG XL encoder probe failed in the current runtime.",
             "error": str(error),
         }
@@ -103,13 +104,13 @@ def production_capability() -> dict[str, object]:
         "decoder_available": True,
         "production_encoder_available": True,
         "keep_source_available": True,
-        "source_replacement_available": False,
-        "metadata_preservation_available": False,
-        "icc_preservation_available": False,
-        "jpegxl_tools": jpegxl_tool_capabilities(),
+        "source_replacement_available": bool(tools.get("metadata_ready")),
+        "metadata_preservation_available": bool(tools.get("metadata_ready")),
+        "icc_preservation_available": bool(tools.get("metadata_ready")),
+        "jpegxl_tools": tools,
         "decoder_version": str(imagecodecs.jpegxl_version()),
         "encoder_version": str(imagecodecs.jpegxl_version()),
-        "message": f"{JXL_SOURCE_REPLACEMENT_BLOCKER} {jpegxl_tool_capabilities()['message']}",
+        "message": "Metadata-preserving libjxl source replacement is ready." if tools.get("metadata_ready") else f"{JXL_SOURCE_REPLACEMENT_BLOCKER} {tools['message']}",
         "error": None,
     }
 
@@ -133,6 +134,19 @@ def source_blocker(source: Path) -> str | None:
                 return JXL_ICC_BLOCKER
     except Exception as error:
         return f"Source cannot be read by production JPEG XL: {error}"
+    return None
+
+
+def source_replacement_blocker(source: Path) -> str | None:
+    try:
+        with Image.open(source) as image:
+            if image.mode not in {"RGB", "RGBA"}:
+                return "Production JPEG XL supports 8-bit RGB and RGBA JPEG/PNG sources only."
+    except Exception as error:
+        return f"Source cannot be read by production JPEG XL: {error}"
+    capability = production_capability()
+    if not capability.get("source_replacement_available"):
+        return JXL_SOURCE_REPLACEMENT_BLOCKER
     return None
 
 

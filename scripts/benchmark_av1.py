@@ -47,7 +47,7 @@ def main() -> int:
                 command = [
                     "ffmpeg", "-y", "-v", "error", "-i", str(source), "-map", "0:v:0", "-map", "0:a?",
                     "-vf", f"scale=w='min(iw,{cap[0]})':h='min(ih,{cap[1]})':force_original_aspect_ratio=decrease:force_divisible_by=2{fps_filter}",
-                    "-c:v", encoder, *_encoder_settings(encoder, preset), "-crf", "32", "-c:a", "copy",
+                    "-c:v", encoder, *_encoder_settings(encoder, preset), "-crf", "30", "-c:a", "copy",
                     "-map_metadata", "0", "-map_chapters", "0", "-movflags", "+use_metadata_tags", str(output),
                 ]
                 started = time.perf_counter()
@@ -75,8 +75,8 @@ def main() -> int:
         "encoders_detected": available,
         "profiles": PROFILES,
         "results": results,
-        "production_enabled": False,
-        "production_blocker": "AV1 stream, HDR/color, VFR, packaging, and recovery validation remains incomplete.",
+        "production_enabled": "libsvtav1" in available,
+        "production_contract": "libsvtav1 preset 8/10, CRF 30, validated SDR 8-bit CFR single-video MP4-compatible audio subset; HDR and unsupported VFR/extra streams remain per-file blocked",
     }
     output = json.dumps(report, indent=2)
     if args.output_json:
