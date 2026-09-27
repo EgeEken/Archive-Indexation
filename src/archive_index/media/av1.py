@@ -339,7 +339,7 @@ def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | No
     if duration is None or fps is None or float(fps) <= 0:
         return None
     nominal = 1.0 / float(fps)
-    intervals = ["0%+#40", f"{max(0.0, duration / 2.0):.6f}%+#40", f"{max(0.0, duration - 2.0):.6f}%+#40"]
+    intervals = ["0%+#80", f"{max(0.0, duration / 2.0):.6f}%+#80", f"{max(0.0, duration - 2.0):.6f}%+#80"]
     observed = []
     for interval in intervals:
         result = subprocess.run(
@@ -358,14 +358,16 @@ def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | No
             frames = json.loads(result.stdout).get("frames") or []
         except json.JSONDecodeError:
             return None
+        timestamps = [_number(frame.get("best_effort_timestamp_time")) for frame in frames]
+        timestamps = [value for value in timestamps if value is not None]
+        deltas = [right - left for left, right in zip(timestamps, timestamps[1:]) if right > left]
+        if len(deltas) > 4:
+            observed.extend(deltas[1:-1])
+        else:
+            observed.extend(deltas)
         durations = [_number(frame.get("pkt_duration_time")) for frame in frames]
         durations = [value for value in durations if value is not None and value > 0]
-        if durations:
-            observed.extend(durations)
-        else:
-            timestamps = [_number(frame.get("best_effort_timestamp_time")) for frame in frames]
-            timestamps = [value for value in timestamps if value is not None]
-            observed.extend(right - left for left, right in zip(timestamps, timestamps[1:]) if right > left)
+        observed.extend(durations)
     if len(observed) < 3:
         return None
     tolerance = max(0.0015, nominal * 0.02)

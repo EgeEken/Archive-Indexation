@@ -90,6 +90,21 @@ class Phase10CAV1Tests(unittest.TestCase):
         with patch("archive_index.media.av1.subprocess.run", return_value=result):
             self.assertFalse(_timing_is_cfr(self.root / "clip.mp4", {}, 3.0, Fraction(30, 1)))
 
+    def test_real_irregular_timestamps_are_blocked(self):
+        source = self.root / "vfr.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                "-i", "testsrc2=size=320x180:rate=30", "-t", "2", "-vf",
+                "setpts=PTS+if(eq(N\\,20)\\,0.1/TB\\,0)", "-fps_mode", "vfr",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+            ],
+            check=True,
+        )
+        info = analyze_source(source)
+        self.assertFalse(info["timing_cfr"])
+        self.assertIn("frame timing", source_blocker(source, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}))
+
     def test_cancelled_encode_keeps_source_and_removes_owned_temp(self):
         profile = next(item for item in list_profiles(self.workspace) if item["name"] == "AV1 1080p60 Very Fast")
         ruleset = save_ruleset(
