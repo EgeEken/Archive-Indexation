@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from fractions import Fraction
+from unittest.mock import patch
 from pathlib import Path
 
 from archive_index.file_management import build_dry_run_plan, list_profiles, save_ruleset
@@ -74,3 +76,57 @@ class Phase10CAV1Tests(unittest.TestCase):
         self.assertEqual(capped_dimensions(portrait, profile_1080), (1080, 1920))
         command = build_command(self.root / "clip.mp4", self.root / "output.tmp", ultra, profile_1080)
         self.assertTrue(any("fps=60" in item for item in command))
+
+    def test_cancelled_encode_keeps_source_and_removes_owned_temp(self):
+        profile = next(item for item in list_profiles(self.workspace) if item["name"] == "AV1 1080p60 Very Fast")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="av1-cancel",
+            rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
+        )
+        plan = build_dry_run_plan(self.workspace, ruleset["id"])
+        execution = prepare_execution(self.workspace, ruleset["id"], plan["plan_digest"])
+
+        def cancel_encode(source, output, info, profile, cancel, progress):
+            cancel.set()
+            raise InterruptedError("cancelled by test")
+
+        with patch("archive_index.file_management_executor.encode_av1", side_effect=cancel_encode):
+            start_execution(self.workspace, execution["id"])
+            result = self._wait(execution["id"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertTrue((self.root / "clip.mp4").is_file())
+        self.assertFalse(list(self.root.rglob(".*.archive-index-*.tmp")))
+
+    def test_finalized_in_place_output_recovers_after_process_loss(self):
+        profile = next(item for item in list_profiles(self.workspace) if item["name"] == "AV1 1080p60 Very Fast")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="av1-recovery",
+            rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
+        )
+        plan = build_dry_run_plan(self.workspace, ruleset["id"])
+        execution = prepare_execution(self.workspace, ruleset["id"], plan["plan_digest"])
+        source = self.root / "clip.mp4"
+        info = analyze_source(source)
+        output = self.root / "recovered-output.mp4"
+        from archive_index.media.av1 import encode as encode_av1
+
+        encoded = encode_av1(source, output, info, plan["operations"][0]["profile_snapshot"], threading.Event())
+        source.write_bytes(output.read_bytes())
+        output.unlink()
+        connection = self.workspace.connect()
+        try:
+            operation_id = connection.execute("SELECT id FROM file_management_execution_operation WHERE execution_id = ?", (execution["id"],)).fetchone()[0]
+        finally:
+            connection.close()
+        with self.workspace.transaction() as connection:
+            connection.execute("UPDATE file_management_execution SET status = 'running' WHERE id = ?", (execution["id"],))
+            connection.execute(
+                "UPDATE file_management_execution_operation SET status = 'running', stage = 'finalizing', actual_output_size_bytes = ?, actual_output_sha256 = ? WHERE id = ?",
+                (encoded["size_bytes"], encoded["sha256"], operation_id),
+            )
+        recovered = get_execution(self.workspace, execution["id"])
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(recovered["operations"][0]["status"], "completed")
+        self.assertEqual(analyze_source(source)["codec"], "av1")

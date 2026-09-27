@@ -666,7 +666,10 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
     _remove_owned_temp(workspace, temp)
     try:
         progress = lambda fraction: _update_progress(workspace, operation["id"], int(int(operation["source_size_bytes"] or 0) * fraction))
-        result = encode_av1(source, temp, info, profile, cancel, progress)
+        try:
+            result = encode_av1(source, temp, info, profile, cancel, progress)
+        except InterruptedError as error:
+            raise OperationCancelled(str(error)) from error
         validation = validate_av1(source, temp, info, profile)
         if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
             _remove_owned_temp(workspace, temp)
