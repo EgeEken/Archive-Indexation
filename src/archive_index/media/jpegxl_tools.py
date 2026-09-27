@@ -14,7 +14,7 @@ from PIL import Image, ImageChops, ImageCms, ImageOps, ImageStat
 
 from .jpegxl import profile_settings
 
-TOOL_VERSION = "libjxl-cli-0.12.0-contract-1"
+TOOL_VERSION = "libjxl-cli-0.12.0-contract-2"
 
 
 def capabilities() -> dict[str, object]:
@@ -45,7 +45,112 @@ def metadata_contract(source: Path) -> dict[str, object]:
             "xmp_sha256": _sha256(xmp) if xmp else None,
             "icc_sha256": _sha256(icc) if icc else None,
             "metadata_policy": "standalone-jxl-container",
+            "inventory": metadata_inventory(source),
         }
+
+
+def metadata_replacement_blocker(source: Path) -> str | None:
+    inventory = metadata_inventory(source)
+    unsupported = inventory["unsupported"]
+    if unsupported:
+        return str(unsupported[0])
+    return None
+
+
+def metadata_inventory(source: Path) -> dict[str, object]:
+    if source.suffix.casefold() in {".jpg", ".jpeg"}:
+        return _jpeg_metadata_inventory(source.read_bytes())
+    if source.suffix.casefold() == ".png":
+        return _png_metadata_inventory(source.read_bytes())
+    return {"format": source.suffix.casefold(), "recognized": [], "unsupported": []}
+
+
+def _jpeg_metadata_inventory(data: bytes) -> dict[str, object]:
+    recognized = []
+    unsupported = []
+    if not data.startswith(b"\xff\xd8"):
+        return {"format": "jpeg", "recognized": [], "unsupported": ["Source is not a valid JPEG file."]}
+    index = 2
+    while index + 1 < len(data):
+        while index < len(data) and data[index] != 0xFF:
+            index += 1
+        while index < len(data) and data[index] == 0xFF:
+            index += 1
+        if index >= len(data):
+            break
+        marker = data[index]
+        index += 1
+        if marker in {0xD8, 0xD9}:
+            continue
+        if marker == 0xDA:
+            break
+        if index + 2 > len(data):
+            unsupported.append("JPEG contains a truncated marker segment.")
+            break
+        length = int.from_bytes(data[index:index + 2], "big")
+        if length < 2 or index + length > len(data):
+            unsupported.append("JPEG contains a truncated marker segment.")
+            break
+        payload = data[index + 2:index + length]
+        index += length
+        if 0xE0 <= marker <= 0xEF:
+            if marker == 0xE0 and payload.startswith((b"JFIF\x00", b"JFXX\x00")):
+                recognized.append("APP0/JFIF")
+            elif marker == 0xE1 and payload.startswith(b"Exif\x00\x00"):
+                recognized.append("EXIF")
+            elif marker == 0xE1 and payload.startswith(b"http://ns.adobe.com/xap/1.0/\x00"):
+                recognized.append("XMP")
+            elif marker == 0xE1 and payload.startswith(b"http://ns.adobe.com/xmp/extension/\x00"):
+                unsupported.append("Source contains Extended XMP that the current JXL replacement path cannot preserve.")
+            elif marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
+                recognized.append("ICC")
+            elif marker == 0xEE and payload.startswith(b"Adobe"):
+                recognized.append("APP14/Adobe")
+            elif marker == 0xED:
+                unsupported.append("Source contains IPTC/Photoshop metadata that the current JXL replacement path cannot preserve.")
+            else:
+                unsupported.append(f"Source contains an unsupported JPEG APP{marker - 0xE0:02X} marker.")
+        elif marker == 0xFE:
+            unsupported.append("Source contains a JPEG comment that the current JXL replacement path cannot preserve.")
+    return {"format": "jpeg", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported))}
+
+
+def _png_metadata_inventory(data: bytes) -> dict[str, object]:
+    signature = b"\x89PNG\r\n\x1a\n"
+    recognized = []
+    unsupported = []
+    if not data.startswith(signature):
+        return {"format": "png", "recognized": [], "unsupported": ["Source is not a valid PNG file."]}
+    index = len(signature)
+    while index + 12 <= len(data):
+        length = int.from_bytes(data[index:index + 4], "big")
+        kind = data[index + 4:index + 8]
+        end = index + 12 + length
+        if end > len(data):
+            unsupported.append("PNG contains a truncated ancillary chunk.")
+            break
+        if kind == b"eXIf":
+            recognized.append("EXIF")
+        elif kind == b"iCCP":
+            recognized.append("ICC")
+        elif kind == b"iTXt":
+            payload = data[index + 8:index + 8 + length]
+            if payload.startswith(b"XML:com.adobe.xmp\x00"):
+                recognized.append("XMP")
+            else:
+                unsupported.append("PNG contains text metadata that the current JXL replacement path cannot preserve.")
+        elif kind in {b"tEXt", b"zTXt"}:
+            unsupported.append("PNG contains text metadata that the current JXL replacement path cannot preserve.")
+        elif kind in {b"sRGB", b"gAMA", b"cHRM"}:
+            unsupported.append("PNG contains color metadata that the current JXL replacement path cannot preserve safely.")
+        elif kind == b"pHYs":
+            unsupported.append("PNG contains physical-pixel metadata that the current JXL replacement path cannot preserve.")
+        elif kind[0] & 0x20 and kind not in {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"}:
+            unsupported.append(f"PNG contains unsupported ancillary chunk {kind.decode('latin1', errors='replace')}.")
+        index = end
+        if kind == b"IEND":
+            break
+    return {"format": "png", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported))}
 
 
 def encode(source: Path, output: Path, profile: dict[str, object], temp_dir: Path) -> dict[str, object]:
@@ -150,8 +255,12 @@ def _validate_metadata(source: Path, output: Path, root: Path, tool: str) -> dic
     output_xmp = root / "decoded.xmp"
     exif_result = subprocess.run([str(tool), str(output), str(output_exif), "--output_format", "exif"], capture_output=True, text=True, timeout=3600)
     xmp_result = subprocess.run([str(tool), str(output), str(output_xmp), "--output_format", "xmp"], capture_output=True, text=True, timeout=3600)
-    if source_exif and (exif_result.returncode or output_exif.read_bytes() != source_exif):
-        raise ValueError("JPEG XL output did not preserve the source EXIF payload.")
+    if source_exif:
+        if exif_result.returncode:
+            raise ValueError("JPEG XL output did not preserve the source EXIF payload.")
+        output_exif_bytes = output_exif.read_bytes()
+        if source_tags.get(274) in {None, 1} and output_exif_bytes != source_exif:
+            raise ValueError("JPEG XL output did not preserve the source EXIF payload.")
     if source_xmp and (xmp_result.returncode or output_xmp.read_bytes() != source_xmp):
         raise ValueError("JPEG XL output did not preserve the source XMP payload.")
     return {
@@ -161,6 +270,7 @@ def _validate_metadata(source: Path, output: Path, root: Path, tool: str) -> dic
         "xmp": bool(source_xmp),
         "icc": bool(source_icc and output_icc),
         "orientation": output_orientation,
+        "orientation_normalized": source_tags.get(274) not in {None, 1},
         "source_retained": False,
         "tool_version": str(capabilities().get("version") or TOOL_VERSION),
     }

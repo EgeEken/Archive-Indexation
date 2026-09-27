@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, PngImagePlugin
 from PIL import ImageCms
 from PIL.TiffImagePlugin import IFDRational
 
@@ -19,7 +20,7 @@ from archive_index.file_management_provenance import link_managed_derivatives
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.jpegxl import decode, encode
-from archive_index.media.jpegxl_tools import encode as encode_archival_jxl, metadata_contract, validate as validate_archival_jxl
+from archive_index.media.jpegxl_tools import encode as encode_archival_jxl, metadata_contract, metadata_replacement_blocker, validate as validate_archival_jxl
 from archive_index.workspace import Workspace
 
 
@@ -244,6 +245,31 @@ class Phase10CCompressionTests(unittest.TestCase):
             decoded.close()
         self.assertEqual(next(item for item in result["operations"] if item["source_relative_path"] == "oriented.jpg")["status"], "completed")
 
+    def test_replace_source_normalizes_orientation_in_standalone_metadata(self):
+        oriented = Image.effect_noise((600, 800), 100).convert("RGB")
+        exif = oriented.getexif()
+        exif[274] = 6
+        oriented.save(self.root / "replace-oriented.jpg", exif=exif, quality=95)
+        oriented.close()
+        scan(self.workspace)
+        _, result = self._run({"source_disposition": "replace"})
+        operation = next(item for item in result["operations"] if item["source_relative_path"] == "replace-oriented.jpg")
+        self.assertEqual(operation["status"], "completed")
+        self.assertFalse((self.root / "replace-oriented.jpg").exists())
+        self.assertEqual(json.loads(operation["metadata_contract_json"])["output"]["metadata_contract"]["orientation"], 1)
+
+    def test_jpeg_comments_block_source_replacement(self):
+        source = self.root / "commented.jpg"
+        original = (self.root / "photo.jpg").read_bytes()
+        source.write_bytes(original[:2] + b"\xff\xfe\x00\x09comment\x00" + original[2:])
+        self.assertIn("JPEG comment", metadata_replacement_blocker(source))
+
+    def test_png_text_metadata_blocks_source_replacement(self):
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("Description", "must not disappear")
+        Image.new("RGB", (32, 24), (30, 40, 50)).save(self.root / "text.png", pnginfo=metadata)
+        self.assertIn("PNG contains text metadata", metadata_replacement_blocker(self.root / "text.png"))
+
     def test_embedded_icc_profile_is_a_planner_blocker(self):
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
         with Image.open(self.root / "photo.jpg") as source:
@@ -259,6 +285,20 @@ class Phase10CCompressionTests(unittest.TestCase):
         operation = next(item for item in plan["operations"] if item["source_relative_path"] == "icc.jpg")
         self.assertTrue(any("ICC color profile" in blocker for blocker in operation["blockers"]))
         self.assertFalse((self.root / "derivatives" / "icc.jxl").exists())
+
+    def test_non_srgb_icc_round_trips_when_official_profile_is_available(self):
+        profile_path = Path(r"C:\Windows\System32\spool\drivers\color\AdobeRGB1998.icc")
+        if not profile_path.is_file():
+            self.skipTest("Windows Adobe RGB profile is not installed")
+        source = self.root / "adobe-rgb.jpg"
+        with Image.effect_noise((320, 240), 100).convert("RGB") as image:
+            image.save(source, icc_profile=profile_path.read_bytes(), quality=95)
+        profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
+        output = self.root / "adobe-rgb.jxl"
+        with tempfile.TemporaryDirectory() as directory:
+            result = encode_archival_jxl(source, output, profile, Path(directory))
+            validation = validate_archival_jxl(source, output, result)
+        self.assertTrue(validation["metadata_contract"]["icc"])
 
     def test_external_replacement_at_same_path_detaches_managed_lineage(self):
         _, result = self._run({"source_disposition": "keep", "destination_dir": "derivatives"})

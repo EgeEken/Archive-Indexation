@@ -13,7 +13,7 @@ from PIL import Image, ImageChops, ImageOps, ImageStat
 from .capabilities import jpegxl_tool_capabilities
 
 JXL_ALGORITHM = "imagecodecs-jpegxl-archival"
-JXL_ALGORITHM_VERSION = "1"
+JXL_ALGORITHM_VERSION = "2"
 JXL_SUPPORTED_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
 JXL_SOURCE_REPLACEMENT_BLOCKER = (
     "JPEG XL source replacement is unavailable because the metadata-preserving libjxl runtime is not ready."
@@ -147,6 +147,11 @@ def source_replacement_blocker(source: Path) -> str | None:
     capability = production_capability()
     if not capability.get("source_replacement_available"):
         return JXL_SOURCE_REPLACEMENT_BLOCKER
+    from .jpegxl_tools import metadata_replacement_blocker
+
+    metadata_issue = metadata_replacement_blocker(source)
+    if metadata_issue:
+        return metadata_issue
     return None
 
 

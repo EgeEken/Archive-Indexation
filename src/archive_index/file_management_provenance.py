@@ -23,7 +23,7 @@ def record_managed_derivative(
     algorithm_version = settings.get("algorithm_version", "1")
     if codec == "jpeg-xl" and metadata_contract.get("metadata_policy") == "standalone-jxl-container":
         algorithm = "libjxl-cjxl-archival"
-        algorithm_version = "0.12.0"
+        algorithm_version = "0.12.0-contract-2"
     now = _timestamp()
     with workspace.transaction() as connection:
         connection.execute(
