@@ -20,7 +20,7 @@ from .file_management import build_dry_run_plan
 from .file_management_provenance import link_managed_derivatives, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
-from .media.av1 import analyze_source as analyze_av1, encode as encode_av1, metadata_summary as av1_metadata_summary, profile_settings as av1_profile_settings, validate as validate_av1
+from .media.av1 import analyze_source as analyze_av1, encode as encode_av1, metadata_summary as av1_metadata_summary, profile_settings as av1_profile_settings, validate as validate_av1, validate_final as validate_final_av1
 from .media.jpegxl import JXL_ICC_BLOCKER, JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
 from .media.jpegxl_tools import encode as encode_archival_jxl, validate as validate_archival_jxl
 from .workspace import INDEX_DIRECTORY, Workspace, WorkspaceError, _is_reparse_point
@@ -279,7 +279,7 @@ def retry_failed(workspace: Workspace, execution_id: str) -> dict[str, object]:
             raise ExecutionConflict("This execution is already running.")
         now = _timestamp()
         connection.execute(
-            "UPDATE file_management_execution_operation SET status = 'pending', stage = CASE WHEN stage IN ('finalizing', 'deleting') THEN 'resume' ELSE 'pending' END, error_message = NULL, bytes_completed = 0, updated_at = ? WHERE execution_id = ? AND status = 'failed'",
+            "UPDATE file_management_execution_operation SET status = 'pending', stage = CASE WHEN stage IN ('finalizing', 'deleting', 'preparing_source_swap', 'source_backed_up', 'output_placed', 'output_verified', 'provenance', 'backup_pending_deletion') THEN 'resume' ELSE 'pending' END, error_message = NULL, bytes_completed = 0, updated_at = ? WHERE execution_id = ? AND status = 'failed'",
             (now, execution_id),
         )
         connection.execute(
@@ -630,8 +630,14 @@ def _compress_jxl_replacement(workspace: Workspace, execution_id: str, operation
 
 def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
     profile = operation.get("profile_snapshot") or {}
-    source = _validate_source(workspace, operation)
     in_place = operation["target_relative_path"].casefold() == operation["source_relative_path"].casefold() and operation.get("source_disposition") == "replace"
+    if in_place and operation.get("recovery_eligible"):
+        target_candidate = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+        backup_candidate = _owned_backup_path(workspace, operation)
+        if backup_candidate.exists() or _matches_file_fingerprint(target_candidate, operation.get("actual_output_size_bytes"), operation.get("actual_output_sha256")):
+            if _recover_av1_in_place(workspace, execution_id, operation):
+                return
+    source = _validate_source(workspace, operation)
     if operation.get("target_relative_path", "").casefold().endswith(".jxl"):
         raise OperationFailure("AV1 output target must be an MP4 file.")
     info = analyze_av1(source)
@@ -688,15 +694,22 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         if in_place:
             if occupied is None or not _matches_expected(occupied, operation):
                 raise OperationFailure("Source changed since the plan was confirmed.")
-            os.replace(temp, occupied)
+            final_validation = _swap_av1_source(
+                workspace, execution_id, operation, cancel, temp, info, profile, validation["size_bytes"], validation["sha256"]
+            )
         elif operation.get("conflict_policy") == "overwrite" and occupied is not None:
             _atomic_replace_authorized(workspace, temp, target, operation)
+            final_validation = validate_final_av1(target, info, profile, validation["sha256"])
         elif occupied is None:
             _atomic_no_replace(temp, target, remove_source=False)
+            final_validation = validate_final_av1(target, info, profile, validation["sha256"])
         else:
             raise OperationFailure("Destination now exists.")
-        final_validation = validate_av1(target if in_place else source, target, info, profile)
         record_managed_derivative(workspace, operation, final_validation, {**metadata_contract, "output": final_validation}, profile.get("settings", {}).get("encoder_version"))
+        if in_place:
+            _set_stage(workspace, operation["id"], "provenance")
+            _set_stage(workspace, operation["id"], "backup_pending_deletion")
+            _remove_owned_backup(workspace, operation)
         removed = int(operation.get("target_expected_size_bytes") or 0) if operation.get("conflict_policy") == "overwrite" else 0
         if operation.get("source_disposition") == "replace" and not in_place:
             _validate_source(workspace, operation)
@@ -712,6 +725,57 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         if temp.exists():
             _remove_owned_temp(workspace, temp)
         raise
+
+
+def _swap_av1_source(workspace, execution_id, operation, cancel, temp, source_info, profile, output_size, output_sha256):
+    source = _validate_source(workspace, operation)
+    backup = _owned_backup_path(workspace, operation)
+    if backup.exists():
+        if not _matches_file_fingerprint(backup, operation["source_size_bytes"], operation["source_sha256"]):
+            raise OperationFailure("An owned AV1 source backup already exists with unexpected contents.")
+        raise OperationFailure("An incomplete AV1 source swap requires explicit recovery.")
+    if cancel.is_set() or _cancel_requested(workspace, execution_id):
+        raise OperationCancelled("Execution cancelled before source replacement.")
+    _set_stage(workspace, operation["id"], "preparing_source_swap")
+    _validate_source(workspace, operation)
+    try:
+        os.replace(source, backup)
+    except OSError as error:
+        raise OperationFailure("Could not create the owned AV1 source backup.") from error
+    _set_stage(workspace, operation["id"], "source_backed_up")
+    try:
+        if source.exists():
+            raise OperationFailure("AV1 source swap target was not empty.")
+        os.replace(temp, source)
+        _set_stage(workspace, operation["id"], "output_placed")
+        if not _matches_file_fingerprint(source, output_size, output_sha256):
+            raise OperationFailure("AV1 final output hash did not match the validated temporary output.")
+        final = validate_final_av1(source, source_info, profile, output_sha256)
+        _set_stage(workspace, operation["id"], "output_verified")
+        return final
+    except Exception:
+        _restore_av1_backup(workspace, operation, backup, output_sha256)
+        raise
+
+
+def _restore_av1_backup(workspace, operation, backup: Path, output_sha256: str | None) -> None:
+    if not backup.exists():
+        return
+    source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+    if source.exists():
+        if output_sha256 is None or hash_file(source) != output_sha256:
+            raise OperationFailure("AV1 source swap is ambiguous; the original source was not restored.")
+        source.unlink()
+    os.replace(backup, source)
+
+
+def _remove_owned_backup(workspace, operation) -> None:
+    backup = _owned_backup_path(workspace, operation)
+    if not backup.exists():
+        return
+    if not _matches_file_fingerprint(backup, operation["source_size_bytes"], operation["source_sha256"]):
+        raise OperationFailure("Owned AV1 source backup changed and was not removed.")
+    backup.unlink()
 
 
 def _matches_compressed_output(path: Path, operation) -> bool:
@@ -1095,6 +1159,11 @@ def _owned_temp_path(workspace, execution_id: str, operation) -> Path:
     return target.parent / name
 
 
+def _owned_backup_path(workspace, operation) -> Path:
+    source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+    return source.parent / f".{source.name}.archive-index-{operation['id']}.backup"
+
+
 def _remove_owned_temp(workspace, path: Path) -> None:
     if not path.name.endswith(".tmp") or ".archive-index-" not in path.name:
         return
@@ -1102,6 +1171,13 @@ def _remove_owned_temp(workspace, path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def _matches_file_fingerprint(path: Path, size: int | None, sha256: str | None) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size == int(size or 0) and hash_file(path) == sha256
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _pending_operations(workspace, execution_id):
@@ -1255,6 +1331,44 @@ def _refresh_catalog(workspace, execution_id) -> None:
             connection.execute("UPDATE file_management_execution SET catalog_refresh_status = 'complete', updated_at = ? WHERE id = ?", (_timestamp(), execution_id))
 
 
+def _recover_av1_in_place(workspace, execution_id, operation) -> bool:
+    target = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
+    backup = _owned_backup_path(workspace, operation)
+    expected_size = operation.get("actual_output_size_bytes")
+    expected_sha = operation.get("actual_output_sha256")
+    temp = None
+    if operation.get("temp_relative_path"):
+        temp = _validate_target(workspace, operation["temp_relative_path"], allow_missing=True)
+        if temp != _owned_temp_path(workspace, execution_id, operation):
+            raise OperationFailure("Interrupted AV1 temp path is not owned by this operation.")
+    if target.exists() and _matches_file_fingerprint(target, expected_size, expected_sha):
+        if backup.exists():
+            if not _matches_file_fingerprint(backup, operation["source_size_bytes"], operation["source_sha256"]):
+                raise OperationFailure("Owned AV1 source backup changed during recovery.")
+            backup.unlink()
+        if analyze_av1(target).get("codec") != "av1":
+            raise OperationFailure("Final AV1 output failed recovery validation.")
+        metadata_contract = _parse_json(operation.get("metadata_contract_json")) or {}
+        metadata_contract = {**metadata_contract, "recovered": True}
+        record_managed_derivative(workspace, operation, {"size_bytes": int(expected_size), "sha256": expected_sha}, metadata_contract, (operation.get("profile_snapshot") or {}).get("settings", {}).get("encoder_version"))
+        _complete_operation(workspace, execution_id, operation, int(expected_size), expected_sha, int(operation["source_size_bytes"] or 0), int(expected_size), 0, int(operation["source_size_bytes"] or 0))
+        return True
+    if backup.exists() and not target.exists():
+        if temp is not None and _matches_file_fingerprint(temp, expected_size, expected_sha):
+            os.replace(temp, target)
+            if not _matches_file_fingerprint(target, expected_size, expected_sha):
+                raise OperationFailure("AV1 recovery final output hash did not match the validated output.")
+            backup.unlink()
+            metadata_contract = _parse_json(operation.get("metadata_contract_json")) or {}
+            metadata_contract = {**metadata_contract, "recovered": True}
+            record_managed_derivative(workspace, operation, {"size_bytes": int(expected_size), "sha256": expected_sha}, metadata_contract, (operation.get("profile_snapshot") or {}).get("settings", {}).get("encoder_version"))
+            _complete_operation(workspace, execution_id, operation, int(expected_size), expected_sha, int(operation["source_size_bytes"] or 0), int(expected_size), 0, int(operation["source_size_bytes"] or 0))
+            return True
+        _restore_av1_backup(workspace, operation, backup, expected_sha)
+    _set_operation(workspace, operation["id"], status="interrupted", stage="interrupted", error="Execution interrupted; Resume to retry the AV1 source swap safely.")
+    return False
+
+
 def _recover_startup(workspace: Workspace) -> None:
     key = _workspace_key(workspace)
     with _workers_lock:
@@ -1307,7 +1421,9 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
                 operation = dict(operation)
                 operation["profile_snapshot"] = _parse_json(operation.get("profile_snapshot_json")) or {}
                 target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
-                if operation["stage"] in {"finalizing", "deleting"} and target.exists() and _matches_compressed_output(target, operation):
+                if operation["profile_snapshot"].get("codec") == "av1" and operation["target_relative_path"].casefold() == operation["source_relative_path"].casefold() and operation.get("source_disposition") == "replace":
+                    recovered_change = _recover_av1_in_place(workspace, execution_id, operation) or recovered_change
+                elif operation["stage"] in {"finalizing", "deleting"} and target.exists() and _matches_compressed_output(target, operation):
                     _recover_compressed_final(workspace, execution_id, operation, target)
                     recovered_change = True
                 else:

@@ -260,7 +260,7 @@ def _discover_files(workspace: Workspace) -> tuple[list[Path], list[tuple[str, O
 
 
 def _is_executor_temp_name(name: str) -> bool:
-    return name.startswith(".") and ".archive-index-" in name and name.endswith(".tmp")
+    return name.startswith(".") and ".archive-index-" in name and name.endswith((".tmp", ".backup"))
 
 
 def _is_reparse_point(entry: os.DirEntry[str]) -> bool:
