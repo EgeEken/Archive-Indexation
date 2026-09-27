@@ -99,16 +99,14 @@ def link_managed_derivatives(workspace: Workspace) -> int:
         for output_id, row in winners.items():
             output = next(item for item in physical if item["id"] == output_id)
             old_asset_id = output["logical_asset_id"]
+            role = {"jpeg-xl": "managed_jxl"}.get(row["codec"], f"managed_{row['codec']}")
             if row["source_logical_asset_id"] and old_asset_id != row["source_logical_asset_id"]:
                 connection.execute(
-                    "UPDATE physical_file SET logical_asset_id = ?, role = 'managed_jxl' WHERE id = ?",
-                    (row["source_logical_asset_id"], output_id),
+                    "UPDATE physical_file SET logical_asset_id = ?, role = ? WHERE id = ?",
+                    (row["source_logical_asset_id"], role, output_id),
                 )
-            elif output["role"] != "managed_jxl":
-                connection.execute(
-                    "UPDATE physical_file SET role = 'managed_jxl' WHERE id = ?",
-                    (output_id,),
-                )
+            elif output["role"] != role:
+                connection.execute("UPDATE physical_file SET role = ? WHERE id = ?", (role, output_id))
             linked += 1
             if old_asset_id != row["source_logical_asset_id"]:
                 orphan = connection.execute(
@@ -120,11 +118,11 @@ def link_managed_derivatives(workspace: Workspace) -> int:
         if winners:
             placeholders = ",".join("?" for _ in winners)
             connection.execute(
-                f"UPDATE physical_file SET role = 'source_original' WHERE role = 'managed_jxl' AND id NOT IN ({placeholders})",
+                f"UPDATE physical_file SET role = 'source_original' WHERE role LIKE 'managed_%' AND id NOT IN ({placeholders})",
                 tuple(winners),
             )
         else:
-            connection.execute("UPDATE physical_file SET role = 'source_original' WHERE role = 'managed_jxl'")
+            connection.execute("UPDATE physical_file SET role = 'source_original' WHERE role LIKE 'managed_%'")
     return linked
 
 
@@ -132,7 +130,16 @@ def managed_derivative_for_physical(workspace: Workspace, physical_file_id: str)
     connection = workspace.connect()
     try:
         return connection.execute(
-            "SELECT * FROM managed_derivative WHERE physical_file_id = ? ORDER BY created_at DESC LIMIT 1",
+            """
+            SELECT md.*
+            FROM managed_derivative AS md
+            JOIN physical_file AS pf ON pf.id = md.physical_file_id
+            WHERE md.physical_file_id = ?
+              AND md.output_relative_path = pf.relative_path
+              AND md.output_sha256 = pf.sha256
+            ORDER BY md.created_at DESC, md.id DESC
+            LIMIT 1
+            """,
             (physical_file_id,),
         ).fetchone()
     finally:

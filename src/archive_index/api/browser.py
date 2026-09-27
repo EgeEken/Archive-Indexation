@@ -244,7 +244,8 @@ def physical_rows(workspace: Workspace, asset_id: str):
                    display_preview.output_path AS display_preview_output_path,
                    display_preview.version AS display_preview_version,
                    display_preview.input_fingerprint AS display_preview_fingerprint,
-                   managed.id AS managed_derivative_id, managed.profile_name AS managed_derivative_profile_name,
+                   managed.id AS managed_derivative_id, managed.codec AS managed_derivative_codec,
+                   managed.profile_name AS managed_derivative_profile_name,
                    managed.source_relative_path AS managed_derivative_source_path,
                    managed.output_sha256 AS managed_derivative_output_sha256,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
@@ -257,6 +258,8 @@ def physical_rows(workspace: Workspace, asset_id: str):
                 SELECT current.id
                 FROM managed_derivative AS current
                 WHERE current.physical_file_id = pf.id
+                  AND pf.is_online = 1
+                  AND pf.in_scope = 1
                   AND current.output_relative_path = pf.relative_path
                   AND current.output_sha256 = pf.sha256
                 ORDER BY current.created_at DESC, current.id DESC
@@ -289,7 +292,8 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
                    display_preview.output_path AS display_preview_output_path,
                    display_preview.version AS display_preview_version,
                    display_preview.input_fingerprint AS display_preview_fingerprint,
-                   managed.id AS managed_derivative_id, managed.profile_name AS managed_derivative_profile_name,
+                   managed.id AS managed_derivative_id, managed.codec AS managed_derivative_codec,
+                   managed.profile_name AS managed_derivative_profile_name,
                    managed.source_relative_path AS managed_derivative_source_path,
                    managed.output_sha256 AS managed_derivative_output_sha256,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
@@ -302,6 +306,8 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
                 SELECT current.id
                 FROM managed_derivative AS current
                 WHERE current.physical_file_id = pf.id
+                  AND pf.is_online = 1
+                  AND pf.in_scope = 1
                   AND current.output_relative_path = pf.relative_path
                   AND current.output_sha256 = pf.sha256
                 ORDER BY current.created_at DESC, current.id DESC
@@ -354,7 +360,8 @@ def current_relationships(workspace: Workspace, physical_ids: list[str]) -> dict
 
 def representation_label(row, relationships: list[str]) -> str:
     if row["managed_derivative_id"]:
-        return f"JPEG XL derivative · {row['managed_derivative_profile_name'] or 'managed profile'}"
+        label = {"jpeg-xl": "JPEG XL", "av1": "AV1"}.get(row["managed_derivative_codec"], str(row["managed_derivative_codec"] or "Managed"))
+        return f"{label} derivative · {row['managed_derivative_profile_name'] or 'managed profile'}"
     if row["role"] == "camera_raw":
         return "RAW source"
     if row["role"] == "camera_jpeg":
@@ -369,6 +376,7 @@ def managed_derivative_payload(row) -> dict[str, object] | None:
         return None
     return {
         "id": row["managed_derivative_id"],
+        "codec": row["managed_derivative_codec"],
         "profile_name": row["managed_derivative_profile_name"],
         "source_relative_path": row["managed_derivative_source_path"],
         "output_sha256": row["managed_derivative_output_sha256"],

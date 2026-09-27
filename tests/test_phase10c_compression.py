@@ -293,6 +293,28 @@ class Phase10CCompressionTests(unittest.TestCase):
         self.assertEqual(len(current), 1)
         self.assertEqual(current[0]["managed_derivative_profile_name"], "JXL Balanced")
 
+    def test_identical_historical_outputs_have_one_current_lineage(self):
+        first_plan, first = self._run_profile("JXL Balanced", {"source_disposition": "keep", "destination_dir": "derivatives"})
+        second_plan, second = self._run_profile("JXL Balanced", {"source_disposition": "keep", "destination_dir": "derivatives", "conflict_policy": "overwrite"})
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(first["operations"][0]["actual_output_sha256"], second["operations"][0]["actual_output_sha256"])
+        connection = self.workspace.connect()
+        try:
+            rows = connection.execute("SELECT output_relative_path, output_sha256, physical_file_id FROM managed_derivative ORDER BY created_at, id").fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sum(row["physical_file_id"] is not None for row in rows), 1)
+        self.assertEqual({row["output_relative_path"] for row in rows}, {"derivatives/photo.jxl"})
+        self.assertEqual({row["output_sha256"] for row in rows}, {first["operations"][0]["actual_output_sha256"]})
+        physical = self.workspace.connect()
+        try:
+            asset_id = physical.execute("SELECT logical_asset_id FROM physical_file WHERE relative_path = 'derivatives/photo.jxl'").fetchone()[0]
+        finally:
+            physical.close()
+        self.assertEqual(len([row for row in physical_rows(self.workspace, asset_id) if row["relative_path"] == "derivatives/photo.jxl"]), 1)
+
     def test_unsupported_png_bit_depth_is_a_planner_blocker(self):
         Image.new("I;16", (32, 24), 1024).save(self.root / "wide.png")
         scan(self.workspace)

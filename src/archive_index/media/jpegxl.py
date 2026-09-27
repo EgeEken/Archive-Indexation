@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageChops, ImageOps, ImageStat
 
+from .capabilities import jpegxl_tool_capabilities
+
 JXL_ALGORITHM = "imagecodecs-jpegxl-archival"
 JXL_ALGORITHM_VERSION = "1"
 JXL_SUPPORTED_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png"})
@@ -55,8 +57,11 @@ def production_capability() -> dict[str, object]:
         return {
             "decoder_available": False,
             "production_encoder_available": False,
+            "keep_source_available": False,
             "source_replacement_available": False,
+            "metadata_preservation_available": False,
             "icc_preservation_available": False,
+            "jpegxl_tools": jpegxl_tool_capabilities(),
             "decoder_version": None,
             "encoder_version": None,
             "message": "JPEG XL encoder is unavailable because imagecodecs is not installed.",
@@ -68,8 +73,11 @@ def production_capability() -> dict[str, object]:
         return {
             "decoder_available": decoder is not None,
             "production_encoder_available": False,
+            "keep_source_available": False,
             "source_replacement_available": False,
+            "metadata_preservation_available": False,
             "icc_preservation_available": False,
+            "jpegxl_tools": jpegxl_tool_capabilities(),
             "decoder_version": None,
             "encoder_version": None,
             "message": "JPEG XL encoder is unavailable in the current imagecodecs runtime.",
@@ -81,21 +89,27 @@ def production_capability() -> dict[str, object]:
         return {
             "decoder_available": True,
             "production_encoder_available": False,
+            "keep_source_available": False,
             "source_replacement_available": False,
+            "metadata_preservation_available": False,
             "icc_preservation_available": False,
             "decoder_version": str(imagecodecs.jpegxl_version()),
             "encoder_version": str(imagecodecs.jpegxl_version()),
+            "jpegxl_tools": jpegxl_tool_capabilities(),
             "message": "JPEG XL encoder probe failed in the current runtime.",
             "error": str(error),
         }
     return {
         "decoder_available": True,
         "production_encoder_available": True,
+        "keep_source_available": True,
         "source_replacement_available": False,
+        "metadata_preservation_available": False,
         "icc_preservation_available": False,
+        "jpegxl_tools": jpegxl_tool_capabilities(),
         "decoder_version": str(imagecodecs.jpegxl_version()),
         "encoder_version": str(imagecodecs.jpegxl_version()),
-        "message": JXL_SOURCE_REPLACEMENT_BLOCKER,
+        "message": f"{JXL_SOURCE_REPLACEMENT_BLOCKER} {jpegxl_tool_capabilities()['message']}",
         "error": None,
     }
 
