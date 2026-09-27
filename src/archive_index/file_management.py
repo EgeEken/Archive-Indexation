@@ -27,6 +27,7 @@ from .media.jpegxl import (
 BUILTIN_HIGH_QUALITY_PROFILE_ID = "builtin-jxl-high-quality"
 BUILTIN_BALANCED_PROFILE_ID = "builtin-jxl-balanced"
 BUILTIN_HIGH_COMPRESSION_PROFILE_ID = "builtin-jxl-high-compression"
+BUILTIN_AVIF_EXTREME_COMPRESSION_PROFILE_ID = "builtin-avif-extreme-compression"
 BUILTIN_ARCHIVE_CLEANUP_ID = "builtin-archive-cleanup"
 BUILTIN_KEEP_SELECTED_ID = "builtin-keep-selected-only"
 BUILTIN_AV1_PROFILE_ID = "builtin-av1-4k120-very-fast"
@@ -42,6 +43,7 @@ BUILTIN_PROFILE_IDS = {
     BUILTIN_HIGH_QUALITY_PROFILE_ID,
     BUILTIN_BALANCED_PROFILE_ID,
     BUILTIN_HIGH_COMPRESSION_PROFILE_ID,
+    BUILTIN_AVIF_EXTREME_COMPRESSION_PROFILE_ID,
     *BUILTIN_AV1_PROFILE_IDS,
 }
 BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
@@ -52,16 +54,27 @@ _plan_runs = {}
 _plan_runs_lock = threading.Lock()
 
 
-def list_profiles(workspace: Workspace, *, seed: bool = True) -> list[dict[str, object]]:
+def list_profiles(workspace: Workspace, *, seed: bool = True, include_legacy: bool = False) -> list[dict[str, object]]:
     if seed:
         _ensure_builtins(workspace)
     connection = workspace.connect()
     try:
-        rows = connection.execute(
-            "SELECT * FROM compression_profile ORDER BY name, id"
-        ).fetchall()
+        rows = connection.execute("SELECT * FROM compression_profile").fetchall()
     finally:
         connection.close()
+    if not include_legacy:
+        rows = [row for row in rows if row["id"] != LEGACY_BUILTIN_AV1_PROFILE_ID]
+    order = {
+        BUILTIN_HIGH_QUALITY_PROFILE_ID: 0,
+        BUILTIN_BALANCED_PROFILE_ID: 1,
+        BUILTIN_HIGH_COMPRESSION_PROFILE_ID: 2,
+        BUILTIN_AVIF_EXTREME_COMPRESSION_PROFILE_ID: 3,
+        "builtin-av1-1080p60-fast": 4,
+        "builtin-av1-1080p60-very-fast": 5,
+        "builtin-av1-4k120-fast": 6,
+        BUILTIN_AV1_PROFILE_ID: 7,
+    }
+    rows = sorted(rows, key=lambda row: (0, order[row["id"]]) if row["id"] in order else (1, row["name"].casefold(), row["id"]))
     return [{**_profile(row), "is_builtin": row["id"] in BUILTIN_PROFILE_IDS} for row in rows]
 
 
@@ -269,7 +282,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
     ruleset = next((item for item in rulesets if item["id"] == ruleset_id), None)
     if ruleset is None:
         return _empty_plan("No file-management ruleset is active.")
-    profiles = {profile["id"]: profile for profile in list_profiles(workspace, seed=False)}
+    profiles = {profile["id"]: profile for profile in list_profiles(workspace, seed=False, include_legacy=True)}
     connection = workspace.connect()
     try:
         rows = connection.execute(
@@ -779,10 +792,10 @@ def _validate_action_combination(compiled) -> None:
 def _plan_summary(workspace, rows, operations, conflicts):
     def summarize(items):
         groups = {
-            "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
-            "copy": {"file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
-            "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
-            "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
+            "delete": {"file_count": 0, "candidate_file_count": 0, "executable_file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
+            "copy": {"file_count": 0, "candidate_file_count": 0, "executable_file_count": 0, "bytes_added": 0, "estimated_storage_delta_bytes": 0},
+            "move": {"file_count": 0, "candidate_file_count": 0, "executable_file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
+            "compress": {"file_count": 0, "candidate_file_count": 0, "executable_file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
         }
         for operation in items:
             group = groups[operation["operation"]]
@@ -806,27 +819,47 @@ def _plan_summary(workspace, rows, operations, conflicts):
     candidate_groups = summarize(operations)
     executable_operations = [operation for operation in operations if _is_plan_executable(operation)]
     groups = summarize(executable_operations)
+    for name, group in candidate_groups.items():
+        matching = [operation for operation in operations if operation["operation"] == name]
+        group["candidate_file_count"] = len(matching)
+        group["executable_file_count"] = sum(_is_plan_executable(operation) for operation in matching)
+        group["blocked_count"] = sum(bool(operation.get("blockers")) for operation in matching)
+        group["conflicted_count"] = sum(bool(operation.get("conflicts")) for operation in matching)
+        group["already_satisfied_count"] = sum(operation.get("destination_status") == "already_satisfied" for operation in matching)
+        group["skipped_count"] = sum(operation.get("destination_status") == "skipped" for operation in matching)
+        group["candidate_storage_delta_bytes"] = candidate_groups[name]["estimated_storage_delta_bytes"]
+        for field in ("bytes", "bytes_added", "bytes_moved", "source_bytes", "estimated_output_bytes", "estimated_bytes_saved"):
+            if field in candidate_groups[name]:
+                group[f"candidate_{field}"] = candidate_groups[name][field]
     for name, group in groups.items():
         group["candidate_file_count"] = candidate_groups[name]["file_count"]
         group["candidate_storage_delta_bytes"] = candidate_groups[name]["estimated_storage_delta_bytes"]
+        for field in ("bytes", "bytes_added", "bytes_moved", "source_bytes", "estimated_output_bytes", "estimated_bytes_saved"):
+            if field in candidate_groups[name]:
+                group[f"candidate_{field}"] = candidate_groups[name][field]
+        group["executable_file_count"] = group["file_count"]
+        for field in ("blocked_count", "conflicted_count", "already_satisfied_count", "skipped_count"):
+            group[field] = candidate_groups[name][field]
 
     connection = workspace.connect()
     try:
-        assets = connection.execute("SELECT id FROM logical_asset").fetchall()
         files = connection.execute("SELECT id, logical_asset_id FROM physical_file WHERE in_scope = 1 AND is_online = 1").fetchall()
     finally:
         connection.close()
-    operations_by_file = {}
-    for operation in executable_operations:
-        operations_by_file.setdefault(operation["physical_file_id"], []).append(operation)
-    surviving_assets = set()
+    asset_members = {}
     for row in files:
-        member_operations = operations_by_file.get(row["id"], ())
-        has_delete = any(operation["operation"] == "delete" for operation in member_operations)
-        has_replacement = any(operation["operation"] in {"copy", "move", "compress"} for operation in member_operations)
-        if not has_delete or has_replacement:
-            surviving_assets.add(row["logical_asset_id"])
-    surviving = len(surviving_assets)
+        asset_members.setdefault(row["logical_asset_id"], set()).add(row["id"])
+    for position, operation in enumerate(executable_operations):
+        asset_id = operation["logical_asset_id"]
+        members = asset_members.get(asset_id)
+        if members is None:
+            continue
+        if operation["operation"] == "delete":
+            members.discard(operation["physical_file_id"])
+        elif operation["operation"] == "compress" and operation.get("source_disposition") == "replace":
+            members.discard(operation["physical_file_id"])
+            members.add(f"planned-output:{position}")
+    assets_with_no_surviving_representation = sum(not members for members in asset_members.values())
     candidate_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in candidate_groups.values())
     storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
     return {
@@ -836,6 +869,8 @@ def _plan_summary(workspace, rows, operations, conflicts):
         "conflicted_count": sum(bool(operation["conflicts"]) for operation in operations),
         "safe_count": len(executable_operations),
         "blocked_count": sum(bool(operation.get("blockers")) for operation in operations),
+        "already_satisfied_count": sum(operation.get("destination_status") == "already_satisfied" for operation in operations),
+        "skipped_count": sum(operation.get("destination_status") == "skipped" for operation in operations),
         "delete": groups["delete"],
         "copy": groups["copy"],
         "move": groups["move"],
@@ -847,7 +882,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
         "estimated_net_bytes_added": max(0, storage_delta),
         "temporary_space_upper_bound_bytes": sum(int(operation.get("bytes") or 0) for operation in executable_operations if operation["operation"] in {"copy", "move", "compress"}),
         "available_space_bytes": _available_space(workspace),
-        "assets_with_no_surviving_representation": max(0, len(assets) - surviving),
+        "assets_with_no_surviving_representation": assets_with_no_surviving_representation,
     }
 
 
@@ -886,6 +921,8 @@ def _conflict_policy(action: dict[str, object] | None) -> str:
 
 def _normalize_action(action: dict[str, object]) -> dict[str, object]:
     normalized = dict(action)
+    if normalized.get("profile_id") == LEGACY_BUILTIN_AV1_PROFILE_ID:
+        normalized["profile_id"] = BUILTIN_AV1_PROFILE_ID
     normalized["conflict_policy"] = _conflict_policy(action)
     normalized.pop("rename_on_conflict", None)
     return normalized
@@ -1034,6 +1071,7 @@ def _ensure_builtins(workspace: Workspace) -> None:
         (BUILTIN_HIGH_QUALITY_PROFILE_ID, "JXL High Quality", "jpeg-xl", "jxl", {"quality": 80, "distance": quality_to_distance(80), "effort": 7}),
         (BUILTIN_BALANCED_PROFILE_ID, "JXL Balanced", "jpeg-xl", "jxl", {"quality": 60, "distance": quality_to_distance(60), "effort": 7}),
         (BUILTIN_HIGH_COMPRESSION_PROFILE_ID, "JXL High Compression", "jpeg-xl", "jxl", {"quality": 40, "distance": quality_to_distance(40), "effort": 7}),
+        (BUILTIN_AVIF_EXTREME_COMPRESSION_PROFILE_ID, "AVIF Extreme Compression", "avif", "avif", {"quality": 30, "effort": 7, "contract_version": "avif-preview-v1"}),
         ("builtin-av1-1080p60-fast", "AV1 1080p60 Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast", "contract_version": "av1-pending-v1"}),
         ("builtin-av1-1080p60-very-fast", "AV1 1080p60 Very Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "very_fast", "contract_version": "av1-pending-v1"}),
         ("builtin-av1-4k120-fast", "AV1 4K120 Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "fast", "contract_version": "av1-pending-v1"}),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import json
 import sys
 import types
 import threading
@@ -264,6 +265,43 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual(summary["temporary_space_upper_bound_bytes"], 0)
             self.assertEqual(summary["compress"]["file_count"], 0)
             self.assertEqual(summary["compress"]["candidate_file_count"], 1)
+            self.assertEqual(summary["compress"]["blocked_count"], 1)
+            self.assertEqual(summary["copy"]["candidate_file_count"], 1)
+            self.assertEqual(summary["copy"]["conflicted_count"], 1)
+
+    def test_plan_summary_keeps_already_satisfied_candidates_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "photo.jpg").write_bytes(b"photo")
+            (root / "copies").mkdir()
+            (root / "copies" / "photo.jpg").write_bytes(b"photo")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            ruleset = save_ruleset(workspace, name="Satisfied copy", rules=[{
+                "match": {"format": "jpeg", "folder_prefix": "photo.jpg"},
+                "action": {"operation": "copy", "destination_dir": "copies"},
+            }])
+            summary = build_dry_run_plan(workspace, ruleset["id"])["summary"]
+            self.assertEqual(summary["copy"]["candidate_file_count"], 1)
+            self.assertEqual(summary["copy"]["file_count"], 0)
+            self.assertEqual(summary["copy"]["already_satisfied_count"], 1)
+            self.assertEqual(summary["executable_count"], 0)
+
+    def test_no_surviving_metric_counts_only_online_assets_emptied_by_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "online.jpg").write_bytes(b"online")
+            (root / "offline.jpg").write_bytes(b"offline")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            with workspace.transaction() as connection:
+                connection.execute("UPDATE physical_file SET is_online = 0 WHERE relative_path = 'offline.jpg'")
+            ruleset = save_ruleset(workspace, name="Delete online", rules=[{
+                "match": {"format": "jpeg"},
+                "action": {"operation": "delete"},
+            }])
+            summary = build_dry_run_plan(workspace, ruleset["id"])["summary"]
+            self.assertEqual(summary["assets_with_no_surviving_representation"], 1)
 
     def test_compression_same_path_is_replace_or_rename_not_unconditional_conflict(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -333,8 +371,17 @@ class Phase10ASecondPassTests(unittest.TestCase):
     def test_builtins_expose_three_quality_profiles_and_refresh_code_rules(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace.create(Path(directory))
-            profiles = {item["name"] for item in list_profiles(workspace)}
+            profile_rows = list_profiles(workspace)
+            profiles = {item["name"] for item in profile_rows}
             self.assertTrue({"JXL High Quality", "JXL Balanced", "JXL High Compression"}.issubset(profiles))
+            self.assertIn("AVIF Extreme Compression", profiles)
+            self.assertNotIn("AV1 Archival (pending)", profiles)
+            self.assertEqual([item["name"] for item in profile_rows[:8]], [
+                "JXL High Quality", "JXL Balanced", "JXL High Compression", "AVIF Extreme Compression",
+                "AV1 1080p60 Fast", "AV1 1080p60 Very Fast", "AV1 4K120 Fast", "AV1 4K120 Very Fast",
+            ])
+            avif = next(item for item in profile_rows if item["name"] == "AVIF Extreme Compression")
+            self.assertEqual(avif["settings"]["quality"], 30)
             custom = save_ruleset(workspace, name="Custom", rules=[])
             connection = workspace.connect()
             try:
@@ -345,6 +392,40 @@ class Phase10ASecondPassTests(unittest.TestCase):
             cleanup = next(item for item in list_rulesets(workspace) if item["id"] == "builtin-archive-cleanup")
             self.assertEqual(len(cleanup["rules"]), 8)
             self.assertEqual(next(item for item in list_rulesets(workspace) if item["id"] == custom["id"])["rules"], [])
+
+    def test_builtin_avif_profile_is_preview_only_and_planner_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "photo.jpg").write_bytes(b"photo")
+            workspace = Workspace.create(root)
+            scan(workspace)
+            profile = next(item for item in list_profiles(workspace) if item["name"] == "AVIF Extreme Compression")
+            ruleset = save_ruleset(workspace, name="AVIF", rules=[{
+                "match": {"format": "jpeg"},
+                "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep"},
+            }])
+            operation = build_dry_run_plan(workspace, ruleset["id"])["operations"][0]
+            self.assertTrue(any("preview-only" in blocker for blocker in operation["blockers"]))
+
+    def test_legacy_av1_profile_reference_is_hidden_but_resolves_to_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace.create(Path(directory))
+            ruleset = save_ruleset(workspace, name="Legacy AV1", rules=[{
+                "match": {"format": "mp4"},
+                "action": {"operation": "compress", "profile_id": "builtin-av1-4k120-very-fast"},
+            }])
+            connection = workspace.connect()
+            try:
+                connection.execute(
+                    "UPDATE file_management_rule SET action_json = ? WHERE ruleset_id = ?",
+                    (json.dumps({"operation": "compress", "profile_id": "builtin-av1-archival"}), ruleset["id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            action = list_rulesets(workspace)[-1]["rules"][0]["action"]
+            self.assertEqual(action["profile_id"], "builtin-av1-4k120-very-fast")
+            self.assertNotIn("AV1 Archival (pending)", {item["name"] for item in list_profiles(workspace)})
     def test_builtin_presets_are_seeded_and_delete_is_planned(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

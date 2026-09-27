@@ -121,8 +121,8 @@ class BrowserE2ETests(unittest.TestCase):
         self.page.on("requestfailed", lambda request: self.browser_log.append(f"requestfailed {request.url}: {request.failure}"))
 
     def tearDown(self) -> None:
-        result = self._outcome.result
-        failed = any(test is self for test, _ in result.failures + result.errors)
+        result = getattr(self._outcome, "result", None)
+        failed = any(test is self for test, _ in getattr(result, "failures", []) + getattr(result, "errors", []))
         if failed:
             output = Path(__file__).parents[2] / "test-results" / "e2e"
             output.mkdir(parents=True, exist_ok=True)
@@ -315,6 +315,7 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertEqual(card.count(), 1)
         thumbnail = card.locator("img.recent-thumb")
         thumbnail.wait_for(state="visible")
+        self.page.wait_for_function("image => image.complete && image.naturalWidth > 0", arg=thumbnail.element_handle())
         self.assertGreater(thumbnail.evaluate("image => image.naturalWidth"), 0)
         card.get_by_role("button", name="Open").click()
         self.page.wait_for_url(re.compile(r"workspace=" + re.escape(self.main_handle)))
@@ -658,8 +659,11 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertGreater(self.page.locator(".file-rule-card").count(), 0)
         self.page.locator('[data-file-management-tab="profiles"]').click()
         self.page.locator('[data-file-management-section="profiles"]:not(.hidden)').wait_for()
-        self.assertEqual(self.page.locator("[data-profile-preview]").count(), 3)
+        self.assertEqual(self.page.locator("[data-profile-preview]").count(), 4)
         self.assertEqual(self.page.locator('.profile-card', has_text="AV1 Archival").locator("[data-profile-preview]").count(), 0)
+        self.assertEqual(self.page.locator('.profile-card', has_text="AV1 ").count(), 4)
+        self.assertIn("Quality 30 · Effort 7", self.page.locator('.profile-card', has_text="AVIF Extreme Compression").inner_text())
+        self.assertIn("preview-only", self.page.locator('.profile-card', has_text="AVIF Extreme Compression").inner_text())
         preview_requests: list[str] = []
         self.page.on("request", lambda request: preview_requests.append(request.url))
         self.page.locator('.profile-card', has_text="JXL Balanced").locator("[data-profile-preview]").click()
@@ -771,6 +775,9 @@ class BrowserE2ETests(unittest.TestCase):
         self.assertFalse((self.executor_root / "delete.webp").exists())
         self.assertFalse(list(self.executor_root.rglob("*.archive-index-*.tmp")))
 
+        self.page.goto(f"{self.base_url}/?workspace={self.main_handle}", wait_until="domcontentloaded")
+        self.page.locator("#workspace-view").wait_for(state="visible")
+        self.page.locator(".photo-card", has_text="alpha.jpg").first.wait_for()
         self.page.locator(".photo-card", has_text="alpha.jpg").first.locator(".info-button").click()
         self.page.locator("#details[open]").wait_for()
         self.assertGreaterEqual(self.page.locator("#details .representation-row").count(), 2)
@@ -1428,6 +1435,12 @@ class Phase10CCompressionE2ETests(unittest.TestCase):
         self.page.get_by_role("button", name="Analyze plan").click()
         self.page.locator("#file-management-plan-summary").wait_for()
         self.assertIn("metadata", self.page.locator("#file-management-plan-blockers").inner_text().lower())
+        self.assertIn("COMPRESS", self.page.locator("#file-management-plan-summary").inner_text())
+        self.assertIn("planned", self.page.locator("#file-management-plan-summary").inner_text())
+        status = self.page.locator("[data-plan-status]").first
+        status.wait_for(state="attached")
+        self.assertIn("Blocked", status.text_content() or "")
+        self.assertIn("Nothing currently needs execution", self.page.locator("[data-no-execution]").inner_text())
 
 
 def _float16_blob(values: tuple[float, ...]) -> bytes:

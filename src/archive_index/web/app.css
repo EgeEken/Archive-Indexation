@@ -223,6 +223,7 @@
 .conflict-option { position: relative; display: inline-flex; }
 .conflict-option input { position: absolute; opacity: 0; pointer-events: none; }
 .conflict-option span { display: inline-flex; align-items: center; min-height: 2rem; padding: .25rem .7rem; border: 1px solid #526b80; border-radius: .35rem; background: #202a33; color: #cbd6de; cursor: pointer; }
+.conflict-option span:hover { border-color: #9bb8d2; background: #2b3946; color: #edf0f3; }
 .conflict-option input:checked + span { border-color: #8dcaf1; background: #32678e; color: #fff; }
 .conflict-option input:focus-visible + span { outline: 2px solid #d6efff; outline-offset: 2px; }
 .net-increase { color: #b33b3b; }
@@ -266,7 +267,7 @@
 .plan-progress progress { grid-column:1 / -1; width:100%; height:.7rem; accent-color:#72b4e7; }
 .plan-progress small { color:#9faab5; }
 .plan-progress button { justify-self:end; }
-.plan-summary-callouts span { padding: .6rem .7rem; border-left: 3px solid #526b80; background: #1a2026; }
+.plan-summary-callouts > span { padding: .6rem .7rem; border-left: 3px solid #526b80; background: #1a2026; }
 .plan-conflicts { margin: .8rem 0; padding: .7rem; border: 1px solid #a66f73; border-radius: .55rem; background: #2b2023; }
 .plan-conflicts h3 { margin: 0 0 .55rem; color: #f2b5b5; }
 .plan-conflict { display: flex; justify-content: space-between; gap: .6rem; margin-top: .4rem; }

@@ -164,6 +164,14 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertIn("_next_target", self.file_management_backend)
         self.assertIn("capability_blockers", self.file_management_backend)
 
+    def test_plan_candidates_and_profile_capability_copy_are_explicit(self):
+        css = (self.root / "app.css").read_text(encoding="utf-8")
+        for marker in ("candidate_file_count", "already_satisfied_count", "blocked_count", "data-no-execution", "planOperationStatus", "AVIF Extreme Compression", "source replacement blocked", "preview-only"):
+            self.assertIn(marker, self.management + self.file_management_backend)
+        self.assertIn(".plan-summary-callouts > span", css)
+        self.assertIn(".conflict-option span:hover", css)
+        self.assertIn('class="checkbox-line"', self.management)
+
 
 if __name__ == "__main__":
     unittest.main()

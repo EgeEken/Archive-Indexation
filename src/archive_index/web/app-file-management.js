@@ -106,7 +106,7 @@ function markRulesDirty() {
 function renderFileManagementRules() {
   const profiles = fileManagement.profiles.filter(profile => profile.codec === "jpeg-xl" || profile.codec === "av1" || profile.codec === "avif");
   $("file-management-rules").innerHTML = fileManagement.draft.map((rule, index) => {
-    const profileOptions = profiles.map(profile => `<option value="${escapeHtml(profile.id)}"${profile.id === rule.profileId ? " selected" : ""}>${escapeHtml(profile.name)}${profile.codec === "av1" ? " · pending" : ""}</option>`).join("");
+    const profileOptions = profiles.map(profile => `<option value="${escapeHtml(profile.id)}"${profile.id === rule.profileId ? " selected" : ""}>${escapeHtml(profile.name)}</option>`).join("");
     const conflictPolicy = `<fieldset class="conflict-policy"><legend>Destination conflict</legend><div class="conflict-policy-options" role="radiogroup" aria-label="Destination conflict">${[["rename", "Rename"], ["skip", "Skip"], ["overwrite", "Overwrite"]].map(([value, label]) => `<label class="conflict-option"><input type="radio" name="conflict-${index}" data-rule-field="conflictPolicy" value="${value}"${rule.conflictPolicy === value ? " checked" : ""}><span>${label}</span></label>`).join("")}</div></fieldset>`;
     const actionFields = rule.operation === "compress"
       ? `<div class="rule-options rule-options-compress"><label class="rule-field">Profile <select data-rule-field="profileId">${profileOptions}</select></label><label class="rule-option-toggle rule-checkbox"><input type="checkbox" data-rule-field="disposition"${rule.disposition ? " checked" : ""}> <span>Keep source</span></label><label class="rule-option-toggle rule-checkbox"><input type="checkbox" data-rule-field="inPlace"${rule.inPlace ? " checked" : ""}> <span>Compress in place</span></label>${conflictPolicy}<label class="rule-field">Destination <input data-rule-field="destination" value="${escapeHtml(rule.destination)}" placeholder="compressed/"${rule.inPlace ? " disabled" : ""}></label></div>`
@@ -155,8 +155,8 @@ function renderFileManagementProfiles() {
   $("file-management-profiles").innerHTML = fileManagement.profiles.map(profile => {
     const settings = profile.settings || {};
     const av1Available = profile.capability?.available;
-    const detail = profile.codec === "jpeg-xl" ? `Quality ${settings.quality ?? "—"}${settings.effort ? ` · Effort ${settings.effort}` : ""}` : profile.codec.toUpperCase();
-    const status = profile.codec === "av1" ? ` · ${av1Available ? "candidate available" : "encoder unavailable"} · blocked` : profile.codec === "jpeg-xl" ? " · keep-source execution" : " · preview-only";
+    const detail = ["jpeg-xl", "avif"].includes(profile.codec) ? `Quality ${settings.quality ?? "—"}${settings.effort != null ? ` · Effort ${settings.effort}` : ""}` : profile.codec.toUpperCase();
+    const status = profile.codec === "av1" ? ` · ${av1Available ? "encoder candidate detected" : "encoder unavailable"} · production blocked` : profile.codec === "jpeg-xl" ? " · keep-source execution · source replacement blocked" : " · preview-only · production blocked";
     const preview = ["jpeg-xl", "avif"].includes(profile.codec) ? `<button class="profile-preview-button${profile.is_builtin ? "" : " custom"}" type="button" data-profile-preview="${escapeHtml(profile.id)}" aria-label="Preview ${escapeHtml(profile.name)} compression" title="Preview ${escapeHtml(profile.name)} compression">?</button>` : "";
     const edit = profile.is_builtin ? `<span class="muted">Built-in</span>` : `<button class="secondary" type="button" data-profile-edit="${escapeHtml(profile.id)}">Edit</button>`;
     return `<article class="profile-card"><div><h3>${escapeHtml(profile.name)}</h3><p class="muted">${escapeHtml(detail)}${status}</p></div><div class="profile-card-actions">${preview}${edit}</div></article>`;
@@ -215,7 +215,14 @@ async function loadFileManagementPlan() {
   } catch (error) { if (token === fileManagement.planToken) fileManagementStatus(`Plan analysis failed: ${error.message}`, true); }
 }
 
-function planOperationRow(item) { return `<div class="plan-operation-row" data-plan-operation-row><span><strong>${escapeHtml(item.filename || "File")}</strong><small>${escapeHtml(item.source_relative_path || "")}</small></span><span>${escapeHtml(item.target_relative_path || item.profile_name || "Delete")}${item.renamed_to_avoid_conflict ? " · Renamed to avoid conflict" : item.replaces_source_in_place ? " · Replaces source in place" : ""}</span><span>${formatBytes(item.bytes)}${["already_satisfied", "skipped"].includes(item.destination_status) ? ` · ${item.destination_status === "skipped" ? "Skipped" : "Already satisfied"}` : ""}${item.conflicts?.length ? ` · <em>${escapeHtml(item.conflicts.join("; "))}</em>` : ""}${item.blockers?.length ? ` · <em>Blocked: ${escapeHtml(item.blockers.join("; "))}</em>` : ""}</span></div>`; }
+function planOperationStatus(item) {
+  if (item.blockers?.length) return `Blocked · ${item.blockers[0]}`;
+  if (item.conflicts?.length) return `Conflict · ${item.conflicts[0]}`;
+  if (item.destination_status === "already_satisfied") return "Already satisfied";
+  if (item.destination_status === "skipped") return "Skipped";
+  return "Executable";
+}
+function planOperationRow(item) { return `<div class="plan-operation-row" data-plan-operation-row><span><strong>${escapeHtml(item.filename || "File")}</strong><small>${escapeHtml(item.source_relative_path || "")}</small></span><span>${escapeHtml(item.target_relative_path || item.profile_name || "Delete")}${item.renamed_to_avoid_conflict ? " · Renamed to avoid conflict" : item.replaces_source_in_place ? " · Replaces source in place" : ""}</span><span><strong data-plan-status>${escapeHtml(planOperationStatus(item))}</strong><small>${formatBytes(item.bytes)}</small></span></div>`; }
 function renderPlanOperationGroup(operation, rows) {
   const label = operation[0].toUpperCase() + operation.slice(1);
   const initial = rows.slice(0, 1).map(planOperationRow).join("");
@@ -235,15 +242,30 @@ function bindPlanOperationDetails(data) {
     if (!left) button.disabled = true;
   }));
 }
+function planGroupStatus(group) {
+  const parts = [];
+  const statuses = [["executable_file_count", "executable"], ["blocked_count", "blocked"], ["conflicted_count", "conflicts"], ["already_satisfied_count", "already satisfied"], ["skipped_count", "skipped"]];
+  statuses.forEach(([field, label]) => { const count = Number(group?.[field] || 0); if (count) parts.push(`${count.toLocaleString()} ${label}`); });
+  return parts.join(" · ");
+}
+function noExecutionExplanation(summary) {
+  const reasons = [];
+  [["copy", summary?.copy], ["compress", summary?.compress], ["move", summary?.move], ["delete", summary?.delete]].forEach(([name, group]) => {
+    const count = Number(group?.candidate_file_count || 0);
+    const status = planGroupStatus(group);
+    if (count && status) reasons.push(`${count.toLocaleString()} ${name} operation${count === 1 ? " is" : "s are"} not executable: ${status}.`);
+  });
+  return reasons.length ? `Nothing currently needs execution. ${reasons.join(" ")}` : "Nothing currently needs execution from this plan.";
+}
 function renderFileManagementPlan(data) {
   fileManagement.plan = data;
   const summary = data.summary || {};
-  const cards = [["DELETE", summary.delete, "bytes"], ["COMPRESS", summary.compress, "source_bytes"], ["COPY", summary.copy, "bytes_added"], ["MOVE", summary.move, "bytes_moved"]].filter(([, value]) => Number(value?.file_count || 0) > 0);
+  const cards = [["DELETE", summary.delete, "bytes"], ["COMPRESS", summary.compress, "source_bytes"], ["COPY", summary.copy, "bytes_added"], ["MOVE", summary.move, "bytes_moved"]].filter(([, value]) => Number(value?.candidate_file_count ?? value?.file_count ?? 0) > 0);
   const delta = Number(summary.estimated_storage_delta_bytes || 0);
   const deltaLabel = delta < 0 ? `Estimated total change <strong class="net-reduction">−${formatBytes(-delta)}</strong>` : delta > 0 ? `Estimated total change <strong class="net-increase">+${formatBytes(delta)}</strong>` : `Estimated total change <strong class="net-neutral">0 B</strong>`;
   const currentFree = summary.available_space_bytes;
   const afterPlan = currentFree == null ? null : Number(currentFree) - delta;
-  $("file-management-plan-summary").innerHTML = `<div class="plan-summary-grid">${cards.map(([label, value, bytes]) => { const storageDelta = Number(value?.estimated_storage_delta_bytes || 0); const amount = label === "COMPRESS" ? `${formatBytes(value?.source_bytes || 0)} → ${formatBytes(value?.estimated_output_bytes || 0)}` : formatBytes(value?.[bytes] || 0); const deltaLine = storageDelta ? `<em class="${storageDelta < 0 ? "storage-free" : "storage-add"}">Total change ${storageDelta < 0 ? "−" : "+"}${formatBytes(Math.abs(storageDelta))}</em>` : ""; return `<article class="plan-card"><strong>${label}</strong><span>${Number(value?.file_count || 0).toLocaleString()} ${Number(value?.file_count || 0) === 1 ? "file" : "files"}</span><small>${amount}</small>${deltaLine}</article>`; }).join("")}</div><div class="plan-summary-callouts"><span>${deltaLabel}</span><span>Temporary space upper bound <strong>${formatBytes(summary.temporary_space_upper_bound_bytes || 0)}</strong></span>${afterPlan == null ? `<span aria-label="Current free disk space">Free disk space <strong>${formatDiskSpace(currentFree)}</strong></span>` : `<span aria-label="Current free disk space → Estimated free disk space after plan">Free disk space <strong>${formatDiskSpace(currentFree)}</strong> <span class="free-space-arrow" aria-hidden="true">→</span> <strong>${formatDiskSpace(afterPlan)}</strong></span>`}<span>Logical assets with no remaining archive representation <strong>${Number(summary.assets_with_no_surviving_representation || 0).toLocaleString()}</strong></span></div>`;
+  $("file-management-plan-summary").innerHTML = `<div class="plan-summary-grid">${cards.map(([label, value, bytes]) => { const storageDelta = Number(value?.estimated_storage_delta_bytes || 0); const count = Number(value?.candidate_file_count ?? value?.file_count ?? 0); const amount = label === "COMPRESS" ? `${formatBytes(value?.candidate_source_bytes || value?.source_bytes || 0)} → ${formatBytes(value?.candidate_estimated_output_bytes || value?.estimated_output_bytes || 0)}` : formatBytes(value?.[`candidate_${bytes}`] ?? value?.[bytes] ?? 0); const deltaLine = storageDelta ? `<em class="${storageDelta < 0 ? "storage-free" : "storage-add"}">Executable change ${storageDelta < 0 ? "−" : "+"}${formatBytes(Math.abs(storageDelta))}</em>` : ""; return `<article class="plan-card"><strong>${label}</strong><span>${count.toLocaleString()} planned ${count === 1 ? "file" : "files"}</span><small>${amount}</small><small class="plan-card-status">${escapeHtml(planGroupStatus(value))}</small>${deltaLine}</article>`; }).join("")}</div><div class="plan-summary-callouts"><span>${deltaLabel}</span><span>Temporary space upper bound <strong>${formatBytes(summary.temporary_space_upper_bound_bytes || 0)}</strong></span>${afterPlan == null ? `<span aria-label="Current free disk space">Free disk space <strong>${formatDiskSpace(currentFree)}</strong></span>` : `<span aria-label="Current free disk space → Estimated free disk space after plan">Free disk space <strong>${formatDiskSpace(currentFree)}</strong> <span class="free-space-arrow" aria-hidden="true">→</span> <strong>${formatDiskSpace(afterPlan)}</strong></span>`}<span>Logical assets with no remaining archive representation <strong>${Number(summary.assets_with_no_surviving_representation || 0).toLocaleString()}</strong></span></div>`;
   const blockers = data.blockers || summary.capability_blockers || [];
   $("file-management-plan-blockers").innerHTML = blockers.length ? `<section class="plan-blockers"><h3>Plan blockers</h3>${blockers.map(blocker => `<article class="plan-blocker"><strong>${escapeHtml(blocker.profile_name || "Capability")}</strong><span>${escapeHtml(blocker.reason)}</span><small>${Number(blocker.affected_count || 0).toLocaleString()} planned ${Number(blocker.affected_count || 0) === 1 ? "operation" : "operations"} affected.</small></article>`).join("")}</section>` : "";
   $("file-management-plan-conflicts").innerHTML = data.conflicts?.length ? `<section class="plan-conflicts"><h3>${data.conflicts.length} conflicts must be resolved</h3>${data.conflicts.map(conflict => `<article class="plan-conflict"><strong>${escapeHtml(conflict.filename || "File")}</strong><span>${escapeHtml(conflict.source_relative_path || "")}${conflict.target_relative_path ? ` → ${escapeHtml(conflict.target_relative_path)}` : ""}</span><p>${escapeHtml(conflict.reason)}</p><small>Rule ${escapeHtml(conflict.rule_id || "")}</small></article>`).join("")}</section>` : `<p class="plan-ok">No conflicts detected.</p>`;
@@ -252,7 +274,7 @@ function renderFileManagementPlan(data) {
   bindPlanOperationDetails(data);
   $("file-management-plan-note").textContent = data.executor?.message || "";
   const executable = (data.operations || []).some(item => ["copy", "compress", "move", "delete"].includes(item.operation) && !item.conflicts?.length && !item.blockers?.length && !["already_satisfied", "skipped"].includes(item.destination_status));
-  $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Execution will revalidate this plan before creating a frozen snapshot.</small></div>` : `<p class="muted">No safe Copy, Compress, Move, or Delete operations are available to execute.</p>`;
+  $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Execution will revalidate this plan before creating a frozen snapshot.</small></div>` : `<p class="muted" data-no-execution>${escapeHtml(noExecutionExplanation(summary))}</p>`;
   $("file-management-execution-panel").classList.remove("hidden");
   $("file-management-execution-panel").querySelector("[data-review-execution]")?.addEventListener("click", () => { void prepareFileManagementExecution(); });
 }
