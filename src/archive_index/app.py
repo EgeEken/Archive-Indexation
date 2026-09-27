@@ -87,6 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"JPEG XL production encode: {'ready' if jxl.get('production_encoder_available') else 'unavailable'}")
         print(f"JPEG XL ICC preservation: {'ready' if jxl.get('icc_preservation_available') else 'blocked'}")
         print(f"JPEG XL source replacement: {'ready' if jxl.get('source_replacement_available') else 'blocked'}")
+        tools = jxl.get("jpegxl_tools") or {}
+        print(f"JPEG XL metadata-preserving cjxl replacement: {'ready' if jxl.get('source_replacement_available') else 'blocked'} ({tools.get('version') or 'cjxl/djxl runtime not validated'})")
         print(f"FFmpeg: {'ready' if ffmpeg.get('ffmpeg_available') else 'unavailable'} ({ffmpeg.get('version') or 'not installed'})")
         print(f"AV1 candidates: {', '.join(ffmpeg.get('av1_encoders') or []) or 'none'} (production execution blocked)")
         return 0

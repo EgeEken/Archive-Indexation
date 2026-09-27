@@ -47,8 +47,8 @@ BUILTIN_PROFILE_IDS = {
     *BUILTIN_AV1_PROFILE_IDS,
 }
 BUILTIN_RULESET_IDS = {BUILTIN_ARCHIVE_CLEANUP_ID, BUILTIN_KEEP_SELECTED_ID}
-AV1_EXECUTION_BLOCKER = "AV1 execution remains blocked until benchmark, stream, color, and recovery validation is complete."
 AVIF_EXECUTION_BLOCKER = "AVIF archival execution is not enabled; AVIF remains preview-only."
+AV1_EXECUTION_BLOCKER = "AV1 execution remains blocked until benchmark, stream, color, and recovery validation is complete."
 CONFLICT_POLICIES = {"rename", "skip", "overwrite"}
 _plan_runs = {}
 _plan_runs_lock = threading.Lock()
@@ -1014,6 +1014,8 @@ def _profile(row):
     profile = {**dict(row), "settings": _json(row["settings_json"])}
     if profile["codec"] == "av1":
         profile["capability"] = av1_capability()
+    elif profile["codec"] == "jpeg-xl":
+        profile["capability"] = production_capability()
     return profile
 
 

@@ -423,7 +423,11 @@ def _execute_operation(workspace: Workspace, execution_id: str, operation, cance
     if kind == "copy":
         _copy(workspace, execution_id, operation, cancel)
     elif kind == "compress":
-        _compress_jxl(workspace, execution_id, operation, cancel)
+        codec = (operation.get("profile_snapshot") or {}).get("codec")
+        if codec == "jpeg-xl":
+            _compress_jxl(workspace, execution_id, operation, cancel)
+        else:
+            raise OperationFailure("Only validated JPEG XL compression is enabled for production execution.")
     elif kind == "move":
         _move(workspace, execution_id, operation, cancel)
     elif kind == "delete":
@@ -438,6 +442,8 @@ def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: th
         raise OperationFailure("Only JPEG XL compression is enabled for production execution.")
     if not production_capability().get("production_encoder_available"):
         raise OperationFailure("JPEG XL encoder is unavailable.")
+    if operation.get("source_disposition") == "replace":
+        raise OperationFailure("Source replacement is disabled because the current JPEG XL encoder cannot preserve required source metadata.")
     if Path(operation["source_relative_path"]).suffix.casefold() not in JXL_SUPPORTED_EXTENSIONS:
         raise OperationFailure("This source format is not supported by production JPEG XL compression.")
     source = _validate_source(workspace, operation)
@@ -1140,11 +1146,11 @@ def _execution_payload(execution, operations) -> dict[str, object]:
     counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("completed", "failed", "skipped", "pending", "interrupted", "cancelled", "excluded")}
     total = sum(1 for row in rows if row["status"] not in {"excluded", "skipped"})
     completed = counts["completed"]
-    bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["status"] not in {"excluded", "skipped"} and row["operation"] in {"copy", "compress", "move"})
-    bytes_done = sum(int(row["bytes_completed"] or 0) for row in rows)
+    work_operations = {"copy", "compress"}
+    bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["status"] not in {"excluded", "skipped"} and row["operation"] in work_operations)
+    bytes_done = sum(int(row["bytes_completed"] or 0) for row in rows if row["operation"] in work_operations)
     elapsed = _elapsed(execution)
-    written = int(execution["actual_bytes_written"] or 0)
-    throughput = written / elapsed if elapsed and written else None
+    throughput = bytes_done / elapsed if elapsed and bytes_done else None
     remaining = max(0, bytes_total - bytes_done)
     eta = remaining / throughput if throughput else None
     current = next((row for row in rows if row["status"] == "running"), None)
@@ -1160,7 +1166,13 @@ def _execution_payload(execution, operations) -> dict[str, object]:
         "finished_at": execution["finished_at"],
         "cancel_requested": bool(execution["cancel_requested"]),
         "counts": {"completed": completed, "failed": counts["failed"], "skipped": counts["skipped"], "pending": counts["pending"] + counts["interrupted"] + counts["cancelled"], "excluded": counts["excluded"], "total": total},
-        "current_operation": {"operation": current["operation"], "filename": current["filename"], "bytes_completed": current["bytes_completed"]} if current else None,
+        "current_operation": {
+            "operation": current["operation"],
+            "filename": current["filename"],
+            "profile_name": (_parse_json(current["profile_snapshot_json"]) or {}).get("name"),
+            "bytes_completed": current["bytes_completed"],
+            "bytes_total": current["source_size_bytes"],
+        } if current else None,
         "bytes_processed": bytes_done,
         "total_bytes": bytes_total,
         "elapsed_seconds": elapsed,

@@ -152,6 +152,11 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         self.assertNotIn("Keep source subfolders", management)
         self.assertNotIn("Available space", management)
         self.assertIn("storageDelta ?", management)
+        self.assertIn("execution-acknowledgement", management)
+        self.assertIn("execution-progress-header", management)
+        self.assertIn("data-execution-timer", management)
+        self.assertIn("Preparing next operation…", management)
+        self.assertIn("preserve = false", management)
 
     def test_profile_previews_and_planner_safety_controls(self):
         for marker in ("data-profile-preview", "Preview ${escapeHtml(profile.name)} compression", "profile.is_builtin ?", "profile-preview", "compression-preview/manifest.json", "conflictPolicy", "Destination conflict", "Overwrite", "data-rule-help"):
@@ -170,7 +175,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
             self.assertIn(marker, self.management + self.file_management_backend)
         self.assertIn(".plan-summary-callouts > span", css)
         self.assertIn(".conflict-option span:hover", css)
-        self.assertIn('class="checkbox-line"', self.management)
+        self.assertIn('class="checkbox-line execution-acknowledgement"', self.management)
 
 
 if __name__ == "__main__":

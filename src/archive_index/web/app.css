@@ -245,6 +245,9 @@
 .rule-options-copy, .rule-options-compress { justify-items: start; }
 .rule-help { margin: 0; font-size: .78rem; }
 .checkbox-line { display: inline-flex; align-items: center; gap: .35rem; }
+.execution-acknowledgement { display: flex !important; align-items: flex-start; justify-content: flex-start; justify-self: start; width: auto !important; max-width: 100%; gap: .45rem; text-align: left; line-height: 1.35; }
+.execution-acknowledgement input { flex: 0 0 auto; width: auto; margin: .15rem 0 0; }
+.execution-acknowledgement span { min-width: 0; }
 .free-space-arrow { padding: 0 .25rem; color: #9faab5; }
 .file-management-footer { display: flex; justify-content: flex-end; margin-top: 1rem; }
 .file-management-profiles { display: grid; gap: .6rem; margin-bottom: .8rem; }
@@ -280,6 +283,13 @@
 .execution-panel { margin-top: 1rem; padding: .8rem; border: 1px solid #526b80; border-radius: .55rem; background: #17232c; }
 .execution-review, .execution-progress { display: grid; gap: .6rem; }
 .execution-review h3, .execution-progress h3 { margin: 0; color: #a9d8f5; }
+.execution-progress-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; min-height: 1.35rem; }
+.execution-timer { min-width: 8.5rem; color: #d5e9f7; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.execution-status-block { display: grid; align-content: start; gap: .12rem; min-height: 4.45rem; }
+.execution-status-block p { margin: 0; min-height: 1.18rem; }
+.execution-current-operation { color: #edf0f3; font-weight: 600; }
+.execution-current-profile, .execution-throughput { color: #9faab5; font-size: .82rem; }
+.execution-byte-line { color: #cbd6de; font-variant-numeric: tabular-nums; }
 .execution-counts { display: flex; flex-wrap: wrap; gap: .45rem .8rem; color: #cbd6de; }
 .execution-counts span { padding: .35rem .5rem; background: #1a2026; border-radius: .35rem; }
 .execution-warning { margin: 0; color: #f2b5b5; }
