@@ -40,16 +40,15 @@ def profile_settings(profile: dict[str, object] | None) -> dict[str, object]:
     }
 
 
-def analyze_source(source: Path) -> dict[str, object]:
-    result = subprocess.run(
+def analyze_source(source: Path, cancelled=None, progress=None) -> dict[str, object]:
+    if progress:
+        progress("Inspecting video streams")
+    result = _run_ffprobe(
         [
             "ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format",
             "-show_chapters", str(source),
         ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+        cancelled,
     )
     if result.returncode:
         raise ValueError("FFprobe could not read the video source.")
@@ -65,12 +64,15 @@ def analyze_source(source: Path) -> dict[str, object]:
     rotation = _rotation(video_stream)
     fps = _ratio(video_stream.get("avg_frame_rate")) or _ratio(video_stream.get("r_frame_rate"))
     duration = _number(video_stream.get("duration")) or _number((payload.get("format") or {}).get("duration"))
-    timing_cfr = _timing_is_cfr(source, video_stream, duration, fps)
+    if progress:
+        progress("Checking video frame timing")
+    timing_cfr, timing = _timing_is_cfr(source, video_stream, duration, fps, cancelled=cancelled, return_details=True)
     format_tags = dict((payload.get("format") or {}).get("tags") or {})
     return {
         "streams": streams,
         "video": video_stream,
         "audio": [stream for stream in streams if stream.get("codec_type") == "audio"],
+        "ancillary": _ancillary_summary(streams),
         "width": int(video_stream.get("width") or 0),
         "height": int(video_stream.get("height") or 0),
         "display_width": int(video_stream.get("height") or 0) if rotation in {90, 270} else int(video_stream.get("width") or 0),
@@ -89,6 +91,7 @@ def analyze_source(source: Path) -> dict[str, object]:
         "video_tags": dict(video_stream.get("tags") or {}),
         "chapters": payload.get("chapters") or [],
         "timing_cfr": timing_cfr,
+        "timing": timing,
     }
 
 
@@ -99,11 +102,17 @@ def source_blocker(source: Path, profile: dict[str, object] | None) -> str | Non
         info = analyze_source(source)
     except ValueError as error:
         return str(error)
+    return source_blocker_from_info(info, profile)
+
+
+def source_blocker_from_info(info: dict[str, object], profile: dict[str, object] | None) -> str | None:
     if not info["width"] or not info["height"] or not info["duration"] or not info["fps"]:
         return "Video dimensions, duration, and frame rate must be known for AV1 execution."
-    unsupported = [stream.get("codec_type") for stream in info["streams"] if stream.get("codec_type") not in {"video", "audio"}]
+    unsupported = [stream for stream in info.get("ancillary") or [] if not _ancillary_supported(stream)]
     if unsupported:
-        return "Video contains subtitle, data, or attachment streams that the safe AV1 contract does not preserve."
+        descriptions = ", ".join(_ancillary_description(stream) for stream in unsupported[:3])
+        suffix = f"; {len(unsupported) - 3} more" if len(unsupported) > 3 else ""
+        return f"{descriptions}{suffix}."
     for stream in info["audio"]:
         if stream.get("codec_name") not in AV1_AUDIO_CODECS:
             return f"Audio codec {stream.get('codec_name') or 'unknown'} is not safe to stream-copy into MP4."
@@ -156,6 +165,10 @@ def build_command(source: Path, output: Path, info: dict[str, object], profile: 
         "-c:v", "libsvtav1", "-preset", str(settings["preset"]), "-crf", str(settings["crf"]),
         "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
     ]
+    if any(stream["codec_type"] == "subtitle" and _ancillary_supported(stream) for stream in info.get("ancillary") or []):
+        arguments.extend(["-map", "0:s?", "-c:s", "copy"])
+    if any(stream["codec_type"] == "data" and _ancillary_supported(stream) for stream in info.get("ancillary") or []):
+        arguments.extend(["-map", "0:d?", "-c:d", "copy"])
     if filters:
         arguments.extend(["-vf", ",".join(filters)])
     arguments.extend(["-c:a", "copy"])
@@ -237,6 +250,8 @@ def _validate_output_contract(output_info: dict[str, object], source_info: dict[
         raise ValueError("AV1 output did not preserve all supported audio tracks.")
     if [stream.get("codec_name") for stream in output_info["audio"]] != [stream.get("codec_name") for stream in source_info["audio"]]:
         raise ValueError("AV1 output audio stream codecs changed unexpectedly.")
+    if _ancillary_contract(output_info.get("ancillary")) != _ancillary_contract(source_info.get("ancillary")):
+        raise ValueError("AV1 output did not preserve supported ancillary streams.")
     if output_info["rotation"] != source_info["rotation"]:
         raise ValueError("AV1 output rotation metadata did not match the source.")
     expected_display_width = expected_width if output_info["rotation"] not in {90, 270} else expected_height
@@ -326,6 +341,7 @@ def _summary(info: dict[str, object]) -> dict[str, object]:
         }
         for stream in (info.get("audio") or [])
     ]
+    summary["ancillary"] = info.get("ancillary") or []
     return summary
 
 
@@ -335,43 +351,105 @@ def _is_cfr(stream: dict[str, object]) -> bool:
     return average is not None and real is not None and abs(float(average) - float(real)) < 0.01
 
 
-def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | None, fps: Fraction | None) -> bool | None:
+def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | None, fps: Fraction | None, *, cancelled=None, return_details: bool = False):
+    def pack(value, details):
+        return (value, details) if return_details else value
     if duration is None or fps is None or float(fps) <= 0:
-        return None
+        return pack(None, {})
     nominal = 1.0 / float(fps)
-    intervals = ["0%+#80", f"{max(0.0, duration / 2.0):.6f}%+#80", f"{max(0.0, duration - 2.0):.6f}%+#80"]
-    observed = []
-    for interval in intervals:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", interval,
-                "-show_entries", "frame=best_effort_timestamp_time,pkt_duration_time", "-of", "json", str(source),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode:
-            return None
-        try:
-            frames = json.loads(result.stdout).get("frames") or []
-        except json.JSONDecodeError:
-            return None
-        timestamps = [_number(frame.get("best_effort_timestamp_time")) for frame in frames]
-        timestamps = [value for value in timestamps if value is not None]
-        deltas = [right - left for left, right in zip(timestamps, timestamps[1:]) if right > left]
-        if len(deltas) > 4:
-            observed.extend(deltas[1:-1])
-        else:
-            observed.extend(deltas)
-        durations = [_number(frame.get("pkt_duration_time")) for frame in frames]
-        durations = [value for value in durations if value is not None and value > 0]
-        observed.extend(durations)
+    starts = [0.0, max(0.0, duration / 2.0), max(0.0, duration - 2.0)]
+    intervals = []
+    for start in starts:
+        value = f"{start:.6f}%+#80"
+        if value not in intervals:
+            intervals.append(value)
+    probe = _run_ffprobe(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", ",".join(intervals),
+            "-show_entries", "frame=best_effort_timestamp_time,pkt_duration_time", "-of", "json", str(source),
+        ],
+        cancelled,
+    )
+    if probe.returncode:
+        return pack(None, {})
+    try:
+        frames = json.loads(probe.stdout).get("frames") or []
+    except json.JSONDecodeError:
+        return pack(None, {})
+    timestamps = [_number(frame.get("best_effort_timestamp_time")) for frame in frames]
+    timestamps = [value for value in timestamps if value is not None]
+    boundary = max(0.25, nominal * 8.0)
+    deltas = [right - left for left, right in zip(timestamps, timestamps[1:]) if 0 < right - left <= boundary]
+    durations = [_number(frame.get("pkt_duration_time")) for frame in frames]
+    durations = [value for value in durations if value is not None and value > 0]
+    observed = deltas + durations
     if len(observed) < 3:
-        return None
+        return pack(None, {"sample_count": len(observed)})
     tolerance = max(0.0015, nominal * 0.02)
-    return all(abs(value - nominal) <= tolerance for value in observed)
+    valid = all(abs(value - nominal) <= tolerance for value in observed)
+    return pack(valid, {
+        "sample_count": len(observed),
+        "nominal_frame_duration": nominal,
+        "min_observed_duration": min(observed),
+        "max_observed_duration": max(observed),
+        "interval_count": len(intervals),
+    })
+
+
+def _run_ffprobe(arguments: list[str], cancelled=None):
+    if cancelled is None:
+        return subprocess.run(arguments, capture_output=True, text=True, timeout=30, check=False)
+    process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        while process.poll() is None:
+            if cancelled.is_set():
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
+                raise InterruptedError("Plan analysis was cancelled.")
+            time.sleep(0.02)
+        stdout, stderr = process.communicate(timeout=1)
+        return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=1)
+
+
+def _ancillary_summary(streams: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "index": int(stream.get("index") or 0),
+            "codec_type": stream.get("codec_type"),
+            "codec_name": stream.get("codec_name"),
+            "codec_tag_string": stream.get("codec_tag_string"),
+            "codec_tag": stream.get("codec_tag"),
+            "tags": _semantic_tags(stream.get("tags")),
+            "disposition": _stream_disposition(stream),
+        }
+        for stream in streams
+        if stream.get("codec_type") not in {"video", "audio"}
+    ]
+
+
+def _ancillary_supported(stream: dict[str, object]) -> bool:
+    codec = str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold()
+    if stream.get("codec_type") == "subtitle":
+        return codec == "mov_text"
+    return False
+
+
+def _ancillary_description(stream: dict[str, object]) -> str:
+    kind = str(stream.get("codec_type") or "unknown")
+    codec = str(stream.get("codec_name") or stream.get("codec_tag_string") or "unknown")
+    return f"Unsupported {kind} stream: {codec}"
+
+
+def _ancillary_contract(streams: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    return [{key: value for key, value in stream.items() if key != "index"} for stream in streams or []]
 
 
 def _metadata_blocker(info: dict[str, object]) -> str | None:

@@ -508,7 +508,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 ruleset_id = body.get("ruleset_id")
                 if ruleset_id is not None and not isinstance(ruleset_id, str):
                     raise InvalidRequest("ruleset_id must be a string or null")
-                self._send_json(201, {"execution": prepare_execution(workspace, ruleset_id, body.get("plan_digest"))})
+                analysis_session_id = body.get("analysis_session_id")
+                if analysis_session_id is not None and not isinstance(analysis_session_id, str):
+                    raise InvalidRequest("analysis_session_id must be a string or null")
+                self._send_json(201, {"execution": prepare_execution(workspace, ruleset_id, body.get("plan_digest"), analysis_session_id)})
                 return
             execution_prefix = "/api/file-management/executions/"
             if request.path.startswith(execution_prefix):

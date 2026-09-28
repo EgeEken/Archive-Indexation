@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from .file_management import build_dry_run_plan
+from .file_management import build_dry_run_plan, completed_plan_analysis, list_rulesets
 from .file_management_provenance import link_managed_derivatives, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
@@ -63,11 +63,20 @@ _progress_marks: dict[str, tuple[float, int]] = {}
 _progress_lock = threading.Lock()
 
 
-def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest: str) -> dict[str, object]:
+def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest: str, analysis_session_id: str | None = None) -> dict[str, object]:
     if not isinstance(plan_digest, str) or not plan_digest:
         raise ValueError("plan_digest is required")
     _recover_startup(workspace)
-    plan = build_dry_run_plan(workspace, ruleset_id)
+    if analysis_session_id:
+        try:
+            plan = completed_plan_analysis(workspace, analysis_session_id)
+        except ValueError as error:
+            raise ExecutionConflict("The analyzed plan is no longer available. Analyze again before executing.") from error
+        if plan.get("ruleset_id") != ruleset_id:
+            raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        _validate_analyzed_plan(workspace, plan)
+    else:
+        plan = build_dry_run_plan(workspace, ruleset_id)
     if plan.get("plan_digest") != plan_digest:
         raise ExecutionConflict("The plan changed. Analyze again before executing.")
     if _active_job(workspace) is not None:
@@ -164,6 +173,52 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                 ),
             )
     return get_execution(workspace, execution_id)
+
+
+def _validate_analyzed_plan(workspace: Workspace, plan: dict[str, object]) -> None:
+    ruleset_id = plan.get("ruleset_id")
+    current = next((item for item in list_rulesets(workspace, seed=False) if item["id"] == ruleset_id), None)
+    if current is None or _json(current) != _json(plan.get("ruleset_snapshot") or {}):
+        raise ExecutionConflict("The plan changed. Analyze again before executing.")
+    operations = plan.get("operations") or []
+    ids = [operation.get("physical_file_id") for operation in operations if operation.get("physical_file_id")]
+    connection = workspace.connect()
+    try:
+        indexed = {
+            row["id"]: row
+            for row in connection.execute(
+                f"SELECT id, relative_path, size_bytes, mtime_ns, sha256, is_online FROM physical_file WHERE id IN ({','.join('?' for _ in ids) or '?'})",
+                ids or [""],
+            ).fetchall()
+        }
+    finally:
+        connection.close()
+    for operation in operations:
+        physical_id = operation.get("physical_file_id")
+        if not physical_id:
+            continue
+        row = indexed.get(physical_id)
+        if row is None or not row["is_online"] or row["relative_path"] != operation.get("source_relative_path"):
+            raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        if any(row[key] != operation.get(operation_key) for key, operation_key in (("size_bytes", "source_size_bytes"), ("mtime_ns", "source_mtime_ns"), ("sha256", "source_sha256"))):
+            raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        source = _validate_target(workspace, operation["source_relative_path"], allow_missing=False)
+        current_stat = source.stat()
+        if current_stat.st_size != int(operation.get("source_size_bytes") or 0) or current_stat.st_mtime_ns != int(operation.get("source_mtime_ns") or 0):
+            raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        target_path = operation.get("target_relative_path")
+        if not target_path or operation.get("destination_status") in {"already_satisfied", "skipped", "replace_source"}:
+            continue
+        target = _existing_case_insensitive_target(workspace, target_path)
+        snapshot = operation.get("target_snapshot") or {}
+        if snapshot:
+            if target is None or _is_reparse_point(target) or not target.is_file():
+                raise ExecutionConflict("The plan changed. Analyze again before executing.")
+            target_stat = target.stat()
+            if target_stat.st_size != int(snapshot.get("size_bytes") or 0) or target_stat.st_mtime_ns != int(snapshot.get("mtime_ns") or 0):
+                raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        elif target is not None:
+            raise ExecutionConflict("The plan changed. Analyze again before executing.")
 
 
 def get_active_execution(workspace: Workspace) -> dict[str, object] | None:

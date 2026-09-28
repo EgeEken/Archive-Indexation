@@ -13,17 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .workspace import Workspace, WorkspaceError, _is_reparse_point
+from .compression_analysis import blocker_for_analysis, load_or_analyze
 from .media.capabilities import av1_capability, ffmpeg_capabilities
-from .media.av1 import profile_settings as av1_profile_settings, source_blocker as av1_source_blocker
+from .media.av1 import AV1_SUPPORTED_EXTENSIONS, profile_settings as av1_profile_settings
 from .media.jpegxl import (
-    JXL_SOURCE_REPLACEMENT_BLOCKER,
     JXL_SUPPORTED_EXTENSIONS,
     distance_to_quality,
     production_capability,
     profile_settings,
     quality_to_distance,
-    source_blocker,
-    source_replacement_blocker,
 )
 
 BUILTIN_HIGH_QUALITY_PROFILE_ID = "builtin-jxl-high-quality"
@@ -307,14 +305,14 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
     directory_entries: dict[Path, dict[str, Path]] = {}
     target_statuses: dict[tuple[str, str | None], str | None] = {}
     target_hashes: dict[str, str] = {}
+    indexed_targets = {str(row["relative_path"]).casefold(): row for row in rows}
     total_rows = len(rows)
+    compiled_rows = []
     for row_index, row in enumerate(rows):
         report("Matching rules", row_index, total_rows)
         matching_rules = [candidate for candidate in ruleset["rules"] if candidate["enabled"] and _matches(row, candidate["match"])]
         if not matching_rules:
-            report("Resolving targets", row_index + 1, total_rows)
             continue
-        source = row["relative_path"]
         compiled = []
         for rule in matching_rules:
             action = rule["action"]
@@ -334,33 +332,6 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             item_blockers = []
             if target_validation_error:
                 item_conflicts.append(target_validation_error)
-            if operation == "compress":
-                if profile is None:
-                    item_blockers.append("compression profile is missing; supported Phase 10C compression is required")
-                elif profile.get("codec") == "jpeg-xl":
-                    capability = production_capability()
-                    if not capability.get("production_encoder_available"):
-                        item_blockers.append(str(capability.get("message") or "JPEG XL encoder is unavailable."))
-                    if row["extension"].casefold() not in JXL_SUPPORTED_EXTENSIONS:
-                        item_blockers.append("This source format is not supported by production JPEG XL compression.")
-                    else:
-                        source_issue = source_replacement_blocker(workspace.absolute_path(source)) if action.get("source_disposition", "keep") == "replace" else source_blocker(workspace.absolute_path(source))
-                        if source_issue:
-                            item_blockers.append(source_issue)
-                    if action.get("source_disposition", "keep") == "replace" and not capability.get("source_replacement_available"):
-                        item_blockers.append(JXL_SOURCE_REPLACEMENT_BLOCKER)
-                elif profile.get("codec") == "av1":
-                    capability = av1_capability()
-                    if not capability.get("production_ready"):
-                        item_blockers.append(str(capability.get("message") or AV1_EXECUTION_BLOCKER))
-                    else:
-                        source_issue = av1_source_blocker(workspace.absolute_path(source), profile)
-                        if source_issue:
-                            item_blockers.append(source_issue)
-                elif profile.get("codec") == "avif":
-                    item_blockers.append(AVIF_EXECUTION_BLOCKER)
-                else:
-                    item_blockers.append("This compression codec is not supported for production execution.")
             if operation not in {"compress", "copy", "move", "delete"}:
                 item_conflicts.append(f"unsupported planned operation: {operation}")
             if operation in {"compress", "copy", "move"} and target is None and target_validation_error is None:
@@ -368,7 +339,74 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             compiled.append({"rule": rule, "action": action, "operation": operation, "profile": profile, "profile_id": profile_id, "target": target, "conflicts": item_conflicts, "blockers": item_blockers})
 
         _validate_action_combination(compiled)
-        report("Checking destination conflicts", row_index, total_rows)
+        compiled_rows.append((row, compiled))
+
+    analysis_requests = {}
+    for row, compiled in compiled_rows:
+        for item in compiled:
+            profile = item["profile"]
+            if item["operation"] != "compress" or profile is None or profile.get("codec") not in {"jpeg-xl", "av1"}:
+                continue
+            if profile.get("codec") == "jpeg-xl" and row["extension"].casefold() not in JXL_SUPPORTED_EXTENSIONS:
+                continue
+            if profile.get("codec") == "av1" and row["extension"].casefold() not in AV1_SUPPORTED_EXTENSIONS:
+                continue
+            if profile.get("codec") == "jpeg-xl" and not production_capability().get("production_encoder_available"):
+                continue
+            if profile.get("codec") == "av1" and not av1_capability().get("production_ready"):
+                continue
+            key = (row["id"], profile["codec"])
+            analysis_requests.setdefault(key, row)
+    analysis_results = {}
+    analysis_total = len(analysis_requests)
+    for analysis_index, ((physical_id, codec), row) in enumerate(analysis_requests.items(), 1):
+        phase = "Inspecting JPEG XL metadata" if codec == "jpeg-xl" else "Inspecting video streams"
+        report(phase, analysis_index - 1, analysis_total)
+        analysis_results[(physical_id, codec)] = load_or_analyze(
+            workspace,
+            row,
+            codec,
+            cancelled=cancelled,
+            progress=lambda phase_name: report(phase_name, analysis_index - 1, analysis_total),
+        )[0]
+    if analysis_total:
+        report("Checking compression eligibility", analysis_total, analysis_total)
+
+    for row, compiled in compiled_rows:
+        for item in compiled:
+            operation = item["operation"]
+            profile = item["profile"]
+            if operation == "compress":
+                if profile is None:
+                    item["blockers"].append("compression profile is missing; supported Phase 10C compression is required")
+                elif profile.get("codec") == "jpeg-xl":
+                    capability = production_capability()
+                    if not capability.get("production_encoder_available"):
+                        item["blockers"].append(str(capability.get("message") or "JPEG XL encoder is unavailable."))
+                    if row["extension"].casefold() not in JXL_SUPPORTED_EXTENSIONS:
+                        item["blockers"].append("This source format is not supported by production JPEG XL compression.")
+                    else:
+                        issue = blocker_for_analysis("jpeg-xl", analysis_results[(row["id"], "jpeg-xl")], profile, item["action"].get("source_disposition", "keep"))
+                        if issue:
+                            item["blockers"].append(issue)
+                elif profile.get("codec") == "av1":
+                    capability = av1_capability()
+                    if not capability.get("production_ready"):
+                        item["blockers"].append(str(capability.get("message") or AV1_EXECUTION_BLOCKER))
+                    elif row["extension"].casefold() not in AV1_SUPPORTED_EXTENSIONS:
+                        item["blockers"].append("This video container is not supported by production AV1 compression.")
+                    else:
+                        issue = blocker_for_analysis("av1", analysis_results[(row["id"], "av1")], profile, item["action"].get("source_disposition", "keep"))
+                        if issue:
+                            item["blockers"].append(issue)
+                elif profile.get("codec") == "avif":
+                    item["blockers"].append(AVIF_EXECUTION_BLOCKER)
+                else:
+                    item["blockers"].append("This compression codec is not supported for production execution.")
+    for row_index, (row, compiled) in enumerate(compiled_rows, 1):
+        report("Resolving targets", row_index - 1, len(compiled_rows))
+        report("Checking destination conflicts", row_index, len(compiled_rows))
+        source = row["relative_path"]
         for item in compiled:
             item_conflicts = list(item["conflicts"])
             item_blockers = list(item["blockers"])
@@ -392,6 +430,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                     directory_entries,
                     target_statuses,
                     target_hashes,
+                    indexed_targets,
                 )
                 if target_conflict:
                     item_conflicts.append(target_conflict)
@@ -401,8 +440,10 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 coalesced = False
             for blocker in item_blockers:
                 key = f"{item['profile_id']}:{blocker}"
-                entry = blockers.setdefault(key, {"profile_id": item["profile_id"], "profile_name": item["profile"]["name"] if item["profile"] else None, "reason": blocker, "affected_count": 0})
+                entry = blockers.setdefault(key, {"profile_id": item["profile_id"], "profile_name": item["profile"]["name"] if item["profile"] else None, "reason": blocker, "affected_count": 0, "filenames": []})
                 entry["affected_count"] += 1
+                if len(entry["filenames"]) < 5 and row["filename"] not in entry["filenames"]:
+                    entry["filenames"].append(row["filename"])
             operation_row = {
                 "physical_file_id": row["id"],
                 "logical_asset_id": row["logical_asset_id"],
@@ -443,7 +484,6 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "operation": operation,
                 "reason": reason,
             } for reason in item_conflicts)
-        report("Resolving targets", row_index + 1, total_rows)
     report("Summarizing plan", total_rows, total_rows)
     summary = _plan_summary(workspace, rows, operations, conflicts)
     summary["blocker_count"] = sum(int(item["affected_count"]) for item in blockers.values())
@@ -451,6 +491,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
     return {
         "available": True,
         "ruleset_id": ruleset_id,
+        "ruleset_snapshot": ruleset,
         "plan_digest": _plan_digest(operations, ruleset),
         "operations": operations,
         "conflicts": conflicts,
@@ -488,6 +529,7 @@ def start_plan_analysis(workspace: Workspace, ruleset_id: str | None = None) -> 
             session.update(phase=phase, completed=completed, total=total)
         try:
             result = build_dry_run_plan(workspace, ruleset_id, progress=update, cancelled=cancellation)
+            result["analysis_session_id"] = session_id
             session.update(status="complete", result=result)
         except InterruptedError:
             session.update(status="cancelled")
@@ -508,6 +550,14 @@ def plan_analysis_status(workspace: Workspace, session_id: str) -> dict[str, obj
         return {key: value for key, value in session.items() if key not in {"workspace", "started", "cancellation"}} | {
             "elapsed_seconds": session.get("elapsed_seconds", time.monotonic() - session["started"]),
         }
+
+
+def completed_plan_analysis(workspace: Workspace, session_id: str) -> dict[str, object]:
+    with _plan_runs_lock:
+        session = _plan_runs.get(session_id)
+        if session is None or session["workspace"] != str(workspace.root) or session["status"] != "complete":
+            raise ValueError("Completed plan analysis was not found.")
+        return json.loads(json.dumps(session["result"], ensure_ascii=False))
 
 
 def cancel_plan_analysis(workspace: Workspace, session_id: str) -> bool:
@@ -636,7 +686,7 @@ def _workspace_file_exists(workspace: Workspace, relative_path: str) -> bool:
         return True
 
 
-def _workspace_target_status(workspace: Workspace, relative_path: str | None, source_sha256: str | None, directory_entries=None, target_statuses=None, target_hashes=None) -> str | None:
+def _workspace_target_status(workspace: Workspace, relative_path: str | None, source_sha256: str | None, directory_entries=None, target_statuses=None, target_hashes=None, indexed_targets=None) -> str | None:
     if not relative_path:
         return None
     cache_key = (relative_path.casefold(), source_sha256)
@@ -656,11 +706,16 @@ def _workspace_target_status(workspace: Workspace, relative_path: str | None, so
         target_key = str(path).casefold()
         digest = target_hashes.get(target_key) if target_hashes is not None else None
         if digest is None:
-            hasher = hashlib.sha256()
-            with path.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    hasher.update(chunk)
-            digest = hasher.hexdigest()
+            stat_result = path.stat()
+            indexed = (indexed_targets or {}).get(relative_path.casefold())
+            if indexed is not None and indexed["size_bytes"] == stat_result.st_size and indexed["mtime_ns"] == stat_result.st_mtime_ns and indexed["sha256"]:
+                digest = indexed["sha256"]
+            else:
+                hasher = hashlib.sha256()
+                with path.open("rb") as source:
+                    while chunk := source.read(1024 * 1024):
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
             if target_hashes is not None:
                 target_hashes[target_key] = digest
         status = "already_satisfied" if digest == source_sha256 else "conflict"
@@ -669,7 +724,7 @@ def _workspace_target_status(workspace: Workspace, relative_path: str | None, so
     return status
 
 
-def _target_snapshot(workspace: Workspace, relative_path: str | None) -> dict[str, object] | None:
+def _target_snapshot(workspace: Workspace, relative_path: str | None, target_hashes=None) -> dict[str, object] | None:
     if not relative_path:
         return None
     try:
@@ -677,11 +732,15 @@ def _target_snapshot(workspace: Workspace, relative_path: str | None) -> dict[st
         if path is None or not path.is_file() or _is_reparse_point(path):
             return None
         stat_result = path.stat()
+        target_key = str(path).casefold()
+        digest = (target_hashes or {}).get(target_key) or _hash_path(path)
+        if target_hashes is not None:
+            target_hashes[target_key] = digest
         return {
             "relative_path": relative_path,
             "size_bytes": stat_result.st_size,
             "mtime_ns": stat_result.st_mtime_ns,
-            "sha256": _hash_path(path),
+            "sha256": digest,
             "file_type": "regular",
         }
     except (OSError, WorkspaceError):
@@ -726,6 +785,7 @@ def _resolve_target(
     directory_entries=None,
     target_statuses=None,
     target_hashes=None,
+    indexed_targets=None,
  ) -> tuple[str, str | None, str | None, bool, str | None, bool, dict[str, object] | None]:
     source_key = source.casefold()
     target_key = target.casefold()
@@ -734,39 +794,39 @@ def _resolve_target(
         return target, "already_satisfied", None, False, None, True, None
     if target_key == source_key:
         if source_replacement:
-            return target, "replace_source", None, True, None, False, _target_snapshot(workspace, target)
+            return target, "replace_source", None, True, None, False, _target_snapshot(workspace, target, target_hashes)
         if operation == "move":
             return target, "already_satisfied", None, False, None, False, None
         if operation == "copy":
             return target, "already_satisfied", None, False, None, False, None
         if conflict_policy == "rename":
-            renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
+            renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes, indexed_targets)
             return renamed, "renamed", target, False, None, False, None
         if conflict_policy == "skip":
             return target, "skipped", None, False, None, False, None
-        return target, "overwrite", None, False, None, False, _target_snapshot(workspace, target)
+        return target, "overwrite", None, False, None, False, _target_snapshot(workspace, target, target_hashes)
 
-    existing = _workspace_target_status(workspace, target, source_sha256, directory_entries, target_statuses, target_hashes)
+    existing = _workspace_target_status(workspace, target, source_sha256, directory_entries, target_statuses, target_hashes, indexed_targets)
     if existing == "already_satisfied" and planned is None:
         return target, existing, None, False, None, False, None
     if planned is None and existing is None:
         return target, None, None, False, None, False, None
     if planned is not None:
         if conflict_policy == "rename":
-            renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
+            renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes, indexed_targets)
             return renamed, "renamed", target, False, None, False, None
         if conflict_policy == "skip":
             return target, "skipped", None, False, None, False, None
         return target, "conflict", None, False, "Another planned output uses this destination.", False, None
     if conflict_policy == "rename":
-        renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes)
+        renamed = _next_target(target, workspace, planned_targets, directory_entries, target_statuses, target_hashes, indexed_targets)
         return renamed, "renamed", target, False, None, False, None
     if conflict_policy == "skip":
         return target, "skipped", None, False, None, False, None
-    return target, "overwrite", None, False, None, False, _target_snapshot(workspace, target)
+    return target, "overwrite", None, False, None, False, _target_snapshot(workspace, target, target_hashes)
 
 
-def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str, str | None]], directory_entries=None, target_statuses=None, target_hashes=None) -> str:
+def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, tuple[str, str, str | None]], directory_entries=None, target_statuses=None, target_hashes=None, indexed_targets=None) -> str:
     path = PurePosixPath(target)
     suffix = path.suffix
     stem = path.name[:-len(suffix)] if suffix else path.name
@@ -774,7 +834,7 @@ def _next_target(target: str, workspace: Workspace, planned_targets: dict[str, t
     while True:
         candidate = str(path.with_name(f"{stem} ({number}){suffix}")).replace("\\", "/")
         key = candidate.casefold()
-        if key not in planned_targets and _workspace_target_status(workspace, candidate, None, directory_entries, target_statuses, target_hashes) is None:
+        if key not in planned_targets and _workspace_target_status(workspace, candidate, None, directory_entries, target_statuses, target_hashes, indexed_targets) is None:
             return candidate
         number += 1
 
@@ -966,6 +1026,7 @@ def _profile_snapshot(profile: dict[str, object] | None) -> dict[str, object] | 
 def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object] | None) -> str:
     state = {
         "ruleset_id": ruleset.get("id") if ruleset else None,
+        "ruleset_snapshot": ruleset,
         "operations": [
             {
                 "position": position,

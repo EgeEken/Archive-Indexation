@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -777,6 +777,24 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
     28: (
         "ALTER TABLE file_management_execution_operation ADD COLUMN metadata_contract_json TEXT",
+    ),
+    29: (
+        """
+        CREATE TABLE IF NOT EXISTS compression_source_analysis (
+            physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            codec TEXT NOT NULL,
+            analysis_contract_version TEXT NOT NULL,
+            runtime_fingerprint TEXT NOT NULL,
+            source_sha256 TEXT,
+            source_size_bytes INTEGER,
+            source_mtime_ns INTEGER,
+            analysis_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (physical_file_id, codec)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS compression_source_analysis_lookup_idx ON compression_source_analysis(codec, analysis_contract_version, runtime_fingerprint, source_sha256, source_size_bytes, source_mtime_ns)",
     ),
 }
 

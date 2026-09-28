@@ -59,40 +59,50 @@ def metadata_replacement_blocker(source: Path) -> str | None:
 
 def metadata_inventory(source: Path) -> dict[str, object]:
     if source.suffix.casefold() in {".jpg", ".jpeg"}:
-        return _jpeg_metadata_inventory(source.read_bytes())
+        with source.open("rb") as stream:
+            return _jpeg_metadata_inventory(stream)
     if source.suffix.casefold() == ".png":
-        return _png_metadata_inventory(source.read_bytes())
+        with source.open("rb") as stream:
+            return _png_metadata_inventory(stream)
     return {"format": source.suffix.casefold(), "recognized": [], "unsupported": []}
 
 
-def _jpeg_metadata_inventory(data: bytes) -> dict[str, object]:
+def _jpeg_metadata_inventory(stream) -> dict[str, object]:
+    if isinstance(stream, (bytes, bytearray)):
+        stream = BytesIO(stream)
     recognized = []
     unsupported = []
-    if not data.startswith(b"\xff\xd8"):
-        return {"format": "jpeg", "recognized": [], "unsupported": ["Source is not a valid JPEG file."]}
-    index = 2
-    while index + 1 < len(data):
-        while index < len(data) and data[index] != 0xFF:
-            index += 1
-        while index < len(data) and data[index] == 0xFF:
-            index += 1
-        if index >= len(data):
+    reader = _CountingReader(stream)
+    if reader.read(2) != b"\xff\xd8":
+        return {"format": "jpeg", "recognized": [], "unsupported": ["Source is not a valid JPEG file."], "bytes_read": reader.count}
+    while True:
+        prefix = reader.read(1)
+        while prefix and prefix != b"\xff":
+            prefix = reader.read(1)
+        if not prefix:
             break
-        marker = data[index]
-        index += 1
+        marker_bytes = reader.read(1)
+        while marker_bytes == b"\xff":
+            marker_bytes = reader.read(1)
+        if not marker_bytes:
+            break
+        marker = marker_bytes[0]
         if marker in {0xD8, 0xD9}:
             continue
         if marker == 0xDA:
             break
-        if index + 2 > len(data):
+        length_bytes = reader.read(2)
+        if len(length_bytes) != 2:
             unsupported.append("JPEG contains a truncated marker segment.")
             break
-        length = int.from_bytes(data[index:index + 2], "big")
-        if length < 2 or index + length > len(data):
+        length = int.from_bytes(length_bytes, "big")
+        if length < 2:
             unsupported.append("JPEG contains a truncated marker segment.")
             break
-        payload = data[index + 2:index + length]
-        index += length
+        payload = reader.read(length - 2)
+        if len(payload) != length - 2:
+            unsupported.append("JPEG contains a truncated marker segment.")
+            break
         if 0xE0 <= marker <= 0xEF:
             if marker == 0xE0 and payload.startswith((b"JFIF\x00", b"JFXX\x00")):
                 recognized.append("APP0/JFIF")
@@ -104,29 +114,54 @@ def _jpeg_metadata_inventory(data: bytes) -> dict[str, object]:
                 unsupported.append("Source contains Extended XMP that the current JXL replacement path cannot preserve.")
             elif marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
                 recognized.append("ICC")
+            elif marker == 0xE2:
+                _classify_app2(payload, recognized, unsupported)
             elif marker == 0xEE and payload.startswith(b"Adobe"):
                 recognized.append("APP14/Adobe")
             elif marker == 0xED:
-                unsupported.append("Source contains IPTC/Photoshop metadata that the current JXL replacement path cannot preserve.")
+                unsupported.append("Source contains JPEG APP13 IPTC/Photoshop metadata that the current JXL replacement path cannot preserve.")
             else:
-                unsupported.append(f"Source contains an unsupported JPEG APP{marker - 0xE0:02X} marker.")
+                unsupported.append(f"Source contains unsupported JPEG APP{marker - 0xE0} metadata (signature {_safe_signature(payload)}, {len(payload)} bytes).")
         elif marker == 0xFE:
             unsupported.append("Source contains a JPEG comment that the current JXL replacement path cannot preserve.")
-    return {"format": "jpeg", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported))}
+    return {"format": "jpeg", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported)), "bytes_read": reader.count}
 
 
-def _png_metadata_inventory(data: bytes) -> dict[str, object]:
+def _png_metadata_inventory(stream) -> dict[str, object]:
+    if isinstance(stream, (bytes, bytearray)):
+        stream = BytesIO(stream)
     signature = b"\x89PNG\r\n\x1a\n"
     recognized = []
     unsupported = []
-    if not data.startswith(signature):
-        return {"format": "png", "recognized": [], "unsupported": ["Source is not a valid PNG file."]}
-    index = len(signature)
-    while index + 12 <= len(data):
-        length = int.from_bytes(data[index:index + 4], "big")
-        kind = data[index + 4:index + 8]
-        end = index + 12 + length
-        if end > len(data):
+    reader = _CountingReader(stream)
+    if reader.read(len(signature)) != signature:
+        return {"format": "png", "recognized": [], "unsupported": ["Source is not a valid PNG file."], "bytes_read": reader.count}
+    while True:
+        header = reader.read(8)
+        if len(header) != 8:
+            break
+        length = int.from_bytes(header[:4], "big")
+        kind = header[4:8]
+        if length > 64 * 1024 * 1024:
+            unsupported.append("PNG contains a truncated ancillary chunk.")
+            break
+        if kind == b"IDAT":
+            if not _skip(reader, length):
+                unsupported.append("PNG contains a truncated image-data chunk.")
+                break
+            if len(reader.read(4)) != 4:
+                unsupported.append("PNG contains a truncated image-data chunk.")
+                break
+            continue
+        payload_size = min(length, 4096)
+        payload = reader.read(payload_size)
+        if len(payload) != payload_size:
+            unsupported.append("PNG contains a truncated ancillary chunk.")
+            break
+        if length > len(payload) and not _skip(reader, length - len(payload)):
+            unsupported.append("PNG contains a truncated ancillary chunk.")
+            break
+        if len(reader.read(4)) != 4:
             unsupported.append("PNG contains a truncated ancillary chunk.")
             break
         if kind == b"eXIf":
@@ -134,7 +169,6 @@ def _png_metadata_inventory(data: bytes) -> dict[str, object]:
         elif kind == b"iCCP":
             recognized.append("ICC")
         elif kind == b"iTXt":
-            payload = data[index + 8:index + 8 + length]
             if payload.startswith(b"XML:com.adobe.xmp\x00"):
                 recognized.append("XMP")
             else:
@@ -147,10 +181,78 @@ def _png_metadata_inventory(data: bytes) -> dict[str, object]:
             unsupported.append("PNG contains physical-pixel metadata that the current JXL replacement path cannot preserve.")
         elif kind[0] & 0x20 and kind not in {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"}:
             unsupported.append(f"PNG contains unsupported ancillary chunk {kind.decode('latin1', errors='replace')}.")
-        index = end
         if kind == b"IEND":
             break
-    return {"format": "png", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported))}
+    return {"format": "png", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported)), "bytes_read": reader.count}
+
+
+class _CountingReader:
+    def __init__(self, stream):
+        self.stream = stream
+        self.count = 0
+
+    def read(self, size=-1):
+        value = self.stream.read(size)
+        self.count += len(value)
+        return value
+
+
+def _skip(reader: _CountingReader, length: int) -> bool:
+    try:
+        reader.stream.seek(length, 1)
+        return len(reader.stream.read(0)) == 0
+    except (OSError, AttributeError):
+        remaining = length
+        while remaining:
+            chunk = reader.read(min(1024 * 1024, remaining))
+            if not chunk:
+                return False
+            remaining -= len(chunk)
+        return True
+
+
+def _classify_app2(payload: bytes, recognized: list[str], unsupported: list[str]) -> None:
+    if payload.startswith(b"MPF\x00"):
+        count = _mpf_image_count(payload)
+        if count == 1:
+            unsupported.append("JPEG contains single-image MPF metadata that the current JXL replacement path cannot preserve.")
+        elif count is not None:
+            unsupported.append(f"JPEG contains MPF multi-picture data with {count} images; replacement would discard the associated image.")
+        else:
+            unsupported.append("JPEG contains MPF multi-picture metadata with an unknown image count.")
+        return
+    if payload.startswith((b"FPXR", b"FPXR\x00")):
+        unsupported.append("JPEG contains FlashPix APP2 metadata that the current JXL replacement path cannot preserve.")
+        return
+    unsupported.append(f"Unsupported JPEG APP2 metadata (signature {_safe_signature(payload)}, {len(payload)} bytes).")
+
+
+def _mpf_image_count(payload: bytes) -> int | None:
+    tiff = payload[4:]
+    if len(tiff) < 8 or tiff[:2] not in {b"II", b"MM"}:
+        return None
+    order = "little" if tiff[:2] == b"II" else "big"
+    if int.from_bytes(tiff[2:4], order) != 42:
+        return None
+    offset = int.from_bytes(tiff[4:8], order)
+    if offset + 2 > len(tiff):
+        return None
+    count = int.from_bytes(tiff[offset:offset + 2], order)
+    for index in range(count):
+        entry = offset + 2 + index * 12
+        if entry + 12 > len(tiff):
+            return None
+        tag = int.from_bytes(tiff[entry:entry + 2], order)
+        if tag == 0xB001:
+            value = int.from_bytes(tiff[entry + 8:entry + 12], order)
+            return value if value > 0 else None
+    return None
+
+
+def _safe_signature(payload: bytes) -> str:
+    value = payload.split(b"\x00", 1)[0][:24]
+    printable = bytes(character if 32 <= character < 127 else ord("?") for character in value)
+    return f'"{printable.decode("ascii", errors="replace") or "unknown"}"'
 
 
 def encode(source: Path, output: Path, profile: dict[str, object], temp_dir: Path) -> dict[str, object]:

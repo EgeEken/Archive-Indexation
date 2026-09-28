@@ -13,7 +13,7 @@ from pathlib import Path
 from archive_index.file_management import build_dry_run_plan, list_profiles, save_ruleset
 from archive_index.file_management_executor import cancel_execution, get_execution, prepare_execution, start_execution
 from archive_index.indexing.scanner import scan
-from archive_index.media.av1 import _timing_is_cfr, analyze_source, build_command, capped_dimensions, source_blocker
+from archive_index.media.av1 import _timing_is_cfr, analyze_source, build_command, capped_dimensions, source_blocker, source_blocker_from_info
 from archive_index.workspace import Workspace
 
 
@@ -89,6 +89,33 @@ class Phase10CAV1Tests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, json.dumps({"frames": frames}), "")
         with patch("archive_index.media.av1.subprocess.run", return_value=result):
             self.assertFalse(_timing_is_cfr(self.root / "clip.mp4", {}, 3.0, Fraction(30, 1)))
+
+    def test_timing_probe_uses_one_ffprobe_process(self):
+        frames = [{"best_effort_timestamp_time": str(index / 30), "pkt_duration_time": str(1 / 30)} for index in range(20)]
+        result = subprocess.CompletedProcess([], 0, json.dumps({"frames": frames}), "")
+        with patch("archive_index.media.av1.subprocess.run", return_value=result) as probe:
+            self.assertTrue(_timing_is_cfr(self.root / "clip.mp4", {}, 3.0, Fraction(30, 1)))
+        self.assertEqual(probe.call_count, 1)
+
+    def test_extra_stream_blocker_identifies_codec(self):
+        info = {
+            "width": 640, "height": 360, "duration": 3.0, "fps": Fraction(24, 1),
+            "ancillary": [{"codec_type": "data", "codec_name": "gpmd", "codec_tag_string": "gpmd"}],
+            "audio": [], "color_transfer": "bt709", "pix_fmt": "yuv420p", "bits_per_raw_sample": 8,
+            "timing_cfr": True, "format_tags": {}, "video_tags": {}, "video": {"tags": {}}, "chapters": [],
+        }
+        reason = source_blocker_from_info(info, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}})
+        self.assertEqual(reason, "Unsupported data stream: gpmd.")
+
+    def test_quicktime_timecode_remains_precisely_blocked_for_mp4_output(self):
+        info = {
+            "width": 640, "height": 360, "duration": 3.0, "fps": Fraction(24, 1),
+            "ancillary": [{"codec_type": "data", "codec_name": None, "codec_tag_string": "tmcd"}],
+            "audio": [], "color_transfer": "bt709", "pix_fmt": "yuv420p", "bits_per_raw_sample": 8,
+            "timing_cfr": True, "format_tags": {}, "video_tags": {}, "video": {"tags": {}}, "chapters": [],
+        }
+        reason = source_blocker_from_info(info, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}})
+        self.assertEqual(reason, "Unsupported data stream: tmcd.")
 
     def test_real_irregular_timestamps_are_blocked(self):
         source = self.root / "vfr.mp4"

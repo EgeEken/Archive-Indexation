@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import tempfile
 import time
 import unittest
@@ -14,13 +15,13 @@ from PIL import ImageCms
 from PIL.TiffImagePlugin import IFDRational
 
 from archive_index.api.browser import physical_rows
-from archive_index.file_management import build_dry_run_plan, list_profiles, list_rulesets, save_ruleset
+from archive_index.file_management import build_dry_run_plan, list_profiles, list_rulesets, save_ruleset, start_plan_analysis, plan_analysis_status
 from archive_index.file_management_executor import get_execution, prepare_execution, start_execution
 from archive_index.file_management_provenance import link_managed_derivatives
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
 from archive_index.media.jpegxl import decode, encode
-from archive_index.media.jpegxl_tools import encode as encode_archival_jxl, metadata_contract, metadata_replacement_blocker, validate as validate_archival_jxl
+from archive_index.media.jpegxl_tools import encode as encode_archival_jxl, metadata_contract, metadata_inventory, metadata_replacement_blocker, validate as validate_archival_jxl
 from archive_index.workspace import Workspace
 
 
@@ -162,6 +163,99 @@ class Phase10CCompressionTests(unittest.TestCase):
         operation = next(item for item in plan["operations"] if item["source_relative_path"] == "photo.jpg")
         self.assertFalse(operation["blockers"])
         self.assertEqual(plan["summary"]["compress"]["file_count"], 1)
+
+    def test_repeated_plan_reuses_cached_jxl_source_analysis(self):
+        profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="cached-plan",
+            rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
+        )
+        with patch("archive_index.compression_analysis.metadata_inventory", wraps=metadata_inventory) as inventory:
+            build_dry_run_plan(self.workspace, ruleset["id"])
+            build_dry_run_plan(self.workspace, ruleset["id"])
+        self.assertEqual(inventory.call_count, 1)
+
+    def test_source_change_invalidates_only_its_cached_analysis(self):
+        profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="cache-invalidation",
+            rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
+        )
+        with patch("archive_index.compression_analysis.metadata_inventory", wraps=metadata_inventory) as inventory:
+            build_dry_run_plan(self.workspace, ruleset["id"])
+            (self.root / "photo.jpg").write_bytes((self.root / "photo.jpg").read_bytes() + b"changed")
+            scan(self.workspace)
+            build_dry_run_plan(self.workspace, ruleset["id"])
+        self.assertEqual(inventory.call_count, 2)
+
+    def test_runtime_contract_change_invalidates_cached_analysis(self):
+        profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="runtime-invalidation",
+            rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
+        )
+        with patch("archive_index.compression_analysis.runtime_fingerprint", side_effect=["runtime-a", "runtime-b"]), patch("archive_index.compression_analysis.metadata_inventory", wraps=metadata_inventory) as inventory:
+            build_dry_run_plan(self.workspace, ruleset["id"])
+            build_dry_run_plan(self.workspace, ruleset["id"])
+        self.assertEqual(inventory.call_count, 2)
+
+    def test_review_freezes_completed_analysis_without_rebuilding_plan(self):
+        profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="review-session",
+            rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep", "destination_dir": "derivatives"}}],
+        )
+        session_id = start_plan_analysis(self.workspace, ruleset["id"])
+        for _ in range(200):
+            status = plan_analysis_status(self.workspace, session_id)
+            if status["status"] == "complete":
+                break
+            time.sleep(0.01)
+        self.assertEqual(status["status"], "complete")
+        plan = status["result"]
+        with patch("archive_index.file_management_executor.build_dry_run_plan", side_effect=AssertionError("review rebuilt the plan")):
+            execution = prepare_execution(self.workspace, ruleset["id"], plan["plan_digest"], session_id)
+        self.assertEqual(execution["status"], "draft")
+
+    def test_streaming_metadata_inventory_stops_before_jpeg_scan_data(self):
+        source = self.root / "large.jpg"
+        original = (self.root / "photo.jpg").read_bytes()
+        payload = b"UNKNOWN-APP2" + b"x" * 100
+        segment = b"\xff\xe2" + (len(payload) + 2).to_bytes(2, "big") + payload
+        source.write_bytes(original[:2] + segment + original[2:] + b"x" * (20 * 1024 * 1024))
+        inventory = metadata_inventory(source)
+        self.assertIn("APP2", inventory["unsupported"][0])
+        self.assertLess(inventory["bytes_read"], source.stat().st_size // 100)
+
+    def test_app2_classification_reports_mpf_and_unknown_signatures(self):
+        source = self.root / "app2.jpg"
+        original = (self.root / "photo.jpg").read_bytes()
+        mpf = b"MPF\x00MM\x00*\x00\x00\x00\x08\x00\x01\xb0\x01\x00\x04\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00"
+        segment = b"\xff\xe2" + (len(mpf) + 2).to_bytes(2, "big") + mpf
+        source.write_bytes(original[:2] + segment + original[2:])
+        reason = metadata_replacement_blocker(source)
+        self.assertIn("MPF multi-picture", reason)
+        unknown = self.root / "unknown-app2.jpg"
+        payload = b"CAMERA-BLOB" + b"x" * 4
+        segment = b"\xff\xe2" + (len(payload) + 2).to_bytes(2, "big") + payload
+        unknown.write_bytes(original[:2] + segment + original[2:])
+        reason = metadata_replacement_blocker(unknown)
+        self.assertIn("Unsupported JPEG APP2 metadata", reason)
+        self.assertIn("CAMERA-BLOB", reason)
+
+    def test_streaming_png_inventory_skips_large_idat_payload(self):
+        source = self.root / "large.png"
+        def chunk(kind, payload):
+            import zlib
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)) + chunk(b"IDAT", b"x" * (20 * 1024 * 1024)) + chunk(b"IEND", b"")
+        source.write_bytes(data)
+        inventory = metadata_inventory(source)
+        self.assertLess(inventory["bytes_read"], source.stat().st_size // 100)
 
     def test_stale_source_fails_without_writing_derivative(self):
         profile = next(profile for profile in list_profiles(self.workspace) if profile["name"] == "JXL Balanced")
