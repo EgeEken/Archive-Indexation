@@ -1,4 +1,4 @@
-let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false, planSession: null, planToken: 0, planTimer: null, plan: null, execution: null, executionTimer: null};
+let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false, planSession: null, analysisSession: null, planToken: 0, planTimer: null, plan: null, execution: null, executionTimer: null};
 
 const assetSelectors = [["all", "All"], ["selected", "Selected"], ["undecided", "Undecided"], ["rejected", "Rejected"]];
 const representationSelectors = [["all", "All"], ["raw", "RAW"], ["conventional-image", "JPEG/PNG"], ["jpeg", "JPEG"], ["png", "PNG"], ["jxl", "JXL"], ["avif", "AVIF"], ["webp", "WebP"], ["video", "Video"]];
@@ -17,6 +17,7 @@ function clearDraftReview() {
     const id = fileManagement.execution.id;
     fileManagement.execution = null;
     fileManagement.plan = null;
+    fileManagement.analysisSession = null;
     stopExecutionPolling();
     if (id) void api(`/api/file-management/executions/${encodeURIComponent(id)}/discard`, {method: "POST", headers: {"Content-Type": "application/json"}}).catch(() => {});
     if ($("file-management-execution-panel")) { $("file-management-execution-panel").innerHTML = ""; $("file-management-execution-panel").classList.add("hidden"); }
@@ -30,7 +31,8 @@ function renderPlanProgress(session) {
   const progress = panel.querySelector("[data-plan-progress]");
   progress.max = Math.max(1, Number(session.total || 0));
   progress.value = Math.min(progress.max, Number(session.completed || 0));
-  const count = session.total ? `${Number(session.completed || 0).toLocaleString()} / ${Number(session.total).toLocaleString()} files` : "Preparing indexed files";
+  const unit = /compression|video|JPEG XL/i.test(session.phase || "") ? "sources" : "files";
+  const count = session.total ? `${Number(session.completed || 0).toLocaleString()} / ${Number(session.total).toLocaleString()} ${unit}` : "Preparing indexed files";
   panel.querySelector("[data-plan-progress-detail]").textContent = `${count} · ${Number(session.elapsed_seconds || 0).toFixed(1)} s elapsed`;
   panel.querySelector("[data-plan-cancel]").classList.toggle("hidden", session.status !== "running");
 }
@@ -196,6 +198,7 @@ async function saveDraftRuleset(name = "Custom Ruleset", {forceNew = false} = {}
 
 async function loadFileManagementPlan() {
   await cancelFileManagementPlan();
+  fileManagement.analysisSession = null;
   const token = fileManagement.planToken;
   renderPlanProgress({status: "running", phase: "Loading indexed files", completed: 0, total: 0, elapsed_seconds: 0});
   try {
@@ -208,7 +211,7 @@ async function loadFileManagementPlan() {
       const session = await api(`/api/file-management/plan/status?session_id=${encodeURIComponent(started.session_id)}`);
       if (token !== fileManagement.planToken) return;
       renderPlanProgress(session);
-      if (session.status === "complete") { fileManagement.planSession = null; renderFileManagementPlan(session.result); return; }
+      if (session.status === "complete") { fileManagement.planSession = null; fileManagement.analysisSession = started.session_id; renderFileManagementPlan(session.result); return; }
       if (session.status === "failed") { fileManagementStatus(`Plan analysis failed: ${session.error}`, true); return; }
       if (session.status === "cancelled") { renderPlanProgress(session); $("file-management-plan-progress").querySelector("[data-plan-phase]").textContent = "Analysis cancelled"; return; }
       await new Promise(resolve => { fileManagement.planTimer = setTimeout(resolve, 200); });
@@ -260,6 +263,7 @@ function noExecutionExplanation(summary) {
 }
 function renderFileManagementPlan(data) {
   fileManagement.plan = data;
+  fileManagement.analysisSession = data.analysis_session_id || fileManagement.analysisSession;
   const summary = data.summary || {};
   const cards = [["DELETE", summary.delete, "bytes"], ["COMPRESS", summary.compress, "source_bytes"], ["COPY", summary.copy, "bytes_added"], ["MOVE", summary.move, "bytes_moved"]].filter(([, value]) => Number(value?.candidate_file_count ?? value?.file_count ?? 0) > 0);
   const delta = Number(summary.estimated_storage_delta_bytes || 0);
@@ -268,14 +272,14 @@ function renderFileManagementPlan(data) {
   const afterPlan = currentFree == null ? null : Number(currentFree) - delta;
   $("file-management-plan-summary").innerHTML = `<div class="plan-summary-grid">${cards.map(([label, value, bytes]) => { const storageDelta = Number(value?.estimated_storage_delta_bytes || 0); const count = Number(value?.candidate_file_count ?? value?.file_count ?? 0); const amount = label === "COMPRESS" ? `${formatBytes(value?.candidate_source_bytes || value?.source_bytes || 0)} → ${formatBytes(value?.candidate_estimated_output_bytes || value?.estimated_output_bytes || 0)}` : formatBytes(value?.[`candidate_${bytes}`] ?? value?.[bytes] ?? 0); const deltaLine = storageDelta ? `<em class="${storageDelta < 0 ? "storage-free" : "storage-add"}">Executable change ${storageDelta < 0 ? "−" : "+"}${formatBytes(Math.abs(storageDelta))}</em>` : ""; return `<article class="plan-card"><strong>${label}</strong><span>${count.toLocaleString()} planned ${count === 1 ? "file" : "files"}</span><small>${amount}</small><small class="plan-card-status">${escapeHtml(planGroupStatus(value))}</small>${deltaLine}</article>`; }).join("")}</div><div class="plan-summary-callouts"><span>${deltaLabel}</span><span>Temporary space upper bound <strong>${formatBytes(summary.temporary_space_upper_bound_bytes || 0)}</strong></span>${afterPlan == null ? `<span aria-label="Current free disk space">Free disk space <strong>${formatDiskSpace(currentFree)}</strong></span>` : `<span aria-label="Current free disk space → Estimated free disk space after plan">Free disk space <strong>${formatDiskSpace(currentFree)}</strong> <span class="free-space-arrow" aria-hidden="true">→</span> <strong>${formatDiskSpace(afterPlan)}</strong></span>`}<span>Logical assets with no remaining archive representation <strong>${Number(summary.assets_with_no_surviving_representation || 0).toLocaleString()}</strong></span></div>`;
   const blockers = data.blockers || summary.capability_blockers || [];
-  $("file-management-plan-blockers").innerHTML = blockers.length ? `<section class="plan-blockers"><h3>Plan blockers</h3>${blockers.map(blocker => `<article class="plan-blocker"><strong>${escapeHtml(blocker.profile_name || "Capability")}</strong><span>${escapeHtml(blocker.reason)}</span><small>${Number(blocker.affected_count || 0).toLocaleString()} planned ${Number(blocker.affected_count || 0) === 1 ? "operation" : "operations"} affected.</small></article>`).join("")}</section>` : "";
+  $("file-management-plan-blockers").innerHTML = blockers.length ? `<section class="plan-blockers"><h3>Plan blockers</h3>${blockers.map(blocker => { const files = blocker.filenames || []; return `<article class="plan-blocker"><strong>${escapeHtml(blocker.profile_name || "Capability")}</strong><span>${escapeHtml(blocker.reason)}</span><small>${Number(blocker.affected_count || 0).toLocaleString()} planned ${Number(blocker.affected_count || 0) === 1 ? "operation" : "operations"} affected.</small>${files.length ? `<details><summary>View ${Number(blocker.affected_count || 0).toLocaleString()} affected files</summary><small>${files.map(filename => escapeHtml(filename)).join(" · ")}${Number(blocker.affected_count || 0) > files.length ? " · …" : ""}</small></details>` : ""}</article>`; }).join("")}</section>` : "";
   $("file-management-plan-conflicts").innerHTML = data.conflicts?.length ? `<section class="plan-conflicts"><h3>${data.conflicts.length} conflicts must be resolved</h3>${data.conflicts.map(conflict => `<article class="plan-conflict"><strong>${escapeHtml(conflict.filename || "File")}</strong><span>${escapeHtml(conflict.source_relative_path || "")}${conflict.target_relative_path ? ` → ${escapeHtml(conflict.target_relative_path)}` : ""}</span><p>${escapeHtml(conflict.reason)}</p><small>Rule ${escapeHtml(conflict.rule_id || "")}</small></article>`).join("")}</section>` : `<p class="plan-ok">No conflicts detected.</p>`;
   const operations = data.operations || [];
   $("file-management-plan-details").innerHTML = ["delete", "compress", "copy", "move"].map(operation => { const rows = operations.filter(item => item.operation === operation); return rows.length ? renderPlanOperationGroup(operation, rows) : ""; }).join("");
   bindPlanOperationDetails(data);
   $("file-management-plan-note").textContent = data.executor?.message || "";
   const executable = (data.operations || []).some(item => ["copy", "compress", "move", "delete"].includes(item.operation) && !item.conflicts?.length && !item.blockers?.length && !["already_satisfied", "skipped"].includes(item.destination_status));
-  $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Execution will revalidate this plan before creating a frozen snapshot.</small></div>` : `<p class="muted" data-no-execution>${escapeHtml(noExecutionExplanation(summary))}</p>`;
+  $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Review freezes this completed analysis after lightweight stale-state checks.</small></div>` : `<p class="muted" data-no-execution>${escapeHtml(noExecutionExplanation(summary))}</p>`;
   $("file-management-execution-panel").classList.remove("hidden");
   $("file-management-execution-panel").querySelector("[data-review-execution]")?.addEventListener("click", () => { void prepareFileManagementExecution(); });
 }
@@ -345,9 +349,9 @@ async function pollFileManagementExecution() {
 async function prepareFileManagementExecution() {
   const panel = $("file-management-execution-panel");
   panel.classList.remove("hidden");
-  panel.innerHTML = `<section class="execution-review-busy" aria-busy="true"><h3>Preparing execution review…</h3><p class="muted">Rechecking the analyzed plan and freezing its safe operations.</p><progress></progress></section>`;
+  panel.innerHTML = `<section class="execution-review-busy" aria-busy="true"><h3>Freezing reviewed plan…</h3><p class="muted">Checking lightweight stale-state preconditions; codec analysis is reused from Analyze.</p><progress></progress></section>`;
   try {
-    const result = await api("/api/file-management/executions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ruleset_id: fileManagement.current, plan_digest: fileManagement.plan?.plan_digest})});
+    const result = await api("/api/file-management/executions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ruleset_id: fileManagement.current, plan_digest: fileManagement.plan?.plan_digest, analysis_session_id: fileManagement.analysisSession})});
     renderExecution(result.execution);
   } catch (error) {
     panel.innerHTML = `<section class="execution-review-actions"><p class="status error">${escapeHtml(error.message)}</p><button type="button" class="secondary" data-review-execution>Review execution</button></section>`;
