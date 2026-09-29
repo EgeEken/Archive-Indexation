@@ -1865,7 +1865,9 @@ Production AV1 is enabled for a safe subset through FFmpeg `libsvtav1` only. The
 
 The explicit deletion invariant remains: indexing, browsing, and maintenance never delete source media; cleanup is not automatic for rejected or redundant files; an exact source may be deleted only by an explicitly reviewed and confirmed File Management operation after execution-time validation. Compression replacement deletion is allowed only after validated output finalization and a second frozen source fingerprint check. All mutation tests use disposable workspaces; no real archive is used.
 
-## Final Phase 10C safety-hardening checkpoint
+## Historical Phase 10C safety-hardening checkpoint (superseded)
+
+The strict metadata/VFR/ancillary blocker statements in this historical checkpoint were superseded by the Phase 10C planning-performance and lossy-preservation corrections below. The later sections are authoritative.
 
 The schema remains version 29. Production JPEG XL source replacement uses the pinned official libjxl 0.12.0 command-line runtime and now has a fail-closed source metadata inventory. JPEG APP0/JFIF, APP14/Adobe, ICC APP2, EXIF, and standard XMP are recognized; MPF, FlashPix, IPTC/Photoshop APP13, JPEG comments, Extended XMP, unknown APP markers, unsupported PNG text/color/physical-pixel ancillary chunks, and malformed metadata block destructive replacement with a specific planner message. Orientation-tagged JPEGs are physically normalized by the libjxl path and their output EXIF orientation is validated as identity while required EXIF semantics remain. Non-sRGB RGB ICC profiles are validated by color-managed source/output comparison when the runtime preserves them. Keep-source remains separately available under its existing source-retained contract. AVIF remains preview-only.
 
@@ -1892,3 +1894,13 @@ Plan analysis does not perform deep AV1 timing proof. For an uncached AV1 source
 Review execution freezes the immutable completed server-side analysis session and validates ruleset/profile snapshots, indexed source fingerprints, source stats, and reviewed target stats without rebuilding the plan or repeating codec analysis. Execution still rechecks source hashes and target safety immediately before mutation.
 
 Plan progress uses phase-specific denominators and current filenames. Codec inspection phases are distinct from target conflict resolution, and the progress bar is display-only. AV1 timing preflight is shown as a per-operation execution stage. AVIF remains preview-only; JXL and AV1 mutation safety contracts are unchanged.
+
+## Phase 10C lossy preservation policy
+
+Compression uses a small hard-preservation contract and an explicit best-effort preservation report. Hard requirements are display resolution within the selected cap, non-increasing source timing/FPS semantics, separate preservation of every audio track, preservation of every subtitle track in-container or as a validated managed sidecar, correct orientation, sane duration/timestamps, and decodable validated output. Metadata, auxiliary images, chroma conversion, deliberate bit-depth changes, HDR presentation changes, timecode, telemetry, and other nonessential ancillary data are reported as preserved, changed, or lost; they do not become generic blockers. Unknown or unsupported subtitle streams remain blockers when no safe in-container or sidecar path exists.
+
+Schema version 30 adds `file_management_execution_operation.preservation_report_json`. The report is frozen with the analyzed operation, persisted in the execution row, copied into managed-derivative metadata provenance, and shown in compact expandable Plan/Review details. JPEG XL MPF, unknown APP2, comments, APP13, and unsupported PNG ancillary metadata are classified as explicit losses unless the source is malformed or otherwise fails a hard source-integrity check. MPF auxiliary images are not silently ignored and are no longer replacement blockers by themselves.
+
+Production AV1 accepts validated 8-bit and 10-bit SDR/HDR-capable pixel inputs, converts supported 4:2:2/4:4:4 sources to AV1 4:2:0, preserves VFR when the profile does not cap it, and applies only explicit resolution/FPS caps. Audio streams are mapped individually, copying compatible codecs and transcoding incompatible audio to AAC rather than dropping it. Text subtitles are copied or converted to `mov_text`; unsupported subtitle streams remain blocked. Data/attachment streams such as `tmcd` and camera telemetry are mapped into the preservation report as losses when the MP4 contract cannot carry them. AVIF remains preview-only.
+
+File Management Plan summaries distinguish immediately executable operations from pending AV1 preflight work. Preflight rows are not counted twice, and opening File Management does not display an old draft review as if it belonged to the current analysis session. Review still freezes only the current immutable analysis session and digest.
