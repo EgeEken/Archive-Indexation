@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -796,6 +796,9 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX IF NOT EXISTS compression_source_analysis_lookup_idx ON compression_source_analysis(codec, analysis_contract_version, runtime_fingerprint, source_sha256, source_size_bytes, source_mtime_ns)",
     ),
+    30: (
+        "ALTER TABLE file_management_execution_operation ADD COLUMN preservation_report_json TEXT NOT NULL DEFAULT '{}'",
+    ),
 }
 
 
@@ -829,6 +832,8 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 if version == 26 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
                     continue
                 if version == 28 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
+                    continue
+                if version == 30 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
                     continue
                 if (
                     version == 8

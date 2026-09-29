@@ -87,7 +87,7 @@ def av1_capability() -> dict[str, object]:
             "production_ready": True,
             "encoders": capability["av1_encoders"],
             "encoder": "libsvtav1",
-            "message": "Production AV1 is available for the validated SDR single-video safe subset.",
+            "message": "Production AV1 is available for the validated single-video 8/10-bit subset with explicit timing and stream preservation checks.",
         }
     return {
         "available": bool(capability["ffmpeg_available"]),

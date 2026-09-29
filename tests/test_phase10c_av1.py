@@ -14,7 +14,7 @@ from pathlib import Path
 from archive_index.file_management import build_dry_run_plan, list_profiles, save_ruleset
 from archive_index.file_management_executor import cancel_execution, get_execution, prepare_execution, start_execution
 from archive_index.indexing.scanner import scan
-from archive_index.media.av1 import ProbeTimeoutError, _run_ffprobe, _timing_is_cfr, analyze_source, build_command, capped_dimensions, source_blocker, source_blocker_from_info
+from archive_index.media.av1 import ProbeTimeoutError, _run_ffprobe, _timing_is_cfr, analyze_source, build_command, capped_dimensions, preservation_report, source_blocker, source_blocker_from_info
 from archive_index.workspace import Workspace
 
 
@@ -165,27 +165,31 @@ class Phase10CAV1Tests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_extra_stream_blocker_identifies_codec(self):
+    def test_extra_stream_is_reported_without_blocking_lossy_output(self):
         info = {
             "width": 640, "height": 360, "duration": 3.0, "fps": Fraction(24, 1),
             "ancillary": [{"codec_type": "data", "codec_name": "gpmd", "codec_tag_string": "gpmd"}],
             "audio": [], "color_transfer": "bt709", "pix_fmt": "yuv420p", "bits_per_raw_sample": 8,
             "timing_cfr": True, "format_tags": {}, "video_tags": {}, "video": {"tags": {}}, "chapters": [],
         }
-        reason = source_blocker_from_info(info, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}})
-        self.assertEqual(reason, "Unsupported data stream: gpmd.")
+        profile = {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}
+        self.assertIsNone(source_blocker_from_info(info, profile))
+        report = preservation_report(info, {**info, "width": 640, "height": 360, "pix_fmt": "yuv420p", "ancillary": []}, profile)
+        self.assertTrue(any(item["kind"] == "data_stream" and "gpmd" in item["message"] for item in report["lost"]))
 
-    def test_quicktime_timecode_remains_precisely_blocked_for_mp4_output(self):
+    def test_quicktime_timecode_is_reported_without_blocking_lossy_output(self):
         info = {
             "width": 640, "height": 360, "duration": 3.0, "fps": Fraction(24, 1),
             "ancillary": [{"codec_type": "data", "codec_name": None, "codec_tag_string": "tmcd"}],
             "audio": [], "color_transfer": "bt709", "pix_fmt": "yuv420p", "bits_per_raw_sample": 8,
             "timing_cfr": True, "format_tags": {}, "video_tags": {}, "video": {"tags": {}}, "chapters": [],
         }
-        reason = source_blocker_from_info(info, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}})
-        self.assertEqual(reason, "Unsupported data stream: tmcd.")
+        profile = {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}
+        self.assertIsNone(source_blocker_from_info(info, profile))
+        report = preservation_report(info, {**info, "width": 640, "height": 360, "pix_fmt": "yuv420p", "ancillary": []}, profile)
+        self.assertTrue(any(item["kind"] == "data_stream" and "tmcd" in item["message"] for item in report["lost"]))
 
-    def test_real_irregular_timestamps_are_blocked(self):
+    def test_real_irregular_timestamps_are_preserved_as_vfr(self):
         source = self.root / "vfr.mp4"
         subprocess.run(
             [
@@ -198,7 +202,7 @@ class Phase10CAV1Tests(unittest.TestCase):
         )
         info = analyze_source(source)
         self.assertFalse(info["timing_cfr"])
-        self.assertIn("frame timing", source_blocker(source, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}))
+        self.assertIsNone(source_blocker(source, {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}))
 
     def test_cancelled_encode_keeps_source_and_removes_owned_temp(self):
         profile = next(item for item in list_profiles(self.workspace) if item["name"] == "AV1 1080p60 Very Fast")

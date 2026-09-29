@@ -130,8 +130,6 @@ def source_blocker(source: Path) -> str | None:
         with Image.open(source) as image:
             if image.mode not in {"RGB", "RGBA"}:
                 return "Production JPEG XL supports 8-bit RGB and RGBA JPEG/PNG sources only."
-            if image.info.get("icc_profile"):
-                return JXL_ICC_BLOCKER
     except Exception as error:
         return f"Source cannot be read by production JPEG XL: {error}"
     return None
@@ -147,11 +145,11 @@ def source_replacement_blocker(source: Path) -> str | None:
     capability = production_capability()
     if not capability.get("source_replacement_available"):
         return JXL_SOURCE_REPLACEMENT_BLOCKER
-    from .jpegxl_tools import metadata_replacement_blocker
+    from .jpegxl_tools import metadata_inventory
 
-    metadata_issue = metadata_replacement_blocker(source)
-    if metadata_issue:
-        return metadata_issue
+    inventory = metadata_inventory(source)
+    if inventory.get("hard_blockers"):
+        return str(inventory["hard_blockers"][0])
     return None
 
 

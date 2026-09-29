@@ -15,6 +15,7 @@ AV1_ALGORITHM = "ffmpeg-libsvtav1-archival"
 AV1_ALGORITHM_VERSION = "2"
 AV1_SUPPORTED_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v", ".mkv"})
 AV1_AUDIO_CODECS = frozenset({"aac", "alac", "mp3", "ac3", "eac3"})
+AV1_TEXT_SUBTITLE_CODECS = frozenset({"mov_text", "subrip", "srt", "ass", "ssa", "webvtt"})
 AV1_HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67", "bt2020-10", "bt2020-12"})
 PLAN_METADATA_TIMEOUT_SECONDS = 2.5
 EXECUTION_PREFLIGHT_TIMEOUT_SECONDS = 15.0
@@ -132,23 +133,17 @@ def source_blocker(source: Path, profile: dict[str, object] | None) -> str | Non
 def source_blocker_from_info(info: dict[str, object], profile: dict[str, object] | None, *, require_timing: bool = True) -> str | None:
     if not info.get("width") or not info.get("height") or not info.get("duration") or not info.get("fps"):
         return "Video dimensions, duration, and frame rate must be known for AV1 execution."
-    unsupported = [stream for stream in info.get("ancillary") or [] if not _ancillary_supported(stream)]
+    unsupported = [stream for stream in info.get("ancillary") or [] if stream.get("codec_type") == "subtitle" and not _ancillary_supported(stream)]
     if unsupported:
         descriptions = ", ".join(_ancillary_description(stream) for stream in unsupported[:3])
         suffix = f"; {len(unsupported) - 3} more" if len(unsupported) > 3 else ""
-        return f"{descriptions}{suffix}."
-    for stream in info.get("audio") or []:
-        if stream.get("codec_name") not in AV1_AUDIO_CODECS:
-            return f"Audio codec {stream.get('codec_name') or 'unknown'} is not safe to stream-copy into MP4."
-    if info.get("color_transfer") in AV1_HDR_TRANSFERS:
-        return "HDR/PQ/HLG video is not yet supported for AV1 archival replacement."
-    if info.get("pix_fmt") not in {"yuv420p", "yuvj420p"} or int(info.get("bits_per_raw_sample") or 8) > 8:
-        return "Only validated 8-bit SDR video is currently supported for AV1 archival replacement."
-    if require_timing and info.get("timing_cfr") is not True:
-        return "Video frame timing could not be proven constant-frame-rate."
-    metadata_issue = _metadata_blocker(info)
-    if metadata_issue:
-        return metadata_issue
+        return f"{descriptions}{suffix} cannot be preserved in the MP4 output."
+    if _source_bit_depth(info) > 10:
+        return "Video bit depth above 10-bit is not supported by the production AV1 contract."
+    if not _supported_video_pixel_format(info.get("pix_fmt")):
+        return f"Video pixel format {info.get('pix_fmt') or 'unknown'} cannot be converted safely to AV1 4:2:0."
+    if require_timing and info.get("timing_cfr") is None:
+        return "Video frame timing could not be determined safely."
     settings = profile_settings(profile)
     if float(info.get("fps") or 0) <= 0 or float(settings["fps_cap"]) <= 0:
         return "Video frame rate is invalid for AV1 execution."
@@ -178,6 +173,7 @@ def capped_dimensions(info: dict[str, object], profile: dict[str, object] | None
 def build_command(source: Path, output: Path, info: dict[str, object], profile: dict[str, object] | None) -> list[str]:
     settings = profile_settings(profile)
     width, height = capped_dimensions(info, profile)
+    pixel_format = output_pixel_format(info)
     filters = []
     if (width, height) != (int(info["width"]), int(info["height"])):
         filters.append(f"scale={width}:{height}:flags=lanczos")
@@ -187,15 +183,25 @@ def build_command(source: Path, output: Path, info: dict[str, object], profile: 
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-noautorotate", "-i", str(source),
         "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
         "-c:v", "libsvtav1", "-preset", str(settings["preset"]), "-crf", str(settings["crf"]),
-        "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
+        "-pix_fmt", pixel_format, "-fps_mode", "passthrough",
     ]
-    if any(stream["codec_type"] == "subtitle" and _ancillary_supported(stream) for stream in info.get("ancillary") or []):
+    audio_streams = info.get("audio") or []
+    for index, stream in enumerate(audio_streams):
+        if stream.get("codec_name") in AV1_AUDIO_CODECS:
+            arguments.extend([f"-c:a:{index}", "copy"])
+        else:
+            arguments.extend([f"-c:a:{index}", "aac", f"-b:a:{index}", "192k"])
+    subtitle_streams = [stream for stream in info.get("ancillary") or [] if stream.get("codec_type") == "subtitle"]
+    if subtitle_streams:
         arguments.extend(["-map", "0:s?", "-c:s", "copy"])
-    if any(stream["codec_type"] == "data" and _ancillary_supported(stream) for stream in info.get("ancillary") or []):
-        arguments.extend(["-map", "0:d?", "-c:d", "copy"])
+        for index, stream in enumerate(subtitle_streams):
+            codec = str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold()
+            arguments.extend([f"-c:s:{index}", "copy" if codec == "mov_text" else "mov_text"])
     if filters:
         arguments.extend(["-vf", ",".join(filters)])
-    arguments.extend(["-c:a", "copy"])
+    for key, option in (("color_primaries", "-color_primaries"), ("color_transfer", "-color_trc"), ("color_space", "-colorspace"), ("color_range", "-color_range")):
+        if info.get(key):
+            arguments.extend([option, str(info[key])])
     if int(info.get("rotation") or 0):
         arguments.extend(["-metadata:s:v:0", f"rotate={int(info['rotation'])}"])
     arguments.extend(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", "-f", "mp4", str(output)])
@@ -233,22 +239,24 @@ def encode(source: Path, output: Path, info: dict[str, object], profile: dict[st
 def validate(source: Path, output: Path, source_info: dict[str, object], profile: dict[str, object]) -> dict[str, object]:
     if not output.is_file() or output.stat().st_size <= 0:
         raise ValueError("AV1 encoder returned an empty output.")
-    output_info = analyze_source(output, deep_timing=False)
+    output_info = analyze_source(output, deep_timing=True, metadata_timeout=EXECUTION_PREFLIGHT_TIMEOUT_SECONDS, timing_timeout=EXECUTION_PREFLIGHT_TIMEOUT_SECONDS)
     _validate_output_contract(output_info, source_info, profile)
     _validate_samples(source, output, source_info, output_info)
+    report = preservation_report(source_info, output_info, profile)
     return {
         "size_bytes": output.stat().st_size,
         "sha256": _sha256(output),
         "source": metadata_summary(source_info),
         "output": metadata_summary(output_info),
-        "settings": profile_settings(profile),
+        "settings": {**profile_settings(profile), "pix_fmt": output_pixel_format(source_info)},
+        "preservation_report": report,
     }
 
 
 def validate_final(output: Path, source_info: dict[str, object], profile: dict[str, object], expected_sha256: str | None = None) -> dict[str, object]:
     if not output.is_file() or output.stat().st_size <= 0:
         raise ValueError("AV1 final output is unavailable.")
-    output_info = analyze_source(output, deep_timing=False)
+    output_info = analyze_source(output, deep_timing=True, metadata_timeout=EXECUTION_PREFLIGHT_TIMEOUT_SECONDS, timing_timeout=EXECUTION_PREFLIGHT_TIMEOUT_SECONDS)
     _validate_output_contract(output_info, source_info, profile)
     sha256 = _sha256(output)
     if expected_sha256 and sha256 != expected_sha256:
@@ -258,7 +266,8 @@ def validate_final(output: Path, source_info: dict[str, object], profile: dict[s
         "sha256": sha256,
         "source": metadata_summary(source_info),
         "output": metadata_summary(output_info),
-        "settings": profile_settings(profile),
+        "settings": {**profile_settings(profile), "pix_fmt": output_pixel_format(source_info)},
+        "preservation_report": preservation_report(source_info, output_info, profile),
     }
 
 
@@ -272,12 +281,13 @@ def _validate_output_contract(output_info: dict[str, object], source_info: dict[
         raise ValueError("AV1 output frame rate exceeded the source or profile cap.")
     if len(output_info["audio"]) != len(source_info["audio"]):
         raise ValueError("AV1 output did not preserve all supported audio tracks.")
-    if [stream.get("codec_name") for stream in output_info["audio"]] != [stream.get("codec_name") for stream in source_info["audio"]]:
-        raise ValueError("AV1 output audio stream codecs changed unexpectedly.")
     if _ancillary_contract(output_info.get("ancillary")) != _ancillary_contract(source_info.get("ancillary")):
         raise ValueError("AV1 output did not preserve supported ancillary streams.")
     if output_info["rotation"] != source_info["rotation"]:
         raise ValueError("AV1 output rotation metadata did not match the source.")
+    cap_applied = float(source_info["fps"]) > float(profile_settings(profile)["fps_cap"]) + 0.01
+    if source_info.get("timing_cfr") is False and output_info.get("timing_cfr") is True and not cap_applied:
+        raise ValueError("AV1 output changed variable source timing to constant frame rate unexpectedly.")
     expected_display_width = expected_width if output_info["rotation"] not in {90, 270} else expected_height
     expected_display_height = expected_height if output_info["rotation"] not in {90, 270} else expected_width
     if (output_info["display_width"], output_info["display_height"]) != (expected_display_width, expected_display_height):
@@ -286,24 +296,9 @@ def _validate_output_contract(output_info: dict[str, object], source_info: dict[
     output_duration = float(output_info["duration"] or 0)
     if not output_duration or abs(output_duration - source_duration) > max(0.25, source_duration * 0.02):
         raise ValueError("AV1 output duration did not match the source within tolerance.")
-    if output_info["pix_fmt"] not in {"yuv420p", "yuvj420p"} or output_info["bits_per_raw_sample"] > 8:
-        raise ValueError("AV1 output bit-depth or pixel format did not match the safe SDR contract.")
-    for key in ("color_transfer", "color_primaries", "color_space", "color_range"):
-        if source_info.get(key) and source_info[key] != output_info.get(key):
-            raise ValueError(f"AV1 output changed the source {key} contract.")
-    for source_audio, output_audio in zip(source_info["audio"], output_info["audio"]):
-        if _semantic_tags(source_audio.get("tags")) != _semantic_tags(output_audio.get("tags")):
-            raise ValueError("AV1 output changed audio metadata.")
-        if _stream_disposition(source_audio) != _stream_disposition(output_audio):
-            raise ValueError("AV1 output changed an audio stream disposition.")
-    if _stream_disposition(source_info["video"]) != _stream_disposition(output_info["video"]):
-        raise ValueError("AV1 output changed the video stream disposition.")
-    if _semantic_tags(source_info.get("format_tags")) != _semantic_tags(output_info.get("format_tags")):
-        raise ValueError("AV1 output changed supported container metadata.")
-    if _semantic_tags(source_info.get("video_tags")) != _semantic_tags(output_info.get("video_tags")):
-        raise ValueError("AV1 output changed supported video metadata.")
-    if _chapter_summary(source_info.get("chapters")) != _chapter_summary(output_info.get("chapters")):
-        raise ValueError("AV1 output changed chapter metadata.")
+    expected_pixel_format = output_pixel_format(source_info)
+    if output_info["pix_fmt"] not in {expected_pixel_format, "yuv420p", "yuv420p10le"} or output_info["bits_per_raw_sample"] > 10:
+        raise ValueError("AV1 output bit-depth or pixel format did not match the selected preservation contract.")
 
 
 def metadata_summary(info: dict[str, object]) -> dict[str, object]:
@@ -312,6 +307,61 @@ def metadata_summary(info: dict[str, object]) -> dict[str, object]:
     if isinstance(fps, Fraction):
         value["fps"] = f"{fps.numerator}/{fps.denominator}"
     return value
+
+
+def preservation_report(source_info: dict[str, object], output_info: dict[str, object], profile: dict[str, object] | None) -> dict[str, object]:
+    settings = profile_settings(profile)
+    report = {"preserved": [], "changed": [], "lost": [], "hard_blockers": []}
+    source_display = f"{source_info.get('display_width')}×{source_info.get('display_height')}"
+    output_display = f"{output_info.get('display_width')}×{output_info.get('display_height')}"
+    if source_display == output_display:
+        report["preserved"].append({"kind": "resolution", "severity": "info", "source": source_display, "output": output_display, "message": "Display resolution is preserved."})
+    else:
+        report["changed"].append({"kind": "resolution", "severity": "info", "source": source_display, "output": output_display, "message": "Resolution is reduced by the selected profile cap."})
+    source_fps = source_info.get("fps")
+    output_fps = output_info.get("fps")
+    if source_fps == output_fps or (source_fps and output_fps and float(source_fps) <= float(settings["fps_cap"]) and abs(float(source_fps) - float(output_fps)) < 0.02):
+        report["preserved"].append({"kind": "framerate", "severity": "info", "source": _fps_text(source_fps), "output": _fps_text(output_fps), "message": "Source timing is preserved."})
+    else:
+        report["changed"].append({"kind": "framerate", "severity": "info", "source": _fps_text(source_fps), "output": _fps_text(output_fps), "message": "Frame rate is reduced to the selected profile cap."})
+    source_pix = str(source_info.get("pix_fmt") or "unknown")
+    output_pix = str(output_info.get("pix_fmt") or output_pixel_format(source_info))
+    if "422" in source_pix or "444" in source_pix or source_pix != output_pix:
+        report["changed"].append({"kind": "chroma_subsampling", "severity": "info", "source": source_pix, "output": output_pix, "message": "Chroma/pixel format is converted for AV1."})
+    else:
+        report["preserved"].append({"kind": "pixel_format", "severity": "info", "source": source_pix, "output": output_pix, "message": "Pixel format is preserved within the AV1 contract."})
+    source_audio = source_info.get("audio") or []
+    output_audio = output_info.get("audio") or []
+    if len(source_audio) == len(output_audio):
+        report["preserved"].append({"kind": "audio_tracks", "severity": "info", "source": str(len(source_audio)), "output": str(len(output_audio)), "message": "Audio tracks remain separate."})
+    for left, right in zip(source_audio, output_audio):
+        if left.get("codec_name") != right.get("codec_name"):
+            report["changed"].append({"kind": "audio_codec", "severity": "info", "source": left.get("codec_name") or "unknown", "output": right.get("codec_name") or "unknown", "message": "An incompatible audio track was transcoded instead of dropped."})
+    source_subtitles = [stream for stream in source_info.get("ancillary") or [] if stream.get("codec_type") == "subtitle"]
+    output_subtitles = [stream for stream in output_info.get("ancillary") or [] if stream.get("codec_type") == "subtitle"]
+    if len(source_subtitles) == len(output_subtitles):
+        report["preserved"].append({"kind": "subtitle_tracks", "severity": "info", "source": str(len(source_subtitles)), "output": str(len(output_subtitles)), "message": "Subtitle tracks remain represented."})
+    for stream in source_info.get("ancillary") or []:
+        if stream.get("codec_type") in {"data", "attachment"}:
+            report["lost"].append({"kind": f"{stream.get('codec_type')}_stream", "severity": "warning", "message": f"{_ancillary_description(stream)} is not carried into the MP4 output."})
+    for key, label in (("color_transfer", "transfer"), ("color_primaries", "primaries"), ("color_space", "matrix"), ("color_range", "range")):
+        source_value = source_info.get(key)
+        output_value = output_info.get(key)
+        if source_value and source_value == output_value:
+            report["preserved"].append({"kind": f"color_{label}", "severity": "info", "source": source_value, "output": output_value, "message": f"Color {label} is preserved."})
+        elif source_value:
+            report["lost"].append({"kind": f"color_{label}", "severity": "warning", "source": source_value, "output": output_value, "message": f"Source color {label} changed in the output."})
+    return report
+
+
+def output_pixel_format(info: dict[str, object]) -> str:
+    return "yuv420p10le" if _source_bit_depth(info) > 8 or info.get("color_transfer") in AV1_HDR_TRANSFERS else "yuv420p"
+
+
+def _fps_text(value) -> str:
+    if isinstance(value, Fraction):
+        return f"{value.numerator}/{value.denominator}"
+    return str(value or "unknown")
 
 
 def _validate_samples(source: Path, output: Path, source_info: dict[str, object], output_info: dict[str, object]) -> None:
@@ -478,8 +528,23 @@ def _ancillary_summary(streams: list[dict[str, object]]) -> list[dict[str, objec
 def _ancillary_supported(stream: dict[str, object]) -> bool:
     codec = str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold()
     if stream.get("codec_type") == "subtitle":
-        return codec == "mov_text"
+        return codec in AV1_TEXT_SUBTITLE_CODECS
     return False
+
+
+def _supported_video_pixel_format(value: object) -> bool:
+    pixel_format = str(value or "").casefold()
+    return pixel_format.startswith(("yuv420", "yuv422", "yuv444", "nv12", "p010"))
+
+
+def _source_bit_depth(info: dict[str, object]) -> int:
+    value = int(info.get("bits_per_raw_sample") or 0)
+    pixel_format = str(info.get("pix_fmt") or "").casefold()
+    if "10" in pixel_format:
+        value = max(value, 10)
+    if "12" in pixel_format:
+        value = max(value, 12)
+    return value or 8
 
 
 def _ancillary_description(stream: dict[str, object]) -> str:
@@ -489,7 +554,15 @@ def _ancillary_description(stream: dict[str, object]) -> str:
 
 
 def _ancillary_contract(streams: list[dict[str, object]] | None) -> list[dict[str, object]]:
-    return [{key: value for key, value in stream.items() if key != "index"} for stream in streams or []]
+    return [
+        {
+            "codec_type": "subtitle",
+            "codec_name": "mov_text",
+            "tags": _semantic_tags(stream.get("tags")),
+        }
+        for stream in streams or []
+        if stream.get("codec_type") == "subtitle" and _ancillary_supported(stream)
+    ]
 
 
 def _metadata_blocker(info: dict[str, object]) -> str | None:

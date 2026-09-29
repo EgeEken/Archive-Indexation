@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .workspace import Workspace, WorkspaceError, _is_reparse_point
-from .compression_analysis import AnalysisOutcome, blocker_for_analysis, load_or_analyze
+from .compression_analysis import AnalysisOutcome, blocker_for_analysis, load_or_analyze, preservation_report_for_analysis
 from .media.capabilities import av1_capability, ffmpeg_capabilities
 from .media.av1 import AV1_SUPPORTED_EXTENSIONS, profile_settings as av1_profile_settings
 from .media.jpegxl import (
@@ -454,6 +454,13 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 and av1_outcome is not None
                 and (av1_outcome.status == "preflight_required" or av1_outcome.analysis.get("timing_cfr") is None)
             )
+            preservation_report = {"preserved": [], "changed": [], "lost": [], "hard_blockers": []}
+            if operation == "compress" and profile is not None and profile.get("codec") in {"jpeg-xl", "av1"}:
+                outcome = analysis_results.get((row["id"], profile["codec"]))
+                if outcome is not None:
+                    preservation_report = preservation_report_for_analysis(
+                        profile["codec"], outcome, profile, item["action"].get("source_disposition", "keep")
+                    )
             for blocker in item_blockers:
                 key = f"{item['profile_id']}:{blocker}"
                 entry = blockers.setdefault(key, {"profile_id": item["profile_id"], "profile_name": item["profile"]["name"] if item["profile"] else None, "reason": blocker, "affected_count": 0, "filenames": []})
@@ -490,6 +497,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "profile_snapshot": _profile_snapshot(item["profile"]),
                 "preflight_required": preflight_required,
                 "preflight_reason": "AV1 compatibility requires execution preflight." if preflight_required else None,
+                "preservation_report": preservation_report,
                 "requires_confirmation": True,
             }
             operations.append(operation_row)
@@ -906,7 +914,8 @@ def _plan_summary(workspace, rows, operations, conflicts):
     candidate_groups = summarize(operations)
     executable_operations = [operation for operation in operations if _is_plan_executable(operation)]
     execution_ready_operations = [operation for operation in executable_operations if not operation.get("preflight_required")]
-    groups = summarize(executable_operations)
+    groups = summarize(execution_ready_operations)
+    potential_groups = summarize(executable_operations)
     ready_groups = summarize(execution_ready_operations)
     for name, group in candidate_groups.items():
         matching = [operation for operation in operations if operation["operation"] == name]
@@ -918,6 +927,8 @@ def _plan_summary(workspace, rows, operations, conflicts):
         group["already_satisfied_count"] = sum(operation.get("destination_status") == "already_satisfied" for operation in matching)
         group["skipped_count"] = sum(operation.get("destination_status") == "skipped" for operation in matching)
         group["candidate_storage_delta_bytes"] = candidate_groups[name]["estimated_storage_delta_bytes"]
+        group["potential_file_count"] = sum(_is_plan_executable(operation) for operation in matching)
+        group["potential_storage_delta_bytes"] = potential_groups[name]["estimated_storage_delta_bytes"]
         for field in ("bytes", "bytes_added", "bytes_moved", "source_bytes", "estimated_output_bytes", "estimated_bytes_saved"):
             if field in candidate_groups[name]:
                 group[f"candidate_{field}"] = candidate_groups[name][field]
@@ -928,7 +939,8 @@ def _plan_summary(workspace, rows, operations, conflicts):
             if field in candidate_groups[name]:
                 group[f"candidate_{field}"] = candidate_groups[name][field]
         group["executable_file_count"] = group["file_count"]
-        group["potential_storage_delta_bytes"] = group["estimated_storage_delta_bytes"]
+        group["potential_file_count"] = potential_groups[name]["file_count"]
+        group["potential_storage_delta_bytes"] = potential_groups[name]["estimated_storage_delta_bytes"]
         group["estimated_storage_delta_bytes"] = ready_groups[name]["estimated_storage_delta_bytes"]
         for field in ("blocked_count", "preflight_required_count", "conflicted_count", "already_satisfied_count", "skipped_count"):
             group[field] = candidate_groups[name][field]
@@ -953,11 +965,12 @@ def _plan_summary(workspace, rows, operations, conflicts):
             members.add(f"planned-output:{position}")
     assets_with_no_surviving_representation = sum(not members for members in asset_members.values())
     candidate_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in candidate_groups.values())
-    potential_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
+    potential_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in potential_groups.values())
     storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in ready_groups.values())
     return {
         "candidate_count": len(operations),
-        "executable_count": len(executable_operations),
+        "executable_count": len(execution_ready_operations),
+        "potential_executable_count": len(executable_operations),
         "conflict_count": len(conflicts),
         "conflicted_count": sum(bool(operation["conflicts"]) for operation in operations),
         "safe_count": len(execution_ready_operations),
@@ -1078,6 +1091,7 @@ def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object]
                 "blockers": operation.get("blockers") or [],
                 "preflight_required": bool(operation.get("preflight_required")),
                 "preflight_reason": operation.get("preflight_reason"),
+                "preservation_report": operation.get("preservation_report") or {},
                 "estimated_output_bytes": operation.get("estimated_output_bytes"),
                 "estimated_storage_delta_bytes": operation.get("estimated_storage_delta_bytes"),
                 "coalesced_by_planned_target": bool(operation.get("coalesced_by_planned_target")),

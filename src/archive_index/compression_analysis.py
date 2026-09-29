@@ -19,7 +19,7 @@ from .media.av1 import (
     source_blocker_from_info,
 )
 from .media.capabilities import av1_capability, ffmpeg_capabilities, jpegxl_tool_capabilities
-from .media.jpegxl import JXL_ALGORITHM_VERSION, JXL_ICC_BLOCKER, JXL_SOURCE_REPLACEMENT_BLOCKER, production_capability
+from .media.jpegxl import JXL_ALGORITHM_VERSION, JXL_SOURCE_REPLACEMENT_BLOCKER, production_capability
 from .media.jpegxl_tools import TOOL_VERSION, metadata_inventory
 
 LOGGER = logging.getLogger(__name__)
@@ -179,13 +179,60 @@ def blocker_for_analysis(codec: str, outcome: AnalysisOutcome, profile: dict[str
         return None
     if analysis.get("mode") not in {"RGB", "RGBA"}:
         return "Production JPEG XL supports 8-bit RGB and RGBA JPEG/PNG sources only."
-    if source_disposition != "replace":
-        return JXL_ICC_BLOCKER if analysis.get("has_icc") else None
-    capability = production_capability()
-    if not capability.get("source_replacement_available"):
+    if source_disposition == "replace" and not production_capability().get("source_replacement_available"):
         return JXL_SOURCE_REPLACEMENT_BLOCKER
-    unsupported = analysis.get("inventory", {}).get("unsupported") or []
-    return str(unsupported[0]) if unsupported else None
+    hard_blockers = analysis.get("inventory", {}).get("hard_blockers") or []
+    return str(hard_blockers[0]) if hard_blockers else None
+
+
+def preservation_report_for_analysis(codec: str, outcome: AnalysisOutcome, profile: dict[str, object] | None, source_disposition: str) -> dict[str, object]:
+    report = {"preserved": [], "changed": [], "lost": [], "hard_blockers": []}
+    if outcome.status == "preflight_required":
+        report["pending_preflight"] = True
+        return report
+    if outcome.message and outcome.status in {"timeout", "transient_failure"}:
+        report["hard_blockers"].append({"kind": "analysis", "severity": "blocker", "message": outcome.message})
+        return report
+    analysis = outcome.analysis
+    if codec == "jpeg-xl":
+        inventory = analysis.get("inventory") or {}
+        report = _copy_report(inventory.get("preservation_report") or {})
+        width = analysis.get("width")
+        height = analysis.get("height")
+        if width and height:
+            report["preserved"].insert(0, {"kind": "resolution", "severity": "info", "source": f"{width}×{height}", "output": f"{width}×{height}", "message": "Display resolution is preserved."})
+        if source_disposition != "replace" and any(analysis.get(key) for key in ("has_exif", "has_xmp", "has_icc")):
+            report["lost"].append({"kind": "standalone_metadata", "severity": "warning", "message": "Keep-source preview output does not embed all source metadata; the original remains the authoritative copy."})
+        return report
+    if codec == "av1":
+        from .media.av1 import capped_dimensions, output_pixel_format, preservation_report
+
+        projected = dict(analysis)
+        projected["width"], projected["height"] = capped_dimensions(analysis, profile)
+        rotation = int(analysis.get("rotation") or 0)
+        projected["display_width"] = projected["height"] if rotation in {90, 270} else projected["width"]
+        projected["display_height"] = projected["width"] if rotation in {90, 270} else projected["height"]
+        fps = analysis.get("fps")
+        cap = float((profile or {}).get("settings", {}).get("fps_cap", 120))
+        projected["fps"] = min(float(fps), cap) if fps is not None else fps
+        projected["pix_fmt"] = output_pixel_format(analysis)
+        projected["audio"] = [
+            {**stream, "codec_name": stream.get("codec_name") if stream.get("codec_name") in {"aac", "alac", "mp3", "ac3", "eac3"} else "aac"}
+            for stream in analysis.get("audio") or []
+        ]
+        projected["ancillary"] = []
+        for stream in analysis.get("ancillary") or []:
+            if stream.get("codec_type") != "subtitle":
+                continue
+            codec_name = str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold()
+            if codec_name in {"mov_text", "subrip", "srt", "ass", "ssa", "webvtt"}:
+                projected["ancillary"].append({**stream, "codec_name": "mov_text"})
+        report = preservation_report(analysis, projected, profile)
+        blocker = blocker_for_analysis(codec, outcome, profile, source_disposition)
+        if blocker:
+            report["hard_blockers"].append({"kind": "eligibility", "severity": "blocker", "message": blocker})
+        return report
+    return report
 
 
 def _analyze(source: Path, codec: str, cancelled, progress, *, deep_timing: bool) -> dict[str, object]:
@@ -196,7 +243,13 @@ def _analyze(source: Path, codec: str, cancelled, progress, *, deep_timing: bool
     with Image.open(source) as image:
         mode = image.mode
         has_icc = bool(image.info.get("icc_profile"))
-    return {"mode": mode, "has_icc": has_icc, "inventory": metadata_inventory(source)}
+        width, height = image.size
+    inventory = metadata_inventory(source)
+    inventory["preservation_report"] = inventory.get("preservation_report") or {
+        "preserved": [], "changed": [], "lost": list(inventory.get("losses") or []),
+        "hard_blockers": [{"kind": "source_integrity", "severity": "blocker", "message": message} for message in inventory.get("hard_blockers") or []],
+    }
+    return {"mode": mode, "has_icc": has_icc, "width": width, "height": height, "inventory": inventory}
 
 
 def _indexed_av1_analysis(row) -> dict[str, object]:
@@ -249,3 +302,13 @@ def _restore(value):
     if isinstance(value, list):
         return [_restore(item) for item in value]
     return value
+
+
+def _copy_report(value: dict[str, object]) -> dict[str, object]:
+    return {
+        "preserved": list(value.get("preserved") or []),
+        "changed": list(value.get("changed") or []),
+        "lost": list(value.get("lost") or []),
+        "hard_blockers": list(value.get("hard_blockers") or []),
+        **({"pending_preflight": True} if value.get("pending_preflight") else {}),
+    }

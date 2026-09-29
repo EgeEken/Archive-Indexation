@@ -22,7 +22,7 @@ from .file_management_provenance import link_managed_derivatives, record_managed
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
 from .media.av1 import analyze_source as analyze_av1, encode as encode_av1, metadata_summary as av1_metadata_summary, profile_settings as av1_profile_settings, validate as validate_av1, validate_final as validate_final_av1
-from .media.jpegxl import JXL_ICC_BLOCKER, JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
+from .media.jpegxl import JXL_SUPPORTED_EXTENSIONS, decode as decode_jxl, encode as encode_jxl, load_source, production_capability, validate as validate_jxl
 from .media.jpegxl_tools import encode as encode_archival_jxl, validate as validate_archival_jxl
 from .workspace import INDEX_DIRECTORY, Workspace, WorkspaceError, _is_reparse_point
 
@@ -109,6 +109,10 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
         )
         executable = [
             operation for _, operation in operations
+            if _operation_status(operation) == "pending" and not operation.get("preflight_required")
+        ]
+        potential_executable = [
+            operation for _, operation in operations
             if _operation_status(operation) == "pending"
         ]
         estimated_written = sum(
@@ -123,6 +127,7 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
         estimated_delta = sum(int(operation.get("estimated_storage_delta_bytes") or 0) for operation in executable)
         summary = dict(plan.get("summary") or {})
         summary["execution_executable_count"] = len(executable)
+        summary["execution_potential_count"] = len(potential_executable)
         connection.execute(
             """
             INSERT INTO file_management_execution(
@@ -150,10 +155,10 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     profile_id, source_disposition, destination_status, conflicts_json,
                     blockers_json, rule_snapshot_json, profile_snapshot_json,
                     estimated_output_bytes, estimated_storage_delta, conflict_policy,
-                    metadata_contract_json,
+                    metadata_contract_json, preservation_report_json,
                     target_expected_size_bytes, target_expected_mtime_ns, target_expected_sha256,
                     target_expected_file_type, error_message, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()), execution_id, position,
@@ -167,7 +172,8 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     _json(operation.get("rule_snapshot") or {}), _json(operation.get("profile_snapshot")),
                     int(operation.get("estimated_output_bytes") or 0), int(operation.get("estimated_storage_delta_bytes") or 0),
                     operation.get("conflict_policy", "rename"),
-                    _json({"preflight_required": bool(operation.get("preflight_required")), "preflight_reason": operation.get("preflight_reason")}),
+                    _json({"preflight_required": bool(operation.get("preflight_required")), "preflight_reason": operation.get("preflight_reason")} ),
+                    _json(operation.get("preservation_report") or {}),
                     (operation.get("target_snapshot") or {}).get("size_bytes"),
                     (operation.get("target_snapshot") or {}).get("mtime_ns"),
                     (operation.get("target_snapshot") or {}).get("sha256"),
@@ -482,6 +488,7 @@ def _run_execution(workspace: Workspace, execution_id: str, cancel: threading.Ev
 def _execute_operation(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
     operation = dict(operation)
     operation["profile_snapshot"] = _parse_json(operation.get("profile_snapshot_json")) or {}
+    operation["preservation_report"] = _parse_json(operation.get("preservation_report_json")) or {}
     recovery_eligible = operation.get("stage") == "resume"
     operation["recovery_eligible"] = recovery_eligible
     _set_operation(workspace, operation["id"], status="running", stage="starting", increment_attempt=True)
@@ -546,14 +553,16 @@ def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: th
     _remove_owned_temp(workspace, temp)
     try:
         image, metadata = load_source(source)
-        if metadata.get("has_icc"):
-            raise OperationFailure(JXL_ICC_BLOCKER)
+        metadata["preservation_report"] = _merge_preservation_reports(
+            operation.get("preservation_report"),
+            {"lost": [{"kind": "standalone_metadata", "severity": "warning", "message": "The source-retained imagecodecs output does not embed source EXIF/XMP/ICC metadata."}] if any(metadata.get(key) for key in ("has_exif", "has_xmp", "has_icc")) else []},
+        )
         _set_metadata_contract(workspace, operation["id"], metadata)
         encoded = encode_jxl(image, profile)
         if cancel.is_set() or _cancel_requested(workspace, execution_id):
             raise OperationCancelled("Execution cancelled after JPEG XL encoding.")
         validation = validate_jxl(encoded, image)
-        metadata_contract = {**metadata, "output": validation}
+        metadata_contract = {**metadata, "output": validation, "preservation_report": _merge_preservation_reports(metadata.get("preservation_report"), operation.get("preservation_report"))}
         _set_metadata_contract(workspace, operation["id"], metadata_contract)
         if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
             _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
@@ -663,7 +672,7 @@ def _compress_jxl_replacement(workspace: Workspace, execution_id: str, operation
             output_file.flush()
             os.fsync(output_file.fileno())
         shutil.copystat(source, temp, follow_symlinks=False)
-        metadata_contract = {**source_metadata, "output": validation, "source_retained": False}
+        metadata_contract = {**source_metadata, "output": validation, "source_retained": False, "preservation_report": _merge_preservation_reports(operation.get("preservation_report"), source_metadata.get("preservation_report"), (validation.get("metadata_contract") or {}).get("preservation_report"))}
         _set_metadata_contract(workspace, operation["id"], metadata_contract)
         _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
         _update_progress(workspace, operation["id"], int(operation["source_size_bytes"] or 0), force=True)
@@ -754,7 +763,7 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         with temp.open("ab") as output_file:
             output_file.flush()
             os.fsync(output_file.fileno())
-        metadata_contract = {"source": av1_metadata_summary(info), "output": validation, "source_retained": operation.get("source_disposition") != "replace"}
+        metadata_contract = {"source": av1_metadata_summary(info), "output": validation, "source_retained": operation.get("source_disposition") != "replace", "preservation_report": _merge_preservation_reports(operation.get("preservation_report"), validation.get("preservation_report"))}
         _set_metadata_contract(workspace, operation["id"], metadata_contract)
         _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
         _set_stage(workspace, operation["id"], "finalizing")
@@ -1352,8 +1361,8 @@ def _set_output(workspace, operation_id: str, size_bytes: int, sha256: str) -> N
 def _set_metadata_contract(workspace, operation_id: str, metadata_contract: dict[str, object]) -> None:
     with workspace.transaction() as connection:
         connection.execute(
-            "UPDATE file_management_execution_operation SET metadata_contract_json = ?, updated_at = ? WHERE id = ?",
-            (_json(metadata_contract), _timestamp(), operation_id),
+            "UPDATE file_management_execution_operation SET metadata_contract_json = ?, preservation_report_json = ?, updated_at = ? WHERE id = ?",
+            (_json(metadata_contract), _json(metadata_contract.get("preservation_report") or {}), _timestamp(), operation_id),
         )
 
 
@@ -1618,6 +1627,7 @@ def _operation_payload(row) -> dict[str, object]:
     value["rule_snapshot"] = _parse_json(value.pop("rule_snapshot_json")) or {}
     value["profile_snapshot"] = _parse_json(value.pop("profile_snapshot_json"))
     metadata_contract = _parse_json(value.get("metadata_contract_json")) or {}
+    value["preservation_report"] = _parse_json(value.get("preservation_report_json")) or metadata_contract.get("preservation_report") or {}
     value["preflight_required"] = bool(metadata_contract.get("preflight_required"))
     value["preflight_reason"] = metadata_contract.get("preflight_reason")
     return value
@@ -1710,6 +1720,21 @@ def _parse_json(value):
         return json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _merge_preservation_reports(*reports) -> dict[str, object]:
+    merged = {"preserved": [], "changed": [], "lost": [], "hard_blockers": []}
+    seen = {key: set() for key in merged}
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        for key in merged:
+            for entry in report.get(key) or []:
+                marker = _json(entry)
+                if marker not in seen[key]:
+                    seen[key].add(marker)
+                    merged[key].append(entry)
+    return merged
 
 
 def _validate_windows_segment(segment: str) -> None:

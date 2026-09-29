@@ -395,7 +395,7 @@ class Phase10CCompressionTests(unittest.TestCase):
         Image.new("RGB", (32, 24), (30, 40, 50)).save(self.root / "text.png", pnginfo=metadata)
         self.assertIn("PNG contains text metadata", metadata_replacement_blocker(self.root / "text.png"))
 
-    def test_embedded_icc_profile_is_a_planner_blocker(self):
+    def test_embedded_icc_profile_is_reported_without_blocking_keep_source(self):
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
         with Image.open(self.root / "photo.jpg") as source:
             source.save(self.root / "icc.jpg", icc_profile=profile, quality=95)
@@ -408,8 +408,8 @@ class Phase10CCompressionTests(unittest.TestCase):
         )
         plan = build_dry_run_plan(self.workspace, ruleset["id"])
         operation = next(item for item in plan["operations"] if item["source_relative_path"] == "icc.jpg")
-        self.assertTrue(any("ICC color profile" in blocker for blocker in operation["blockers"]))
-        self.assertFalse((self.root / "derivatives" / "icc.jxl").exists())
+        self.assertFalse(operation["blockers"])
+        self.assertTrue(operation["preservation_report"]["lost"] or operation["preservation_report"]["changed"])
 
     def test_non_srgb_icc_round_trips_when_official_profile_is_available(self):
         profile_path = Path(r"C:\Windows\System32\spool\drivers\color\AdobeRGB1998.icc")

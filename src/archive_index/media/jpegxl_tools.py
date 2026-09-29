@@ -29,6 +29,7 @@ def available() -> bool:
 
 
 def metadata_contract(source: Path) -> dict[str, object]:
+    inventory = metadata_inventory(source)
     with Image.open(source) as image:
         exif = _raw_exif(image)
         xmp = _raw_xmp(image)
@@ -45,13 +46,17 @@ def metadata_contract(source: Path) -> dict[str, object]:
             "xmp_sha256": _sha256(xmp) if xmp else None,
             "icc_sha256": _sha256(icc) if icc else None,
             "metadata_policy": "standalone-jxl-container",
-            "inventory": metadata_inventory(source),
+            "inventory": inventory,
+            "preservation_report": _inventory_report(inventory),
         }
 
 
 def metadata_replacement_blocker(source: Path) -> str | None:
     inventory = metadata_inventory(source)
-    unsupported = inventory["unsupported"]
+    hard_blockers = inventory.get("hard_blockers") or []
+    if hard_blockers:
+        return str(hard_blockers[0])
+    unsupported = inventory.get("unsupported") or []
     if unsupported:
         return str(unsupported[0])
     return None
@@ -64,7 +69,7 @@ def metadata_inventory(source: Path) -> dict[str, object]:
     if source.suffix.casefold() == ".png":
         with source.open("rb") as stream:
             return _png_metadata_inventory(stream)
-    return {"format": source.suffix.casefold(), "recognized": [], "unsupported": []}
+    return {"format": source.suffix.casefold(), "recognized": [], "unsupported": [], "losses": [], "hard_blockers": []}
 
 
 def _jpeg_metadata_inventory(stream) -> dict[str, object]:
@@ -72,9 +77,12 @@ def _jpeg_metadata_inventory(stream) -> dict[str, object]:
         stream = BytesIO(stream)
     recognized = []
     unsupported = []
+    losses = []
+    hard_blockers = []
     reader = _CountingReader(stream)
     if reader.read(2) != b"\xff\xd8":
-        return {"format": "jpeg", "recognized": [], "unsupported": ["Source is not a valid JPEG file."], "bytes_read": reader.count}
+        message = "Source is not a valid JPEG file."
+        return {"format": "jpeg", "recognized": [], "unsupported": [message], "losses": [], "hard_blockers": [message], "bytes_read": reader.count}
     while True:
         prefix = reader.read(1)
         while prefix and prefix != b"\xff":
@@ -93,15 +101,15 @@ def _jpeg_metadata_inventory(stream) -> dict[str, object]:
             break
         length_bytes = reader.read(2)
         if len(length_bytes) != 2:
-            unsupported.append("JPEG contains a truncated marker segment.")
+            hard_blockers.append("JPEG contains a truncated marker segment.")
             break
         length = int.from_bytes(length_bytes, "big")
         if length < 2:
-            unsupported.append("JPEG contains a truncated marker segment.")
+            hard_blockers.append("JPEG contains a truncated marker segment.")
             break
         payload = reader.read(length - 2)
         if len(payload) != length - 2:
-            unsupported.append("JPEG contains a truncated marker segment.")
+            hard_blockers.append("JPEG contains a truncated marker segment.")
             break
         if 0xE0 <= marker <= 0xEF:
             if marker == 0xE0 and payload.startswith((b"JFIF\x00", b"JFXX\x00")):
@@ -111,20 +119,29 @@ def _jpeg_metadata_inventory(stream) -> dict[str, object]:
             elif marker == 0xE1 and payload.startswith(b"http://ns.adobe.com/xap/1.0/\x00"):
                 recognized.append("XMP")
             elif marker == 0xE1 and payload.startswith(b"http://ns.adobe.com/xmp/extension/\x00"):
+                _add_loss(losses, "extended_xmp", "Source contains Extended XMP; it will not be retained in the JXL output.")
                 unsupported.append("Source contains Extended XMP that the current JXL replacement path cannot preserve.")
             elif marker == 0xE2 and payload.startswith(b"ICC_PROFILE\x00"):
                 recognized.append("ICC")
             elif marker == 0xE2:
-                _classify_app2(payload, recognized, unsupported)
+                _classify_app2(payload, recognized, unsupported, losses)
             elif marker == 0xEE and payload.startswith(b"Adobe"):
                 recognized.append("APP14/Adobe")
             elif marker == 0xED:
+                _add_loss(losses, "iptc_photoshop_app13", "JPEG APP13 IPTC/Photoshop metadata will not be retained in the JXL output.")
                 unsupported.append("Source contains JPEG APP13 IPTC/Photoshop metadata that the current JXL replacement path cannot preserve.")
             else:
+                message = f"Unsupported JPEG APP{marker - 0xE0} metadata (signature {_safe_signature(payload)}, {len(payload)} bytes) will not be retained in the JXL output."
+                _add_loss(losses, "unknown_app_marker", message)
                 unsupported.append(f"Source contains unsupported JPEG APP{marker - 0xE0} metadata (signature {_safe_signature(payload)}, {len(payload)} bytes).")
         elif marker == 0xFE:
+            _add_loss(losses, "jpeg_comment", "JPEG comment metadata will not be retained in the JXL output.")
             unsupported.append("Source contains a JPEG comment that the current JXL replacement path cannot preserve.")
-    return {"format": "jpeg", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported)), "bytes_read": reader.count}
+    return {
+        "format": "jpeg", "recognized": sorted(set(recognized)),
+        "unsupported": sorted(set(unsupported)), "losses": _unique_entries(losses),
+        "hard_blockers": sorted(set(hard_blockers)), "bytes_read": reader.count,
+    }
 
 
 def _png_metadata_inventory(stream) -> dict[str, object]:
@@ -133,9 +150,12 @@ def _png_metadata_inventory(stream) -> dict[str, object]:
     signature = b"\x89PNG\r\n\x1a\n"
     recognized = []
     unsupported = []
+    losses = []
+    hard_blockers = []
     reader = _CountingReader(stream)
     if reader.read(len(signature)) != signature:
-        return {"format": "png", "recognized": [], "unsupported": ["Source is not a valid PNG file."], "bytes_read": reader.count}
+        message = "Source is not a valid PNG file."
+        return {"format": "png", "recognized": [], "unsupported": [message], "losses": [], "hard_blockers": [message], "bytes_read": reader.count}
     while True:
         header = reader.read(8)
         if len(header) != 8:
@@ -143,26 +163,26 @@ def _png_metadata_inventory(stream) -> dict[str, object]:
         length = int.from_bytes(header[:4], "big")
         kind = header[4:8]
         if length > 64 * 1024 * 1024:
-            unsupported.append("PNG contains a truncated ancillary chunk.")
+            hard_blockers.append("PNG contains a truncated ancillary chunk.")
             break
         if kind == b"IDAT":
             if not _skip(reader, length):
-                unsupported.append("PNG contains a truncated image-data chunk.")
+                hard_blockers.append("PNG contains a truncated image-data chunk.")
                 break
             if len(reader.read(4)) != 4:
-                unsupported.append("PNG contains a truncated image-data chunk.")
+                hard_blockers.append("PNG contains a truncated image-data chunk.")
                 break
             continue
         payload_size = min(length, 4096)
         payload = reader.read(payload_size)
         if len(payload) != payload_size:
-            unsupported.append("PNG contains a truncated ancillary chunk.")
+            hard_blockers.append("PNG contains a truncated ancillary chunk.")
             break
         if length > len(payload) and not _skip(reader, length - len(payload)):
-            unsupported.append("PNG contains a truncated ancillary chunk.")
+            hard_blockers.append("PNG contains a truncated ancillary chunk.")
             break
         if len(reader.read(4)) != 4:
-            unsupported.append("PNG contains a truncated ancillary chunk.")
+            hard_blockers.append("PNG contains a truncated ancillary chunk.")
             break
         if kind == b"eXIf":
             recognized.append("EXIF")
@@ -172,18 +192,27 @@ def _png_metadata_inventory(stream) -> dict[str, object]:
             if payload.startswith(b"XML:com.adobe.xmp\x00"):
                 recognized.append("XMP")
             else:
+                _add_loss(losses, "png_text", "PNG text metadata will not be retained in the JXL output.")
                 unsupported.append("PNG contains text metadata that the current JXL replacement path cannot preserve.")
         elif kind in {b"tEXt", b"zTXt"}:
+            _add_loss(losses, "png_text", "PNG text metadata will not be retained in the JXL output.")
             unsupported.append("PNG contains text metadata that the current JXL replacement path cannot preserve.")
         elif kind in {b"sRGB", b"gAMA", b"cHRM"}:
+            _add_loss(losses, "png_color_ancillary", "PNG color ancillary metadata will not be retained in the JXL output.")
             unsupported.append("PNG contains color metadata that the current JXL replacement path cannot preserve safely.")
         elif kind == b"pHYs":
+            _add_loss(losses, "png_physical_pixels", "PNG physical-pixel metadata will not be retained in the JXL output.")
             unsupported.append("PNG contains physical-pixel metadata that the current JXL replacement path cannot preserve.")
         elif kind[0] & 0x20 and kind not in {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS"}:
+            _add_loss(losses, "png_ancillary_chunk", f"PNG ancillary chunk {kind.decode('latin1', errors='replace')} will not be retained in the JXL output.")
             unsupported.append(f"PNG contains unsupported ancillary chunk {kind.decode('latin1', errors='replace')}.")
         if kind == b"IEND":
             break
-    return {"format": "png", "recognized": sorted(set(recognized)), "unsupported": sorted(set(unsupported)), "bytes_read": reader.count}
+    return {
+        "format": "png", "recognized": sorted(set(recognized)),
+        "unsupported": sorted(set(unsupported)), "losses": _unique_entries(losses),
+        "hard_blockers": sorted(set(hard_blockers)), "bytes_read": reader.count,
+    }
 
 
 class _CountingReader:
@@ -211,20 +240,29 @@ def _skip(reader: _CountingReader, length: int) -> bool:
         return True
 
 
-def _classify_app2(payload: bytes, recognized: list[str], unsupported: list[str]) -> None:
+def _classify_app2(payload: bytes, recognized: list[str], unsupported: list[str], losses: list[dict[str, str]]) -> None:
     if payload.startswith(b"MPF\x00"):
         count = _mpf_image_count(payload)
         if count == 1:
+            message = "JPEG contains single-image MPF metadata; the auxiliary index will not be retained in the JXL output."
+            _add_loss(losses, "mpf_auxiliary_image", message, source="MPF single-image index")
             unsupported.append("JPEG contains single-image MPF metadata that the current JXL replacement path cannot preserve.")
         elif count is not None:
+            message = f"JPEG contains MPF auxiliary image data with {count} images; the auxiliary image data will not be retained in the JXL output."
+            _add_loss(losses, "mpf_auxiliary_image", message, source=f"MPF {count} images")
             unsupported.append(f"JPEG contains MPF multi-picture data with {count} images; replacement would discard the associated image.")
         else:
+            message = "JPEG contains MPF metadata with an unknown image count; auxiliary image data will not be retained in the JXL output."
+            _add_loss(losses, "mpf_auxiliary_image", message, source="MPF unknown image count")
             unsupported.append("JPEG contains MPF multi-picture metadata with an unknown image count.")
         return
     if payload.startswith((b"FPXR", b"FPXR\x00")):
+        _add_loss(losses, "flashpix_app2", "JPEG FlashPix APP2 metadata will not be retained in the JXL output.")
         unsupported.append("JPEG contains FlashPix APP2 metadata that the current JXL replacement path cannot preserve.")
         return
-    unsupported.append(f"Unsupported JPEG APP2 metadata (signature {_safe_signature(payload)}, {len(payload)} bytes).")
+    signature = _safe_signature(payload)
+    _add_loss(losses, "unknown_app2", f"Unsupported JPEG APP2 metadata (signature {signature}, {len(payload)} bytes) will not be retained in the JXL output.", source=signature)
+    unsupported.append(f"Unsupported JPEG APP2 metadata (signature {signature}, {len(payload)} bytes).")
 
 
 def _mpf_image_count(payload: bytes) -> int | None:
@@ -253,6 +291,42 @@ def _safe_signature(payload: bytes) -> str:
     value = payload.split(b"\x00", 1)[0][:24]
     printable = bytes(character if 32 <= character < 127 else ord("?") for character in value)
     return f'"{printable.decode("ascii", errors="replace") or "unknown"}"'
+
+
+def _add_loss(losses, kind: str, message: str, *, source: str | None = None) -> None:
+    entry = {"kind": kind, "severity": "warning", "message": message}
+    if source:
+        entry["source"] = source
+    losses.append(entry)
+
+
+def _unique_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen = set()
+    result = []
+    for entry in entries:
+        key = (entry.get("kind"), entry.get("message"))
+        if key not in seen:
+            seen.add(key)
+            result.append(entry)
+    return result
+
+
+def _inventory_report(inventory: dict[str, object]) -> dict[str, object]:
+    preserved = []
+    recognized = set(inventory.get("recognized") or [])
+    labels = {"EXIF": "EXIF metadata", "ICC": "ICC color profile", "XMP": "XMP metadata"}
+    for marker, message in labels.items():
+        if marker in recognized:
+            preserved.append({"kind": marker.casefold(), "severity": "info", "message": f"{message} is carried into the JXL container."})
+    return {
+        "preserved": preserved,
+        "changed": [],
+        "lost": list(inventory.get("losses") or []),
+        "hard_blockers": [
+            {"kind": "source_integrity", "severity": "blocker", "message": message}
+            for message in inventory.get("hard_blockers") or []
+        ],
+    }
 
 
 def encode(source: Path, output: Path, profile: dict[str, object], temp_dir: Path) -> dict[str, object]:
@@ -343,28 +417,53 @@ def _validate_metadata(source: Path, output: Path, root: Path, tool: str) -> dic
     result = subprocess.run([str(tool), str(output), str(decoded_path)], capture_output=True, text=True, timeout=3600)
     if result.returncode:
         raise ValueError("JPEG XL metadata output could not be decoded independently.")
+    preserved = []
+    changed = []
+    lost = []
     with Image.open(decoded_path) as decoded:
         output_icc = bytes(decoded.info.get("icc_profile") or b"")
-        if source_icc and (not output_icc or not _icc_semantics_preserved(source, decoded, source_icc, output_icc)):
-            raise ValueError("JPEG XL output did not preserve the source ICC color interpretation.")
+        if source_icc and output_icc and _icc_semantics_preserved(source, decoded, source_icc, output_icc):
+            preserved.append({"kind": "icc", "severity": "info", "message": "ICC color interpretation was preserved."})
+        elif source_icc:
+            lost.append({"kind": "icc", "severity": "warning", "message": "The source ICC color profile was not retained in the standalone JXL output."})
         expected_tags = dict(source_tags)
         if expected_tags.get(274) not in {None, 1}:
             expected_tags[274] = 1
-        if _required_exif(decoded) != expected_tags:
-            raise ValueError("JPEG XL output did not preserve required EXIF metadata.")
+        output_tags = _required_exif(decoded)
+        if output_tags == expected_tags:
+            if source_tags:
+                preserved.append({"kind": "exif", "severity": "info", "message": "Required EXIF metadata was preserved."})
+        elif source_tags:
+            changed.append({"kind": "exif", "severity": "warning", "message": "Some EXIF fields changed or were not retained in the standalone JXL output."})
         output_orientation = int(decoded.getexif().get(274, 1) or 1)
+        if output_orientation != 1:
+            raise ValueError("JPEG XL output did not normalize display orientation safely.")
     output_exif = root / "decoded.exif"
     output_xmp = root / "decoded.xmp"
     exif_result = subprocess.run([str(tool), str(output), str(output_exif), "--output_format", "exif"], capture_output=True, text=True, timeout=3600)
     xmp_result = subprocess.run([str(tool), str(output), str(output_xmp), "--output_format", "xmp"], capture_output=True, text=True, timeout=3600)
     if source_exif:
         if exif_result.returncode:
-            raise ValueError("JPEG XL output did not preserve the source EXIF payload.")
-        output_exif_bytes = output_exif.read_bytes()
-        if source_tags.get(274) in {None, 1} and output_exif_bytes != source_exif:
-            raise ValueError("JPEG XL output did not preserve the source EXIF payload.")
-    if source_xmp and (xmp_result.returncode or output_xmp.read_bytes() != source_xmp):
-        raise ValueError("JPEG XL output did not preserve the source XMP payload.")
+            lost.append({"kind": "exif_payload", "severity": "warning", "message": "The source EXIF payload was not retained in the standalone JXL output."})
+        elif source_tags.get(274) in {None, 1} and output_exif.read_bytes() == source_exif:
+            preserved.append({"kind": "exif_payload", "severity": "info", "message": "The source EXIF payload was preserved."})
+        else:
+            changed.append({"kind": "exif_payload", "severity": "warning", "message": "The source EXIF payload changed during orientation normalization."})
+    if source_xmp:
+        if not xmp_result.returncode and output_xmp.is_file() and output_xmp.read_bytes() == source_xmp:
+            preserved.append({"kind": "xmp", "severity": "info", "message": "The source XMP payload was preserved."})
+        else:
+            lost.append({"kind": "xmp", "severity": "warning", "message": "The source XMP payload was not retained in the standalone JXL output."})
+    gps = bool(source_tags.get(34853))
+    if gps and any(entry.get("kind") == "exif" and entry.get("severity") == "info" for entry in preserved):
+        preserved.append({"kind": "gps", "severity": "info", "message": "GPS metadata was preserved with EXIF."})
+    elif gps:
+        lost.append({"kind": "gps", "severity": "warning", "message": "GPS metadata was not retained in the standalone JXL output."})
+    inventory = metadata_inventory(source)
+    report = _inventory_report(inventory)
+    report["preserved"] = [*report["preserved"], *preserved]
+    report["changed"] = [*report["changed"], *changed]
+    report["lost"] = [*report["lost"], *lost]
     return {
         "metadata_policy": "standalone-jxl-container",
         "exif": bool(source_exif),
@@ -375,6 +474,7 @@ def _validate_metadata(source: Path, output: Path, root: Path, tool: str) -> dic
         "orientation_normalized": source_tags.get(274) not in {None, 1},
         "source_retained": False,
         "tool_version": str(capabilities().get("version") or TOOL_VERSION),
+        "preservation_report": report,
     }
 
 
