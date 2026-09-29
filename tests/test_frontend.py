@@ -625,6 +625,10 @@ class CorrectionFrontendTests(unittest.TestCase):
             self.assertIn(marker, details)
         for marker in ("/api/file-management/profiles", "/api/file-management/rulesets", "/api/file-management/presets", "/api/file-management/plan"):
             self.assertIn(marker, management)
+        self.assertIn('data-plan-progress-current', html)
+        self.assertIn('codec analysis is reused from Analyze', management)
+        self.assertIn('Preflight required', management)
+        self.assertIn('pointer-events: none', (root / "app.css").read_text(encoding="utf-8"))
         self.assertNotIn("Phase 10A does not change source files", html)
         self.assertNotIn("unlink", management)
 

@@ -7,12 +7,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 from archive_index.file_management import build_dry_run_plan, list_profiles, plan_analysis_status, save_ruleset, start_plan_analysis
 from archive_index.file_management_executor import prepare_execution
 from archive_index.indexing.scanner import scan
+from archive_index.media.av1 import _run_ffprobe, analyze_source
 from archive_index.workspace import Workspace
 
 
@@ -28,17 +30,18 @@ def _make_fixture(root: Path) -> None:
     subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-            "-i", "testsrc2=size=640x360:rate=24", "-t", "2", "-c:v", "libx264",
+            "-i", "testsrc2=size=1920x1080:rate=30", "-t", "30", "-c:v", "libx264",
+            "-preset", "veryfast", "-g", "120", "-keyint_min", "120", "-sc_threshold", "0",
             "-pix_fmt", "yuv420p", str(root / "video-template.mp4"),
         ],
         check=True,
     )
     video = (root / "video-template.mp4").read_bytes()
     (root / "video-template.mp4").unlink()
-    for index in range(2):
+    for index in range(4):
         (root / f"clip-{index:02d}.mp4").write_bytes(video)
     with Image.new("RGB", (32, 32), (80, 120, 160)) as image:
-        for index in range(21):
+        for index in range(19):
             image.save(root / f"delete-{index:02d}.png")
 
 
@@ -55,7 +58,7 @@ def _timed_plan(workspace: Workspace, ruleset_id: str) -> tuple[dict[str, object
     started = time.perf_counter()
     active = None
 
-    def progress(phase, completed, total):
+    def progress(phase, completed, total, current_filename=None):
         nonlocal active
         if phase != active:
             phases[phase] = time.perf_counter() - started
@@ -72,6 +75,24 @@ def main() -> int:
         _make_fixture(root)
         workspace = Workspace.create(root)
         scan(workspace)
+        deep_probe_seconds = {"metadata": 0.0, "timing": 0.0}
+        deep_probe_calls = {"metadata": 0, "timing": 0}
+
+        def timed_probe(arguments, *args, **kwargs):
+            kind = "timing" if any("frame=best_effort_timestamp_time" in str(item) for item in arguments) else "metadata"
+            started = time.perf_counter()
+            try:
+                return _run_ffprobe(arguments, *args, **kwargs)
+            finally:
+                deep_probe_seconds[kind] += time.perf_counter() - started
+                deep_probe_calls[kind] += 1
+
+        video_sources = sorted(root.glob("clip-*.mp4"))
+        with patch("archive_index.media.av1._run_ffprobe", side_effect=timed_probe):
+            deep_started = time.perf_counter()
+            for source in video_sources:
+                analyze_source(source, deep_timing=True)
+            deep_analysis_seconds = time.perf_counter() - deep_started
         jxl = next(item for item in list_profiles(workspace) if item["name"] == "JXL Balanced")
         av1 = next(item for item in list_profiles(workspace) if item["name"] == "AV1 4K120 Very Fast")
         ruleset = save_ruleset(
@@ -83,8 +104,10 @@ def main() -> int:
                 {"match": {"format": "png"}, "action": {"operation": "delete"}},
             ],
         )
-        cold, cold_phases = _timed_plan(workspace, ruleset["id"])
-        warm, warm_phases = _timed_plan(workspace, ruleset["id"])
+        with patch("archive_index.media.av1._run_ffprobe", wraps=_run_ffprobe) as cold_probe:
+            cold, cold_phases = _timed_plan(workspace, ruleset["id"])
+        with patch("archive_index.media.av1._run_ffprobe", wraps=_run_ffprobe) as warm_probe:
+            warm, warm_phases = _timed_plan(workspace, ruleset["id"])
         session_id = start_plan_analysis(workspace, ruleset["id"])
         session = _wait(workspace, session_id)
         review_started = time.perf_counter()
@@ -96,7 +119,10 @@ def main() -> int:
             cached_rows = connection.execute("SELECT codec, source_size_bytes, analysis_json FROM compression_source_analysis ORDER BY codec").fetchall()
         finally:
             connection.close()
-        analyses = [(row["codec"], row["source_size_bytes"], json.loads(row["analysis_json"])) for row in cached_rows]
+        analyses = [
+            (row["codec"], row["source_size_bytes"], (json.loads(row["analysis_json"]).get("analysis") or {}))
+            for row in cached_rows
+        ]
         jxl_analysis = [(size, value) for codec, size, value in analyses if codec == "jpeg-xl"]
         av1_analysis = [value for codec, _, value in analyses if codec == "av1"]
         print(json.dumps({
@@ -106,6 +132,12 @@ def main() -> int:
             "review_seconds": review_seconds,
             "cold_phases": cold_phases,
             "warm_phases": warm_phases,
+            "legacy_style_deep_av1_analysis_seconds": deep_analysis_seconds,
+            "legacy_style_deep_av1_probe_seconds": deep_probe_seconds,
+            "legacy_style_deep_av1_probe_calls": deep_probe_calls,
+            "cold_ffprobe_calls": cold_probe.call_count,
+            "warm_ffprobe_calls": warm_probe.call_count,
+            "plan_deep_timing_probes": cold_probe.call_count + warm_probe.call_count,
             "candidate_count": cold["summary"]["candidate_count"],
             "blocker_count": cold["summary"]["blocked_count"],
             "cache_rows": cache_count,
