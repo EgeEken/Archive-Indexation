@@ -304,6 +304,13 @@
 .plan-operation-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(8rem, .7fr); gap: .7rem; padding: .45rem 0; border-top: 1px solid #252d34; }
 .plan-operation-row small { display: block; color: #8f9ba6; overflow-wrap: anywhere; }
 .plan-operation-row em { color: #f2b5b5; font-style: normal; }
+.preservation-details { margin-top: .25rem; color: #b8c5cf; }
+.preservation-details summary { cursor: pointer; color: #9fc8df; }
+.preservation-details ul { margin: .25rem 0 .35rem 1.1rem; padding: 0; }
+.preservation-details strong { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+.preservation-preserved strong { color: #9bd6aa; }
+.preservation-changed strong { color: #f0cf86; }
+.preservation-lost strong { color: #f0a5a5; }
 .plan-card em { display:block; margin-top:.25rem; font-size:.72rem; font-style:normal; }
 .plan-card .storage-free { color:#79d89b; }
 .plan-card .storage-add { color:#efb2a1; }

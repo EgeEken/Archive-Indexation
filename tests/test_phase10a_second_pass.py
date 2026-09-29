@@ -256,7 +256,8 @@ class Phase10ASecondPassTests(unittest.TestCase):
             plan = build_dry_run_plan(workspace, ruleset["id"])
             summary = plan["summary"]
             self.assertEqual(summary["candidate_count"], 4)
-            self.assertEqual(summary["executable_count"], 2)
+            self.assertEqual(summary["executable_count"], 1)
+            self.assertEqual(summary["potential_executable_count"], 2)
             self.assertEqual(summary["execution_ready_count"], 1)
             self.assertEqual(summary["preflight_required_count"], 1)
             self.assertEqual(summary["blocked_count"], 0)
@@ -265,7 +266,7 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual(summary["executable_storage_delta_bytes"], -safe.stat().st_size)
             self.assertNotEqual(summary["candidate_storage_delta_bytes"], summary["executable_storage_delta_bytes"])
             self.assertEqual(summary["temporary_space_upper_bound_bytes"], (root / "blocked.mp4").stat().st_size)
-            self.assertEqual(summary["compress"]["file_count"], 1)
+            self.assertEqual(summary["compress"]["file_count"], 0)
             self.assertEqual(summary["compress"]["candidate_file_count"], 1)
             self.assertEqual(summary["compress"]["preflight_required_count"], 1)
             self.assertEqual(summary["copy"]["candidate_file_count"], 1)
