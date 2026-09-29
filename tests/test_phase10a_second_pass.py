@@ -394,7 +394,7 @@ class Phase10ASecondPassTests(unittest.TestCase):
             finally:
                 connection.close()
             cleanup = next(item for item in list_rulesets(workspace) if item["id"] == "builtin-archive-cleanup")
-            self.assertEqual(len(cleanup["rules"]), 8)
+            self.assertEqual(len(cleanup["rules"]), 9)
             self.assertEqual(next(item for item in list_rulesets(workspace) if item["id"] == custom["id"])["rules"], [])
 
     def test_builtin_avif_profile_is_preview_only_and_planner_blocked(self):
@@ -449,7 +449,7 @@ class Phase10ASecondPassTests(unittest.TestCase):
             self.assertEqual(plan["summary"]["delete"]["file_count"], 1)
             self.assertIsNone(plan["operations"][0]["target_relative_path"])
             self.assertTrue(plan["executor"]["available"])
-            self.assertIn("Phase 10C", plan["executor"]["message"])
+            self.assertNotIn("message", plan["executor"])
             self.assertEqual(len(rulesets), 2)
 
     def test_all_matching_rules_report_copy_delete_conflict(self):

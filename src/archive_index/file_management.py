@@ -300,6 +300,12 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             FROM physical_file AS pf
             JOIN logical_asset AS la ON la.id = pf.logical_asset_id
             WHERE pf.in_scope = 1 AND pf.is_online = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM managed_copy AS mc
+                  WHERE mc.output_relative_path = pf.relative_path
+                    AND mc.output_sha256 = pf.sha256
+                    AND mc.purpose = 'selected_original'
+              )
             ORDER BY pf.relative_path, pf.id
             """
         ).fetchall()
@@ -418,6 +424,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             item_conflicts = list(item["conflicts"])
             item_blockers = list(item["blockers"])
             operation = item["operation"]
+            current_profile = item["profile"]
             target = item["target"]
             source_replacement = operation == "compress" and item["action"].get("source_disposition") == "replace" and item["action"].get("compress_in_place", True)
             conflict_policy = _conflict_policy(item["action"])
@@ -455,11 +462,11 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 and (av1_outcome.status == "preflight_required" or av1_outcome.analysis.get("timing_cfr") is None)
             )
             preservation_report = {"preserved": [], "changed": [], "lost": [], "hard_blockers": []}
-            if operation == "compress" and profile is not None and profile.get("codec") in {"jpeg-xl", "av1"}:
-                outcome = analysis_results.get((row["id"], profile["codec"]))
+            if operation == "compress" and current_profile is not None and current_profile.get("codec") in {"jpeg-xl", "av1"}:
+                outcome = analysis_results.get((row["id"], current_profile["codec"]))
                 if outcome is not None:
                     preservation_report = preservation_report_for_analysis(
-                        profile["codec"], outcome, profile, item["action"].get("source_disposition", "keep")
+                        current_profile["codec"], outcome, current_profile, item["action"].get("source_disposition", "keep")
                     )
             for blocker in item_blockers:
                 key = f"{item['profile_id']}:{blocker}"
@@ -484,6 +491,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "estimated_output_bytes": _estimated_output_bytes(row["size_bytes"] or 0, item["profile"]),
                 "estimated_storage_delta_bytes": _storage_delta(row["size_bytes"] or 0, item["profile"], operation, item["action"]),
                 "source_disposition": item["action"].get("source_disposition", "keep"),
+                "dependency_key": item["action"].get("depends_on_rule_id") and f"{item['action']['depends_on_rule_id']}:{row['id']}",
                 "destination_status": destination_status,
                 "conflict_policy": conflict_policy,
                 "target_snapshot": target_snapshot,
@@ -523,7 +531,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
         "conflicts": conflicts,
         "blockers": list(blockers.values()),
         "summary": summary,
-        "executor": {"available": True, "supported_operations": ["copy", "compress", "move", "delete"], "message": "Phase 10C Copy, Move, Delete, JPEG XL, and validated AV1 safe-subset execution are available; AVIF remains preview-only."},
+        "executor": {"available": True, "supported_operations": ["copy", "compress", "move", "delete"]},
     }
 
 
@@ -1095,6 +1103,7 @@ def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object]
                 "estimated_output_bytes": operation.get("estimated_output_bytes"),
                 "estimated_storage_delta_bytes": operation.get("estimated_storage_delta_bytes"),
                 "coalesced_by_planned_target": bool(operation.get("coalesced_by_planned_target")),
+                "dependency_key": operation.get("dependency_key"),
             }
             for position, operation in enumerate(operations)
         ],
@@ -1187,7 +1196,7 @@ def _empty_plan(reason: str):
         },
         "empty_reason": reason,
         "plan_digest": _plan_digest([], None),
-        "executor": {"available": True, "supported_operations": ["copy", "compress", "move", "delete"], "message": "Phase 10C Copy, Move, Delete, JPEG XL, and validated AV1 safe-subset execution are available; AVIF remains preview-only."},
+        "executor": {"available": True, "supported_operations": ["copy", "compress", "move", "delete"]},
     }
 
 
@@ -1198,17 +1207,18 @@ def _ensure_builtins(workspace: Workspace) -> None:
         (BUILTIN_BALANCED_PROFILE_ID, "JXL Balanced", "jpeg-xl", "jxl", {"quality": 60, "distance": quality_to_distance(60), "effort": 7}),
         (BUILTIN_HIGH_COMPRESSION_PROFILE_ID, "JXL High Compression", "jpeg-xl", "jxl", {"quality": 40, "distance": quality_to_distance(40), "effort": 7}),
         (BUILTIN_AVIF_EXTREME_COMPRESSION_PROFILE_ID, "AVIF Extreme Compression", "avif", "avif", {"quality": 30, "effort": 7, "contract_version": "avif-preview-v1"}),
-        ("builtin-av1-1080p60-fast", "AV1 1080p60 Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast", "contract_version": "av1-svt-v2", "crf": 30}),
-        ("builtin-av1-1080p60-very-fast", "AV1 1080p60 Very Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "very_fast", "contract_version": "av1-svt-v2", "crf": 30}),
-        ("builtin-av1-4k120-fast", "AV1 4K120 Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "fast", "contract_version": "av1-svt-v2", "crf": 30}),
-        (BUILTIN_AV1_PROFILE_ID, "AV1 4K120 Very Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "very_fast", "contract_version": "av1-svt-v2", "crf": 30}),
-        (LEGACY_BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", "av1", "mp4", {"alias_of": BUILTIN_AV1_PROFILE_ID, "contract_version": "av1-svt-v2", "crf": 30}),
+        ("builtin-av1-1080p60-fast", "AV1 1080p60 Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast", "contract_version": "av1-svt-v3", "crf": 30}),
+        ("builtin-av1-1080p60-very-fast", "AV1 1080p60 Very Fast", "av1", "mp4", {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "very_fast", "contract_version": "av1-svt-v3", "crf": 30}),
+        ("builtin-av1-4k120-fast", "AV1 4K120 Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "fast", "contract_version": "av1-svt-v3", "crf": 30}),
+        (BUILTIN_AV1_PROFILE_ID, "AV1 4K120 Very Fast", "av1", "mp4", {"resolution_cap": [3840, 2160], "fps_cap": 120, "speed_class": "very_fast", "contract_version": "av1-svt-v3", "crf": 30}),
+        (LEGACY_BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", "av1", "mp4", {"alias_of": BUILTIN_AV1_PROFILE_ID, "contract_version": "av1-svt-v3", "crf": 30}),
     ]
     cleanup_rules = [
         {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "move", "destination_dir": "raws", "preserve_relative_structure": False, "conflict_policy": "rename"}},
-        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename", "copy_role": "selected_original"}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename", "depends_on_rule_id": f"{BUILTIN_ARCHIVE_CLEANUP_ID}-4"}},
         {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
         {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
         {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},

@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -799,6 +799,52 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     30: (
         "ALTER TABLE file_management_execution_operation ADD COLUMN preservation_report_json TEXT NOT NULL DEFAULT '{}'",
     ),
+    31: (
+        "ALTER TABLE file_management_execution_operation ADD COLUMN failure_stage TEXT",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN failure_detail TEXT",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN dependency_key TEXT",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN dependency_operation_id TEXT",
+        """
+        CREATE TABLE IF NOT EXISTS managed_copy (
+            id TEXT PRIMARY KEY,
+            execution_operation_id TEXT NOT NULL UNIQUE REFERENCES file_management_execution_operation(id) ON DELETE CASCADE,
+            source_physical_file_id TEXT REFERENCES physical_file(id) ON DELETE SET NULL,
+            source_logical_asset_id TEXT REFERENCES logical_asset(id) ON DELETE SET NULL,
+            source_relative_path TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            output_relative_path TEXT NOT NULL,
+            output_sha256 TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            physical_file_id TEXT REFERENCES physical_file(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS managed_copy_output_idx ON managed_copy(output_relative_path, output_sha256, purpose)",
+        "CREATE INDEX IF NOT EXISTS managed_copy_physical_idx ON managed_copy(physical_file_id)",
+        """
+        CREATE TABLE IF NOT EXISTS video_playback_proxy (
+            id TEXT PRIMARY KEY,
+            physical_file_id TEXT NOT NULL REFERENCES physical_file(id) ON DELETE CASCADE,
+            source_relative_path TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            source_size_bytes INTEGER NOT NULL,
+            source_mtime_ns INTEGER NOT NULL,
+            contract_version TEXT NOT NULL,
+            proxy_relative_path TEXT NOT NULL,
+            proxy_sha256 TEXT,
+            proxy_size_bytes INTEGER,
+            status TEXT NOT NULL,
+            progress_json TEXT NOT NULL DEFAULT '{}',
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(physical_file_id, contract_version)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS video_playback_proxy_status_idx ON video_playback_proxy(status, updated_at)",
+    ),
 }
 
 
@@ -834,6 +880,8 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 if version == 28 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
                     continue
                 if version == 30 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
+                    continue
+                if version == 31 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
                     continue
                 if (
                     version == 8

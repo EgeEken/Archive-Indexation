@@ -67,6 +67,52 @@ def record_managed_derivative(
         )
 
 
+def record_managed_copy(workspace: Workspace, operation, output_sha256: str) -> None:
+    purpose = (operation.get("rule_snapshot") or {}).get("action", {}).get("copy_role")
+    if not purpose:
+        return
+    now = _timestamp()
+    with workspace.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO managed_copy(
+                id, execution_operation_id, source_physical_file_id, source_logical_asset_id,
+                source_relative_path, source_sha256, output_relative_path, output_sha256,
+                purpose, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(execution_operation_id) DO UPDATE SET
+                output_relative_path = excluded.output_relative_path,
+                output_sha256 = excluded.output_sha256,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(uuid.uuid4()), operation["id"], operation.get("physical_file_id"),
+                operation.get("logical_asset_id"), operation["source_relative_path"],
+                operation["source_sha256"], operation["target_relative_path"], output_sha256,
+                purpose, now, now,
+            ),
+        )
+
+
+def link_managed_copies(workspace: Workspace) -> int:
+    with workspace.transaction() as connection:
+        rows = connection.execute(
+            """
+            SELECT mc.id, pf.id AS physical_file_id
+            FROM managed_copy AS mc
+            LEFT JOIN physical_file AS pf
+              ON pf.relative_path = mc.output_relative_path
+             AND pf.sha256 = mc.output_sha256
+             AND pf.is_online = 1 AND pf.in_scope = 1
+            """
+        ).fetchall()
+        for row in rows:
+            connection.execute("UPDATE managed_copy SET physical_file_id = ?, updated_at = ? WHERE id = ?", (row["physical_file_id"], _timestamp(), row["id"]))
+            if row["physical_file_id"]:
+                connection.execute("UPDATE physical_file SET role = 'selected_original' WHERE id = ?", (row["physical_file_id"],))
+        return len(rows)
+
+
 def link_managed_derivatives(workspace: Workspace) -> int:
     linked = 0
     with workspace.transaction() as connection:

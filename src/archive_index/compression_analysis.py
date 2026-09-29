@@ -104,7 +104,7 @@ def load_or_analyze(workspace, row, codec: str, *, cancelled=None, progress=None
 
 def preflight_av1(workspace, row, *, cancelled=None, progress=None, timeout: float = EXECUTION_PREFLIGHT_TIMEOUT_SECONDS) -> AnalysisOutcome:
     cached = load_or_analyze(workspace, row, "av1", cancelled=cancelled, progress=progress)
-    if cached.status in {"success", "unsupported"} and cached.analysis.get("timing_cfr") is not None:
+    if cached.status in {"success", "unsupported"}:
         return cached
     if cancelled and cancelled.is_set():
         raise InterruptedError("AV1 preflight was cancelled.")
@@ -114,7 +114,7 @@ def preflight_av1(workspace, row, *, cancelled=None, progress=None, timeout: flo
             source,
             cancelled=cancelled,
             progress=progress,
-            deep_timing=True,
+            deep_timing=False,
             metadata_timeout=timeout,
             timing_timeout=timeout,
         )
@@ -174,7 +174,7 @@ def blocker_for_analysis(codec: str, outcome: AnalysisOutcome, profile: dict[str
     if analysis.get("error"):
         return str(analysis["error"])
     if codec == "av1":
-        return source_blocker_from_info(analysis, profile, require_timing=analysis.get("timing_cfr") is not None)
+        return source_blocker_from_info(analysis, profile, require_timing=False)
     if codec != "jpeg-xl":
         return None
     if analysis.get("mode") not in {"RGB", "RGBA"}:
@@ -222,11 +222,11 @@ def preservation_report_for_analysis(codec: str, outcome: AnalysisOutcome, profi
         ]
         projected["ancillary"] = []
         for stream in analysis.get("ancillary") or []:
-            if stream.get("codec_type") != "subtitle":
-                continue
             codec_name = str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold()
-            if codec_name in {"mov_text", "subrip", "srt", "ass", "ssa", "webvtt"}:
+            if stream.get("codec_type") == "subtitle" and codec_name == "mov_text":
                 projected["ancillary"].append({**stream, "codec_name": "mov_text"})
+            elif stream.get("codec_type") == "data" and codec_name == "tmcd":
+                projected["ancillary"].append({**stream, "codec_name": "tmcd"})
         report = preservation_report(analysis, projected, profile)
         blocker = blocker_for_analysis(codec, outcome, profile, source_disposition)
         if blocker:

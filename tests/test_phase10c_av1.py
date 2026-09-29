@@ -165,7 +165,7 @@ class Phase10CAV1Tests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_extra_stream_is_reported_without_blocking_lossy_output(self):
+    def test_unknown_extra_stream_is_reported_and_blocks_lossy_output(self):
         info = {
             "width": 640, "height": 360, "duration": 3.0, "fps": Fraction(24, 1),
             "ancillary": [{"codec_type": "data", "codec_name": "gpmd", "codec_tag_string": "gpmd"}],
@@ -173,11 +173,11 @@ class Phase10CAV1Tests(unittest.TestCase):
             "timing_cfr": True, "format_tags": {}, "video_tags": {}, "video": {"tags": {}}, "chapters": [],
         }
         profile = {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}
-        self.assertIsNone(source_blocker_from_info(info, profile))
+        self.assertIn("Unsupported data stream: gpmd", source_blocker_from_info(info, profile))
         report = preservation_report(info, {**info, "width": 640, "height": 360, "pix_fmt": "yuv420p", "ancillary": []}, profile)
         self.assertTrue(any(item["kind"] == "data_stream" and "gpmd" in item["message"] for item in report["lost"]))
 
-    def test_quicktime_timecode_is_reported_without_blocking_lossy_output(self):
+    def test_quicktime_timecode_is_reported_and_blocks_lossy_output(self):
         info = {
             "width": 640, "height": 360, "duration": 3.0, "fps": Fraction(24, 1),
             "ancillary": [{"codec_type": "data", "codec_name": None, "codec_tag_string": "tmcd"}],
@@ -185,7 +185,7 @@ class Phase10CAV1Tests(unittest.TestCase):
             "timing_cfr": True, "format_tags": {}, "video_tags": {}, "video": {"tags": {}}, "chapters": [],
         }
         profile = {"settings": {"resolution_cap": [1920, 1080], "fps_cap": 60, "speed_class": "fast"}}
-        self.assertIsNone(source_blocker_from_info(info, profile))
+        self.assertIn("Unsupported data stream: tmcd", source_blocker_from_info(info, profile))
         report = preservation_report(info, {**info, "width": 640, "height": 360, "pix_fmt": "yuv420p", "ancillary": []}, profile)
         self.assertTrue(any(item["kind"] == "data_stream" and "tmcd" in item["message"] for item in report["lost"]))
 

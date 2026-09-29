@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from .compression_analysis import blocker_for_analysis, preflight_av1
 from .file_management import _profile_snapshot, build_dry_run_plan, completed_plan_analysis, list_profiles, list_rulesets
-from .file_management_provenance import link_managed_derivatives, record_managed_derivative
+from .file_management_provenance import link_managed_copies, link_managed_derivatives, record_managed_copy, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
 from .media.av1 import analyze_source as analyze_av1, encode as encode_av1, metadata_summary as av1_metadata_summary, profile_settings as av1_profile_settings, validate as validate_av1, validate_final as validate_final_av1
@@ -143,9 +143,15 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                 int((summary.get("temporary_space_upper_bound_bytes") or 0)),
             ),
         )
+        copy_operation_ids = {}
         for position, (plan_position, operation) in enumerate(operations):
             status = _operation_status(operation)
             reason = _operation_reason(operation, status)
+            operation_id = str(uuid.uuid4())
+            dependency_key = operation.get("dependency_key")
+            dependency_operation_id = copy_operation_ids.get(dependency_key)
+            if operation.get("operation") == "copy" and (operation.get("rule_id"), operation.get("physical_file_id")):
+                copy_operation_ids[f"{operation['rule_id']}:{operation['physical_file_id']}"] = operation_id
             connection.execute(
                 """
                 INSERT INTO file_management_execution_operation(
@@ -157,11 +163,11 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     estimated_output_bytes, estimated_storage_delta, conflict_policy,
                     metadata_contract_json, preservation_report_json,
                     target_expected_size_bytes, target_expected_mtime_ns, target_expected_sha256,
-                    target_expected_file_type, error_message, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_expected_file_type, dependency_key, dependency_operation_id, error_message, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(uuid.uuid4()), execution_id, position,
+                    operation_id, execution_id, position,
                     OPERATION_PHASE.get(str(operation.get("operation")), 9),
                     operation.get("operation"), status, status if status in {"excluded", "skipped"} else "pending",
                     operation.get("physical_file_id"), operation.get("logical_asset_id"), operation.get("filename") or "File",
@@ -178,6 +184,7 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     (operation.get("target_snapshot") or {}).get("mtime_ns"),
                     (operation.get("target_snapshot") or {}).get("sha256"),
                     (operation.get("target_snapshot") or {}).get("file_type"),
+                    dependency_key, dependency_operation_id,
                     reason, now,
                 ),
             )
@@ -322,7 +329,7 @@ def resume_execution(workspace: Workspace, execution_id: str) -> dict[str, objec
             raise ExecutionConflict("Only cancelled or interrupted executions can be resumed.")
         now = _timestamp()
         connection.execute(
-            "UPDATE file_management_execution_operation SET status = 'pending', stage = CASE WHEN status = 'interrupted' THEN 'resume' ELSE 'pending' END, error_message = NULL, bytes_completed = 0, updated_at = ? WHERE execution_id = ? AND status IN ('cancelled', 'interrupted')",
+            "UPDATE file_management_execution_operation SET status = 'pending', stage = CASE WHEN status = 'interrupted' THEN 'resume' ELSE 'pending' END, error_message = NULL, failure_stage = NULL, failure_detail = NULL, progress_json = '{}', bytes_completed = 0, updated_at = ? WHERE execution_id = ? AND status IN ('cancelled', 'interrupted')",
             (now, execution_id),
         )
         connection.execute(
@@ -349,8 +356,12 @@ def retry_failed(workspace: Workspace, execution_id: str) -> dict[str, object]:
             raise ExecutionConflict("This execution is already running.")
         now = _timestamp()
         connection.execute(
-            "UPDATE file_management_execution_operation SET status = 'pending', stage = CASE WHEN stage IN ('finalizing', 'deleting', 'preparing_source_swap', 'source_backed_up', 'output_placed', 'output_verified', 'provenance', 'backup_pending_deletion') THEN 'resume' ELSE 'pending' END, error_message = NULL, bytes_completed = 0, updated_at = ? WHERE execution_id = ? AND status = 'failed'",
+            "UPDATE file_management_execution_operation SET status = 'pending', stage = CASE WHEN stage IN ('finalizing', 'deleting', 'preparing_source_swap', 'source_backed_up', 'output_placed', 'output_verified', 'provenance', 'backup_pending_deletion') THEN 'resume' ELSE 'pending' END, error_message = NULL, failure_stage = NULL, failure_detail = NULL, progress_json = '{}', bytes_completed = 0, updated_at = ? WHERE execution_id = ? AND status = 'failed'",
             (now, execution_id),
+        )
+        connection.execute(
+            "UPDATE file_management_execution_operation SET status = 'pending', stage = 'pending', error_message = NULL, failure_stage = NULL, failure_detail = NULL, updated_at = ? WHERE execution_id = ? AND status = 'skipped' AND stage = 'dependency' AND dependency_operation_id IN (SELECT id FROM file_management_execution_operation WHERE execution_id = ? AND status = 'pending')",
+            (now, execution_id, execution_id),
         )
         connection.execute(
             "UPDATE file_management_execution SET status = 'draft', cancel_requested = 0, error_message = NULL, updated_at = ?, finished_at = NULL WHERE id = ?",
@@ -455,6 +466,10 @@ def _run_execution(workspace: Workspace, execution_id: str, cancel: threading.Ev
                 cancelled = True
                 break
             try:
+                if not _dependency_ready(workspace, operation):
+                    _skip_dependency(workspace, operation)
+                    changed = True
+                    continue
                 _execute_operation(workspace, execution_id, operation, cancel)
                 changed = True
             except OperationCancelled as error:
@@ -465,7 +480,8 @@ def _run_execution(workspace: Workspace, execution_id: str, cancel: threading.Ev
                 LOGGER.warning("File Management operation %s failed: %s", operation["id"], error)
                 changed = True
                 stage = _operation_stage(workspace, operation["id"])
-                _set_operation(workspace, operation["id"], status="failed", stage=stage if stage in {"finalizing", "deleting"} else "failed", error=str(error))
+                message = _sanitize_error(error)
+                _set_operation(workspace, operation["id"], status="failed", stage=stage, error=message, failure_stage=stage, failure_detail=message)
         if changed:
             _refresh_catalog(workspace, execution_id)
         if cancelled:
@@ -488,6 +504,7 @@ def _run_execution(workspace: Workspace, execution_id: str, cancel: threading.Ev
 def _execute_operation(workspace: Workspace, execution_id: str, operation, cancel: threading.Event) -> None:
     operation = dict(operation)
     operation["profile_snapshot"] = _parse_json(operation.get("profile_snapshot_json")) or {}
+    operation["rule_snapshot"] = _parse_json(operation.get("rule_snapshot_json")) or {}
     operation["preservation_report"] = _parse_json(operation.get("preservation_report_json")) or {}
     recovery_eligible = operation.get("stage") == "resume"
     operation["recovery_eligible"] = recovery_eligible
@@ -562,7 +579,7 @@ def _compress_jxl(workspace: Workspace, execution_id: str, operation, cancel: th
         if cancel.is_set() or _cancel_requested(workspace, execution_id):
             raise OperationCancelled("Execution cancelled after JPEG XL encoding.")
         validation = validate_jxl(encoded, image)
-        metadata_contract = {**metadata, "output": validation, "preservation_report": _merge_preservation_reports(metadata.get("preservation_report"), operation.get("preservation_report"))}
+        metadata_contract = {**metadata, "source_size_bytes": int(operation["source_size_bytes"] or 0), "output": validation, "preservation_report": _merge_preservation_reports(metadata.get("preservation_report"), operation.get("preservation_report"))}
         _set_metadata_contract(workspace, operation["id"], metadata_contract)
         if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
             _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
@@ -672,7 +689,7 @@ def _compress_jxl_replacement(workspace: Workspace, execution_id: str, operation
             output_file.flush()
             os.fsync(output_file.fileno())
         shutil.copystat(source, temp, follow_symlinks=False)
-        metadata_contract = {**source_metadata, "output": validation, "source_retained": False, "preservation_report": _merge_preservation_reports(operation.get("preservation_report"), source_metadata.get("preservation_report"), (validation.get("metadata_contract") or {}).get("preservation_report"))}
+        metadata_contract = {**source_metadata, "source_size_bytes": int(operation["source_size_bytes"] or 0), "output": validation, "source_retained": False, "preservation_report": _merge_preservation_reports(operation.get("preservation_report"), source_metadata.get("preservation_report"), (validation.get("metadata_contract") or {}).get("preservation_report"))}
         _set_metadata_contract(workspace, operation["id"], metadata_contract)
         _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
         _update_progress(workspace, operation["id"], int(operation["source_size_bytes"] or 0), force=True)
@@ -748,11 +765,19 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
     _set_temp(workspace, operation["id"], temp)
     _remove_owned_temp(workspace, temp)
     try:
-        progress = lambda fraction: _update_progress(workspace, operation["id"], int(int(operation["source_size_bytes"] or 0) * fraction))
+        def progress(state):
+            if isinstance(state, dict):
+                fraction = state.get("fraction")
+                _update_codec_progress(workspace, operation["id"], state)
+            else:
+                fraction = state
+            if fraction is not None:
+                _update_progress(workspace, operation["id"], int(int(operation["source_size_bytes"] or 0) * float(fraction)))
         try:
             result = encode_av1(source, temp, info, profile, cancel, progress)
         except InterruptedError as error:
             raise OperationCancelled(str(error)) from error
+        _set_stage(workspace, operation["id"], "validating")
         validation = validate_av1(source, temp, info, profile)
         if cancel.is_set() or _cancel_requested(workspace, execution_id):
             raise OperationCancelled("Execution cancelled after AV1 validation.")
@@ -763,7 +788,7 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         with temp.open("ab") as output_file:
             output_file.flush()
             os.fsync(output_file.fileno())
-        metadata_contract = {"source": av1_metadata_summary(info), "output": validation, "source_retained": operation.get("source_disposition") != "replace", "preservation_report": _merge_preservation_reports(operation.get("preservation_report"), validation.get("preservation_report"))}
+        metadata_contract = {"source_size_bytes": int(operation["source_size_bytes"] or 0), "source": av1_metadata_summary(info), "output": validation, "source_retained": operation.get("source_disposition") != "replace", "preservation_report": _merge_preservation_reports(operation.get("preservation_report"), validation.get("preservation_report"))}
         _set_metadata_contract(workspace, operation["id"], metadata_contract)
         _set_output(workspace, operation["id"], validation["size_bytes"], validation["sha256"])
         _set_stage(workspace, operation["id"], "finalizing")
@@ -800,6 +825,7 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         if in_place:
             removed += int(operation["source_size_bytes"] or 0)
         _complete_operation(workspace, execution_id, operation, final_validation["size_bytes"], final_validation["sha256"], int(operation["source_size_bytes"] or 0), final_validation["size_bytes"], 0, removed)
+        _refresh_catalog(workspace, execution_id)
     except Exception:
         if temp.exists():
             _remove_owned_temp(workspace, temp)
@@ -1015,6 +1041,7 @@ def _copy(workspace: Workspace, execution_id: str, operation, cancel: threading.
             if occupied is not None:
                 raise OperationFailure("Destination now exists.")
             _atomic_no_replace(temp, target, remove_source=False)
+        record_managed_copy(workspace, operation, operation["source_sha256"])
         _complete_operation(workspace, execution_id, operation, copied, operation["source_sha256"], copied, copied, 0, 0)
     except Exception:
         if temp.exists():
@@ -1241,6 +1268,7 @@ def _atomic_no_replace(source: Path, target: Path, *, remove_source: bool) -> No
 def _accept_existing_copy(workspace, execution_id, operation, source, target) -> None:
     if not _matches_expected(target, operation):
         raise OperationFailure("Destination now exists.")
+    record_managed_copy(workspace, operation, operation["source_sha256"])
     _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], target.stat().st_size, target.stat().st_size, 0, 0)
 
 
@@ -1306,7 +1334,28 @@ def _pending_operations(workspace, execution_id):
         connection.close()
 
 
-def _set_operation(workspace, operation_id, *, status=None, stage=None, error=None, increment_attempt=False) -> None:
+def _dependency_ready(workspace, operation) -> bool:
+    dependency_id = operation["dependency_operation_id"]
+    if not dependency_id:
+        return True
+    connection = workspace.connect()
+    try:
+        row = connection.execute("SELECT status, error_message FROM file_management_execution_operation WHERE id = ?", (dependency_id,)).fetchone()
+    finally:
+        connection.close()
+    return row is not None and (row["status"] == "completed" or (row["status"] == "skipped" and row["error_message"] == "Already satisfied"))
+
+
+def _skip_dependency(workspace, operation) -> None:
+    reason = "Skipped because the required archival copy did not complete."
+    with workspace.transaction() as connection:
+        connection.execute(
+            "UPDATE file_management_execution_operation SET status = 'skipped', stage = 'dependency', error_message = ?, failure_stage = 'dependency', failure_detail = ?, updated_at = ? WHERE id = ?",
+            (reason, reason, _timestamp(), operation["id"]),
+        )
+
+
+def _set_operation(workspace, operation_id, *, status=None, stage=None, error=None, failure_stage=None, failure_detail=None, progress=None, increment_attempt=False) -> None:
     fields = []
     values = []
     if status is not None:
@@ -1318,6 +1367,15 @@ def _set_operation(workspace, operation_id, *, status=None, stage=None, error=No
     if error is not None:
         fields.append("error_message = ?")
         values.append(error)
+    if failure_stage is not None:
+        fields.append("failure_stage = ?")
+        values.append(failure_stage)
+    if failure_detail is not None:
+        fields.append("failure_detail = ?")
+        values.append(failure_detail)
+    if progress is not None:
+        fields.append("progress_json = ?")
+        values.append(_json(progress))
     if increment_attempt:
         fields.append("attempt_count = attempt_count + 1")
         fields.append("started_at = COALESCE(started_at, ?)")
@@ -1371,8 +1429,8 @@ def _skip_operation(workspace, operation_id: str, reason: str) -> None:
         _progress_marks.pop(operation_id, None)
     with workspace.transaction() as connection:
         connection.execute(
-            "UPDATE file_management_execution_operation SET status = 'skipped', stage = 'skipped', error_message = ?, bytes_completed = 0, updated_at = ? WHERE id = ?",
-            (reason, _timestamp(), operation_id),
+            "UPDATE file_management_execution_operation SET status = 'skipped', stage = 'skipped', error_message = ?, failure_stage = COALESCE(failure_stage, stage), failure_detail = ?, bytes_completed = 0, updated_at = ? WHERE id = ?",
+            (reason, reason, _timestamp(), operation_id),
         )
 
 
@@ -1390,6 +1448,18 @@ def _update_progress(workspace, operation_id, bytes_completed: int, *, force: bo
         connection.execute(
             "UPDATE file_management_execution_operation SET bytes_completed = ?, updated_at = ? WHERE id = ?",
             (bytes_completed, _timestamp(), operation_id),
+        )
+        connection.execute("UPDATE file_management_execution SET updated_at = ? WHERE id = ?", (_timestamp(), row["execution_id"]))
+
+
+def _update_codec_progress(workspace, operation_id: str, progress: dict[str, object]) -> None:
+    with workspace.transaction() as connection:
+        row = connection.execute("SELECT execution_id FROM file_management_execution_operation WHERE id = ?", (operation_id,)).fetchone()
+        if row is None:
+            return
+        connection.execute(
+            "UPDATE file_management_execution_operation SET progress_json = ?, updated_at = ? WHERE id = ?",
+            (_json(progress), _timestamp(), operation_id),
         )
         connection.execute("UPDATE file_management_execution SET updated_at = ? WHERE id = ?", (_timestamp(), row["execution_id"]))
 
@@ -1432,6 +1502,7 @@ def _refresh_catalog(workspace, execution_id) -> None:
         connection.execute("UPDATE file_management_execution SET catalog_refresh_status = 'running', updated_at = ? WHERE id = ?", (_timestamp(), execution_id))
     try:
         scan(workspace)
+        link_managed_copies(workspace)
         link_managed_derivatives(workspace)
         reconcile_workspace(workspace)
     except Exception as error:
@@ -1569,8 +1640,9 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
 def _execution_payload(execution, operations) -> dict[str, object]:
     rows = [dict(row) for row in operations]
     counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("completed", "failed", "skipped", "pending", "interrupted", "cancelled", "excluded")}
-    total = sum(1 for row in rows if row["status"] not in {"excluded", "skipped"})
+    total = sum(1 for row in rows if row["status"] != "excluded")
     completed = counts["completed"]
+    finished = completed + counts["failed"] + counts["skipped"]
     work_operations = {"copy", "compress"}
     bytes_total = sum(int(row["source_size_bytes"] or 0) for row in rows if row["status"] not in {"excluded", "skipped"} and row["operation"] in work_operations)
     bytes_done = sum(int(row["bytes_completed"] or 0) for row in rows if row["operation"] in work_operations)
@@ -1590,7 +1662,7 @@ def _execution_payload(execution, operations) -> dict[str, object]:
         "updated_at": execution["updated_at"],
         "finished_at": execution["finished_at"],
         "cancel_requested": bool(execution["cancel_requested"]),
-        "counts": {"completed": completed, "failed": counts["failed"], "skipped": counts["skipped"], "pending": counts["pending"] + counts["interrupted"] + counts["cancelled"], "excluded": counts["excluded"], "total": total},
+        "counts": {"completed": completed, "failed": counts["failed"], "skipped": counts["skipped"], "pending": counts["pending"] + counts["interrupted"] + counts["cancelled"], "excluded": counts["excluded"], "total": total, "finished": finished},
         "current_operation": {
             "operation": current["operation"],
             "filename": current["filename"],
@@ -1598,6 +1670,7 @@ def _execution_payload(execution, operations) -> dict[str, object]:
             "profile_name": (_parse_json(current["profile_snapshot_json"]) or {}).get("name"),
             "bytes_completed": current["bytes_completed"],
             "bytes_total": current["source_size_bytes"],
+            "progress": _parse_json(current.get("progress_json")) or {},
         } if current else None,
         "bytes_processed": bytes_done,
         "total_bytes": bytes_total,
@@ -1628,9 +1701,15 @@ def _operation_payload(row) -> dict[str, object]:
     value["profile_snapshot"] = _parse_json(value.pop("profile_snapshot_json"))
     metadata_contract = _parse_json(value.get("metadata_contract_json")) or {}
     value["preservation_report"] = _parse_json(value.get("preservation_report_json")) or metadata_contract.get("preservation_report") or {}
+    value["progress"] = _parse_json(value.get("progress_json")) or {}
     value["preflight_required"] = bool(metadata_contract.get("preflight_required"))
     value["preflight_reason"] = metadata_contract.get("preflight_reason")
     return value
+
+
+def _sanitize_error(error: Exception) -> str:
+    message = " ".join(str(error).split()) or error.__class__.__name__
+    return message[:800]
 
 
 def _operation_status(operation) -> str:
