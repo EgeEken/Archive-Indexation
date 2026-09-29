@@ -684,6 +684,18 @@ function openRawInspection(asset, fileId) {
   load();
 }
 
+function managedDerivativeDetails(file) {
+  const managed = file.managed_derivative;
+  if (!managed) return "";
+  const source = Number(managed.source_size_bytes);
+  const output = Number(managed.output_size_bytes || file.size_bytes);
+  const sizeLine = Number.isFinite(source) && source > 0 ? `${formatBytes(source)} → ${formatBytes(output)} (${Number(managed.output_percent_of_source || output / source * 100).toFixed(1)}%)` : formatBytes(output);
+  const report = managed.preservation_report || {};
+  const list = name => (report[name] || []).map(item => item.message || item.kind).filter(Boolean).map(item => `<li>${escapeHtml(item)}</li>`).join("");
+  const reportMarkup = ["preserved", "changed", "lost"].map(name => list(name) ? `<details><summary>${name[0].toUpperCase() + name.slice(1)}</summary><ul>${list(name)}</ul></details>` : "").join("");
+  return `<section class="section managed-derivative-details"><h3>Managed derivative</h3><dl class="kv"><dt>File size</dt><dd>${escapeHtml(sizeLine)}</dd>${managed.mse != null ? `<dt>MSE</dt><dd>${escapeHtml(String(managed.mse))}</dd>` : ""}</dl>${reportMarkup}</section>`;
+}
+
 function renderDetails(asset, options = {}) {
   const displayFilename = typeof globalThis.filenameMarkup === "function" ? globalThis.filenameMarkup : escapeHtml;
   const filenameMarkup = displayFilename;
@@ -704,7 +716,8 @@ function renderDetails(asset, options = {}) {
   const header = options.viewerPanel
     ? `<div class="panel-header"><h2>Details</h2><button id="viewer-details-close" class="icon" type="button" aria-label="Close details">×</button></div>`
     : `<div class="dialog-header"><div><h2 id="details-title">${filenameMarkup(first.filename || "Asset details")}</h2><div class="muted detail-path" title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</div></div><button id="details-close" class="icon" type="button" aria-label="Close details">×</button></div>`;
-  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>File created</dt><dd>${escapeHtml(formatCapture(first.file_created_time) || "Unavailable")}</dd>${captureRow}${locationRow}${pathRow}</dl></section>`;
+  const managedDetails = typeof managedDerivativeDetails === "function" ? managedDerivativeDetails(first) : "";
+  const overview = `<section class="detail-overview"><h3>Overview</h3><dl class="kv"><dt>Dimensions</dt><dd>${escapeHtml(dimensions)}</dd><dt>File size</dt><dd>${escapeHtml(formatBytes(first.size_bytes))}</dd><dt>File created</dt><dd>${escapeHtml(formatCapture(first.file_created_time) || "Unavailable")}</dd>${captureRow}${locationRow}${pathRow}</dl></section>${managedDetails}`;
   const technical = renderTechnicalDetails(first);
   const qualityPanel = quality ? `<div class="viewer-quality">${quality}</div>` : "";
   const technicalAndQuality = options.viewerPanel ? `<div class="viewer-technical-quality">${technical}${qualityPanel}</div>` : technical;

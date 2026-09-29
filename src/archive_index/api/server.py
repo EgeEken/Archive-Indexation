@@ -34,6 +34,7 @@ from ..indexing.media_pipeline import index_workspace
 from ..indexing.scanner import scan
 from ..media.quality_provider import default_model_path
 from ..media.raw_preview import extract_embedded_preview
+from ..media.video_proxy import cancel_proxy, proxy_path, proxy_status, request_proxy
 from ..media.metadata import UnsupportedDecoderError
 from ..media_types import is_raw_extension
 from ..jobs.engine import JobStore, SUBSTAGES
@@ -502,6 +503,17 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 cancelled = cancel_plan_analysis(workspace, session_id)
                 self._send_json(202 if cancelled else 200, {"session_id": session_id, "cancelled": cancelled})
                 return
+            proxy_prefix = "/api/files/"
+            if request.path.startswith(proxy_prefix) and request.path.endswith("/playback-proxy"):
+                _, workspace = self._workspace(query)
+                physical_id = request.path[len(proxy_prefix):-len("/playback-proxy")]
+                self._send_json(202, request_proxy(workspace, physical_id))
+                return
+            if request.path.startswith(proxy_prefix) and request.path.endswith("/playback-proxy/cancel"):
+                _, workspace = self._workspace(query)
+                physical_id = request.path[len(proxy_prefix):-len("/playback-proxy/cancel")]
+                self._send_json(202, {"cancelled": cancel_proxy(workspace, physical_id)})
+                return
             if request.path == "/api/file-management/executions":
                 body = self._json_body()
                 _, workspace = self._workspace(query)
@@ -783,6 +795,14 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "original":
             self._serve_original(workspace, parts[2])
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "playback-proxy":
+            self._send_json(200, proxy_status(workspace, parts[2]))
+            return
+        if len(parts) == 5 and parts[:2] == ["api", "files"] and parts[3:] == ["playback-proxy", "media"]:
+            if proxy_status(workspace, parts[2]).get("status") != "complete":
+                raise ResourceNotFound("playable proxy is not ready")
+            self._send_file(proxy_path(workspace, parts[2]), "video/mp4", allow_range=True)
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "preview":
             self._serve_raw_preview(workspace, parts[2])

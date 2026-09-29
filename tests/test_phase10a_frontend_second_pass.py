@@ -39,7 +39,7 @@ class Phase10AFrontendSecondPassTests(unittest.TestCase):
         for marker in ("representation_class", "selection_state", "delete", "source_disposition", "destination_status", "executor"):
             self.assertIn(marker, self.management + self.file_management_backend)
         self.assertIn('"available": True', self.file_management_backend)
-        self.assertIn("Phase 10C", self.file_management_backend)
+        self.assertNotIn("Phase 10C Copy, Move, Delete, JPEG XL, and validated AV1 safe-subset execution are available", self.file_management_backend)
 
     def test_representation_eye_and_actual_comparison_controls_exist(self):
         for marker in ("data-representation-view", "View representation", "comparison-preview", "Side by side", "Slider", "PSNR", "SharedImageCamera"):

@@ -61,7 +61,7 @@ function ruleToUi(rule = {}) {
   const action = rule.action || {};
   let representation = match.representation_class || match.format || "all";
   if (match.formats?.length === 2 && match.formats.includes("jpeg") && match.formats.includes("png")) representation = "conventional-image";
-  return {id: rule.id || newId(), enabled: true, asset: match.selection_state || "all", representation, operation: action.operation || "delete", profileId: action.profile_id || fileManagement.profiles.find(profile => profile.codec === "jpeg-xl")?.id || "", disposition: action.source_disposition !== "replace", inPlace: action.compress_in_place !== false, destination: action.destination_dir || action.target_template || "", preserve: action.preserve_relative_structure === true, conflictPolicy: action.conflict_policy || (action.rename_on_conflict === false ? "skip" : "rename")};
+  return {id: rule.id || newId(), enabled: true, asset: match.selection_state || "all", representation, operation: action.operation || "delete", profileId: action.profile_id || fileManagement.profiles.find(profile => profile.codec === "jpeg-xl")?.id || "", disposition: action.source_disposition !== "replace", inPlace: action.compress_in_place !== false, destination: action.destination_dir || action.target_template || "", preserve: action.preserve_relative_structure === true, conflictPolicy: action.conflict_policy || (action.rename_on_conflict === false ? "skip" : "rename"), copyRole: action.copy_role || null, dependsOnRuleId: action.depends_on_rule_id || null};
 }
 
 function uiToRule(rule) {
@@ -71,8 +71,8 @@ function uiToRule(rule) {
   if (["jpeg", "png", "jxl", "avif", "webp"].includes(rule.representation)) match.format = rule.representation;
   if (rule.representation === "conventional-image") match.formats = ["jpeg", "png"];
   const action = {operation: rule.operation};
-  if (rule.operation === "compress") { action.profile_id = rule.profileId || null; action.source_disposition = rule.disposition ? "keep" : "replace"; action.compress_in_place = rule.inPlace; action.conflict_policy = rule.conflictPolicy; if (!rule.inPlace) action.destination_dir = rule.destination; }
-  if (["copy", "move"].includes(rule.operation)) { action.destination_dir = rule.destination; action.preserve_relative_structure = rule.preserve; action.conflict_policy = rule.conflictPolicy; }
+  if (rule.operation === "compress") { action.profile_id = rule.profileId || null; action.source_disposition = rule.disposition ? "keep" : "replace"; action.compress_in_place = rule.inPlace; action.conflict_policy = rule.conflictPolicy; if (!rule.inPlace) action.destination_dir = rule.destination; if (rule.dependsOnRuleId) action.depends_on_rule_id = rule.dependsOnRuleId; }
+  if (["copy", "move"].includes(rule.operation)) { action.destination_dir = rule.destination; action.preserve_relative_structure = rule.preserve; action.conflict_policy = rule.conflictPolicy; if (rule.copyRole) action.copy_role = rule.copyRole; }
   return {id: rule.id, enabled: true, match, action};
 }
 
@@ -287,7 +287,7 @@ function renderFileManagementPlan(data) {
   const operations = data.operations || [];
   $("file-management-plan-details").innerHTML = ["delete", "compress", "copy", "move"].map(operation => { const rows = operations.filter(item => item.operation === operation); return rows.length ? renderPlanOperationGroup(operation, rows) : ""; }).join("");
   bindPlanOperationDetails(data);
-  $("file-management-plan-note").textContent = data.executor?.message || "";
+  $("file-management-plan-note").textContent = "";
   const executable = (data.operations || []).some(item => ["copy", "compress", "move", "delete"].includes(item.operation) && !item.conflicts?.length && !item.blockers?.length && !["already_satisfied", "skipped"].includes(item.destination_status));
   $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Review freezes this completed analysis after lightweight stale-state checks.</small></div>` : `<p class="muted" data-no-execution>${escapeHtml(noExecutionExplanation(summary))}</p>`;
   $("file-management-execution-panel").classList.remove("hidden");
@@ -310,7 +310,6 @@ function renderExecution(execution) {
   const canStart = execution.status === "draft";
   const canResume = ["cancelled", "interrupted"].includes(execution.status);
   const canRetry = rows.some(row => row.status === "failed") && !active;
-  const canReanalyze = ["completed", "completed_with_errors"].includes(execution.status);
   const counts = execution.counts || {};
   if (canStart) {
     const copies = pending.filter(row => row.operation === "copy").length;
@@ -333,21 +332,33 @@ function renderExecution(execution) {
     return;
   }
   const current = execution.current_operation;
-  const statusLabel = execution.status === "running" ? "Executing file plan" : execution.status === "cancelling" ? "Cancelling execution" : `Execution ${execution.status}`;
-  const byteLine = execution.total_bytes ? `${formatBytes(execution.bytes_processed)} / ${formatBytes(execution.total_bytes)}` : "No byte-copy work";
-  const throughput = execution.throughput_bytes_per_second ? `${formatBytes(execution.throughput_bytes_per_second)}/s` : "—";
+  const statusLabel = execution.status === "running" ? "Executing file plan" : execution.status === "cancelling" ? "Cancelling execution" : execution.status === "completed" ? "Execution completed" : execution.status === "completed_with_errors" ? `Execution finished with ${counts.failed || 0} failed operation${counts.failed === 1 ? "" : "s"}` : execution.status === "cancelled" ? "Execution cancelled" : execution.status === "interrupted" ? "Execution interrupted" : "Execution failed";
+  const byteLineBase = execution.total_bytes ? `${formatBytes(execution.bytes_processed)} / ${formatBytes(execution.total_bytes)}` : "No byte-copy work";
+  const throughputBase = execution.throughput_bytes_per_second ? `${formatBytes(execution.throughput_bytes_per_second)}/s` : "—";
   const eta = execution.eta_seconds == null ? "—" : formatDuration(execution.eta_seconds);
   const elapsed = Number(execution.elapsed_seconds || 0);
   const projected = execution.status === "completed" || execution.status === "completed_with_errors" ? elapsed : execution.eta_seconds == null ? null : elapsed + Number(execution.eta_seconds);
   const timer = `${formatDuration(elapsed)} / ${projected == null ? "--:--" : formatDuration(projected)}`;
-  const operationLine = current ? (current.stage === "preflight" ? `Preflight · ${current.filename}` : `${current.operation} · ${current.filename}`) : "Preparing next operation…";
-  const profileLine = current?.stage === "preflight" ? "Checking frame timing and stream safety" : current?.profile_name ? current.profile_name : "No active codec operation";
-  panel.innerHTML = `<section class="execution-progress"><div class="execution-progress-header"><h3>${escapeHtml(statusLabel)}</h3><span class="execution-timer" data-execution-timer>${timer}</span></div><div class="execution-status-block"><p class="execution-current-operation">${escapeHtml(operationLine)}</p><p class="execution-current-profile">${escapeHtml(profileLine)}</p><p class="execution-byte-line">${byteLine}</p><p class="execution-throughput">${throughput}</p></div><div class="execution-counts"><span>Completed <strong>${counts.completed || 0}</strong></span><span>Failed <strong>${counts.failed || 0}</strong></span><span>Skipped <strong>${counts.skipped || 0}</strong></span><span>Pending <strong>${counts.pending || 0}</strong></span><span>${counts.completed || 0} / ${counts.total || 0} operations</span></div><p class="muted">${executionChangeMarkup(execution.actual_bytes_written, execution.actual_bytes_removed, execution.actual_storage_delta)}</p>${execution.error ? `<p class="status error">${escapeHtml(execution.error)}</p>` : ""}${execution.warning ? `<p class="status">${escapeHtml(execution.warning)}</p>` : ""}<div class="form-actions">${active ? `<button type="button" class="danger-button" data-execution-cancel>Cancel</button>` : ""}${canResume ? `<button type="button" class="primary-action" data-execution-resume>Resume</button>` : ""}${execution.status === "interrupted" ? `<button type="button" class="secondary" data-execution-abandon>Abandon</button>` : ""}${canRetry ? `<button type="button" class="secondary" data-execution-retry>Retry failed</button>` : ""}${canReanalyze ? `<button type="button" class="secondary" data-execution-reanalyze>Re-analyze plan</button>` : ""}</div></section>`;
+  const progress = current?.progress || {};
+  const codecProgress = current?.operation === "compress" && current?.profile_name?.startsWith("AV1") && progress.fraction != null ? `${Math.round(Number(progress.fraction) * 100)}%${progress.speed != null ? ` · ${Number(progress.speed).toFixed(2)}× realtime` : ""}${progress.fps != null ? ` · ${Math.round(Number(progress.fps))} fps` : ""}` : null;
+  const byteLine = codecProgress || byteLineBase;
+  const throughput = codecProgress ? "Codec progress" : throughputBase;
+  const operationLine = current ? (current.stage === "preflight" ? `Preflight · ${current.filename}` : `${current.operation} · ${current.filename}`) : (active ? "Preparing next operation…" : "All operations finished");
+  const profileLine = current?.stage === "preflight" ? "Checking media structure and timing…" : current?.profile_name ? current.profile_name : (active ? "" : "");
+  panel.innerHTML = `<section class="execution-progress"><div class="execution-progress-header"><h3>${escapeHtml(statusLabel)}</h3><span class="execution-timer" data-execution-timer>${timer}</span></div><div class="execution-status-block"><p class="execution-current-operation">${escapeHtml(operationLine)}</p><p class="execution-current-profile">${escapeHtml(profileLine)}</p><p class="execution-byte-line">${byteLine}</p><p class="execution-throughput">${throughput}</p></div><div class="execution-counts"><span>Completed <strong>${counts.completed || 0}</strong></span><span>Failed <strong>${counts.failed || 0}</strong></span><span>Skipped <strong>${counts.skipped || 0}</strong></span><span>Pending <strong>${counts.pending || 0}</strong></span><span>${counts.finished || counts.completed || 0} / ${counts.total || 0} operations</span></div><p class="muted">${executionChangeMarkup(execution.actual_bytes_written, execution.actual_bytes_removed, execution.actual_storage_delta)}</p>${execution.error ? `<p class="status error">${escapeHtml(execution.error)}</p>` : ""}${execution.warning ? `<p class="status">${escapeHtml(execution.warning)}</p>` : ""}<div class="form-actions">${active ? `<button type="button" class="danger-button" data-execution-cancel>Cancel</button>` : ""}${canResume ? `<button type="button" class="primary-action" data-execution-resume>Resume</button>` : ""}${execution.status === "interrupted" ? `<button type="button" class="secondary" data-execution-abandon>Abandon</button>` : ""}${canRetry ? `<button type="button" class="secondary" data-execution-retry>Retry failed</button>` : ""}</div></section>`;
+  if (!active) {
+    const results = rows.filter(row => ["failed", "skipped"].includes(row.status));
+    if (results.length) {
+      const section = document.createElement("section");
+      section.className = "execution-results";
+      section.innerHTML = `<h4>Results</h4>${results.map(row => `<article class="execution-result"><strong>${escapeHtml(row.filename)}</strong><span>${escapeHtml(row.status === "failed" ? `Failed during ${row.failure_stage || row.stage || "execution"}` : row.error_message?.startsWith("Already satisfied") ? "Already satisfied" : `Skipped during ${row.failure_stage || row.stage || "execution"}`)}</span><small>${escapeHtml(row.failure_detail || row.error_message || "No additional details.")}</small></article>`).join("")}`;
+      panel.querySelector(".execution-progress")?.append(section);
+    }
+  }
   panel.querySelector("[data-execution-cancel]")?.addEventListener("click", () => { void executionAction("cancel"); });
   panel.querySelector("[data-execution-resume]")?.addEventListener("click", () => { void executionAction("resume"); });
   panel.querySelector("[data-execution-abandon]")?.addEventListener("click", () => { void executionAction("abandon"); });
   panel.querySelector("[data-execution-retry]")?.addEventListener("click", () => { void executionAction("retry-failed"); });
-  panel.querySelector("[data-execution-reanalyze]")?.addEventListener("click", () => { setFileManagementTab("plan"); });
   renderFileManagementLockState();
 }
 function stopExecutionPolling() { clearTimeout(fileManagement.executionTimer); fileManagement.executionTimer = null; }

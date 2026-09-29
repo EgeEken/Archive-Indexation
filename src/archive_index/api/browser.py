@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from ..indexing.representations import preferred_physical
 from ..indexing.video_quality import video_quality_details
 from ..media_types import is_raw_extension
+from ..media.video_proxy import proxy_status
 from ..workspace import Workspace, WorkspaceError
 from .errors import ResourceNotFound
 
@@ -187,6 +188,7 @@ def asset_detail(
                 "height": row["height"],
                 "duration_seconds": row["duration_seconds"],
                 "codec": row["codec"],
+                "playback_proxy": _playback_proxy_status(workspace, row),
                 "metadata": _json_or_none(row["metadata_json"]),
                 "quality_score": row["quality_score"],
                 "quality_source": quality_source(row),
@@ -248,6 +250,7 @@ def physical_rows(workspace: Workspace, asset_id: str):
                    managed.profile_name AS managed_derivative_profile_name,
                    managed.source_relative_path AS managed_derivative_source_path,
                    managed.output_sha256 AS managed_derivative_output_sha256,
+                   managed.metadata_contract_json AS managed_derivative_metadata_contract,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
@@ -296,6 +299,7 @@ def physical_rows_for_assets(workspace: Workspace, asset_ids: list[str]) -> dict
                    managed.profile_name AS managed_derivative_profile_name,
                    managed.source_relative_path AS managed_derivative_source_path,
                    managed.output_sha256 AS managed_derivative_output_sha256,
+                   managed.metadata_contract_json AS managed_derivative_metadata_contract,
                    quality.status AS quality_component_status, quality.algorithm AS quality_component_algorithm,
                    quality.version AS quality_component_version, quality.error_message AS quality_component_error
             FROM physical_file AS pf
@@ -374,13 +378,32 @@ def representation_label(row, relationships: list[str]) -> str:
 def managed_derivative_payload(row) -> dict[str, object] | None:
     if not row["managed_derivative_id"]:
         return None
+    contract = _json_or_none(row["managed_derivative_metadata_contract"]) or {}
+    output = contract.get("output") or {}
+    source_size = contract.get("source_size_bytes") or (contract.get("source") or {}).get("size_bytes")
+    output_size = row["size_bytes"]
+    percentage = round(output_size / source_size * 100, 1) if source_size else None
     return {
         "id": row["managed_derivative_id"],
         "codec": row["managed_derivative_codec"],
         "profile_name": row["managed_derivative_profile_name"],
         "source_relative_path": row["managed_derivative_source_path"],
         "output_sha256": row["managed_derivative_output_sha256"],
+        "source_size_bytes": source_size,
+        "output_size_bytes": output_size,
+        "output_percent_of_source": percentage,
+        "mse": output.get("mse"),
+        "preservation_report": contract.get("preservation_report") or {},
     }
+
+
+def _playback_proxy_status(workspace: Workspace, row) -> dict[str, object] | None:
+    if row["media_type"] != "video" or not row["is_online"] or not row["in_scope"]:
+        return None
+    try:
+        return proxy_status(workspace, row["id"])
+    except (OSError, ValueError):
+        return {"status": "unavailable"}
 
 
 def component_info(row, component: str) -> dict[str, object]:

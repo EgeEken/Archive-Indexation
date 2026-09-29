@@ -75,6 +75,55 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
   if (!$("viewer").open) { $("viewer").showModal(); document.body.classList.add("modal-open"); }
 }
 
+function browserVideoCompatible(item) { return new Set(["h264", "avc1", "av1", "vp8", "vp9"]).has(String(item.codec || "").toLowerCase()); }
+function renderPlaybackProxyPrompt(item, existing = {}) {
+  const container = $("viewer-media");
+  const running = existing.status === "running";
+  container.innerHTML = `<div class="viewer-error"><p>This ${String(item.codec || "video").toUpperCase()} video cannot be played directly in the browser.</p><button type="button" class="secondary" data-create-playback-proxy>${running ? "Cancel proxy" : "Create playable proxy"}</button><small data-playback-proxy-status>${escapeHtml(existing.error || (running ? "Creating playable proxy…" : ""))}</small></div>`;
+  const button = container.querySelector("[data-create-playback-proxy]");
+  const status = container.querySelector("[data-playback-proxy-status]");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      if (running) {
+        await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy/cancel`, {method: "POST"});
+        renderPlaybackProxyPrompt(item, {status: "cancelled", error: "Proxy creation cancelled."});
+        return;
+      }
+      status.textContent = "Creating playable proxy…";
+      await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`, {method: "POST"});
+      for (;;) {
+        const result = await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`);
+        if (result.status === "complete") { renderViewer(); return; }
+        if (["failed", "cancelled"].includes(result.status)) throw new Error(result.error || "Playable proxy creation failed.");
+        status.textContent = result.progress?.fraction != null ? `Creating playable proxy… ${Math.round(result.progress.fraction * 100)}%` : "Creating playable proxy…";
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    } catch (error) { button.disabled = false; status.textContent = error.message; }
+  });
+}
+
+async function useExistingPlaybackProxy(item, media) {
+  if (browserVideoCompatible(item) || !item.preferred_physical_id) return;
+  try {
+    const result = await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`);
+    if (result.status === "complete" && media.isConnected) media.src = apiPath(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy/media`);
+    else if (media.isConnected) {
+      renderPlaybackProxyPrompt(item, result);
+      if (result.status === "running") {
+        for (;;) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const current = await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`);
+          if (current.status === "complete") { renderViewer(); return; }
+          if (["failed", "cancelled"].includes(current.status)) { renderPlaybackProxyPrompt(item, current); return; }
+          const status = $("viewer-media")?.querySelector("[data-playback-proxy-status]");
+          if (status) status.textContent = current.progress?.fraction != null ? `Creating playable proxy… ${Math.round(current.progress.fraction * 100)}%` : "Creating playable proxy…";
+        }
+      }
+    }
+  } catch {}
+}
+
 function renderViewer() {
   const item = state.viewerItems[state.viewerIndex];
   if (!item) return;
@@ -106,10 +155,14 @@ function renderViewer() {
     media.src = item.display_url || item.original_url;
     media.addEventListener("error", () => {
       if (!media.isConnected || !media.getAttribute("src")) return;
-      const explanation = item.media_type === "video" && item.codec ? `This source video codec (${item.codec}) is not supported by the browser yet.` : item.media_type === "video" ? "This source video codec is not supported by the browser yet." : "This media could not be rendered.";
-      $("viewer-media").innerHTML = `<div class="viewer-error">${escapeHtml(explanation)}</div>`;
+      if (item.media_type === "video" && !browserVideoCompatible(item)) renderPlaybackProxyPrompt(item);
+      else {
+        const explanation = item.media_type === "video" && item.codec ? `This source video codec (${item.codec}) is not supported by the browser yet.` : item.media_type === "video" ? "This source video codec is not supported by the browser yet." : "This media could not be rendered.";
+        $("viewer-media").innerHTML = `<div class="viewer-error">${escapeHtml(explanation)}</div>`;
+      }
     });
     $("viewer-media").appendChild(media);
+    if (item.media_type === "video") void useExistingPlaybackProxy(item, media);
     if (item.media_type === "image") media.addEventListener("load", () => applyViewerTransform(media));
     applyViewerTransform(media);
   }
