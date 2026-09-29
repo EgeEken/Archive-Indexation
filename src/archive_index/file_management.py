@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from .workspace import Workspace, WorkspaceError, _is_reparse_point
-from .compression_analysis import blocker_for_analysis, load_or_analyze
+from .compression_analysis import AnalysisOutcome, blocker_for_analysis, load_or_analyze
 from .media.capabilities import av1_capability, ffmpeg_capabilities
 from .media.av1 import AV1_SUPPORTED_EXTENSIONS, profile_settings as av1_profile_settings
 from .media.jpegxl import (
@@ -261,9 +261,15 @@ def set_active_ruleset(workspace: Workspace, ruleset_id: str | None) -> None:
 
 
 def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, progress=None, cancelled=None) -> dict[str, object]:
-    def report(phase, completed=0, total=0):
+    def report(phase, completed=0, total=0, current_filename=None):
         if progress:
-            progress(phase, completed, total)
+            if current_filename is None:
+                progress(phase, completed, total)
+            else:
+                try:
+                    progress(phase, completed, total, current_filename)
+                except TypeError:
+                    progress(phase, completed, total)
         if cancelled and cancelled.is_set():
             raise InterruptedError("Plan analysis was cancelled.")
 
@@ -289,6 +295,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             """
             SELECT pf.id, pf.logical_asset_id, pf.relative_path, pf.filename, pf.extension,
                        pf.media_type, pf.role, pf.size_bytes, pf.mtime_ns, pf.sha256, pf.in_scope, pf.is_online,
+                       pf.width, pf.height, pf.duration_seconds, pf.codec, pf.metadata_json,
                    la.selection_state
             FROM physical_file AS pf
             JOIN logical_asset AS la ON la.id = pf.logical_asset_id
@@ -357,20 +364,20 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 continue
             key = (row["id"], profile["codec"])
             analysis_requests.setdefault(key, row)
-    analysis_results = {}
-    analysis_total = len(analysis_requests)
-    for analysis_index, ((physical_id, codec), row) in enumerate(analysis_requests.items(), 1):
-        phase = "Inspecting JPEG XL metadata" if codec == "jpeg-xl" else "Inspecting video streams"
-        report(phase, analysis_index - 1, analysis_total)
-        analysis_results[(physical_id, codec)] = load_or_analyze(
-            workspace,
-            row,
-            codec,
-            cancelled=cancelled,
-            progress=lambda phase_name: report(phase_name, analysis_index - 1, analysis_total),
-        )[0]
-    if analysis_total:
-        report("Checking compression eligibility", analysis_total, analysis_total)
+    analysis_results: dict[tuple[str, str], AnalysisOutcome] = {}
+    for codec, phase in (("jpeg-xl", "Inspecting image metadata"), ("av1", "Inspecting video metadata")):
+        requests = [(key, row) for key, row in analysis_requests.items() if key[1] == codec]
+        for analysis_index, ((physical_id, _), row) in enumerate(requests, 1):
+            report(phase, analysis_index, len(requests), row["filename"])
+            analysis_results[(physical_id, codec)] = load_or_analyze(
+                workspace,
+                row,
+                codec,
+                cancelled=cancelled,
+                progress=lambda phase_name, filename=row["filename"]: report(phase_name, analysis_index, len(requests), filename),
+            )
+        if requests:
+            report("Checking compression eligibility", len(requests), len(requests))
 
     for row, compiled in compiled_rows:
         for item in compiled:
@@ -438,6 +445,15 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             else:
                 destination_status = None
                 coalesced = False
+            av1_outcome = analysis_results.get((row["id"], "av1"))
+            preflight_required = bool(
+                operation == "compress"
+                and item["profile"] is not None
+                and item["profile"].get("codec") == "av1"
+                and not item_blockers
+                and av1_outcome is not None
+                and (av1_outcome.status == "preflight_required" or av1_outcome.analysis.get("timing_cfr") is None)
+            )
             for blocker in item_blockers:
                 key = f"{item['profile_id']}:{blocker}"
                 entry = blockers.setdefault(key, {"profile_id": item["profile_id"], "profile_name": item["profile"]["name"] if item["profile"] else None, "reason": blocker, "affected_count": 0, "filenames": []})
@@ -472,6 +488,8 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "blockers": item_blockers,
                 "rule_snapshot": item["rule"],
                 "profile_snapshot": _profile_snapshot(item["profile"]),
+                "preflight_required": preflight_required,
+                "preflight_reason": "AV1 compatibility requires execution preflight." if preflight_required else None,
                 "requires_confirmation": True,
             }
             operations.append(operation_row)
@@ -510,6 +528,7 @@ def start_plan_analysis(workspace: Workspace, ruleset_id: str | None = None) -> 
         "phase": "Loading indexed files",
         "completed": 0,
         "total": 0,
+        "current_filename": None,
         "started": time.monotonic(),
         "cancellation": cancellation,
         "result": None,
@@ -525,8 +544,8 @@ def start_plan_analysis(workspace: Workspace, ruleset_id: str | None = None) -> 
             del _plan_runs[finished.pop(0)]
 
     def run():
-        def update(phase, completed, total):
-            session.update(phase=phase, completed=completed, total=total)
+        def update(phase, completed, total, current_filename=None):
+            session.update(phase=phase, completed=completed, total=total, current_filename=current_filename)
         try:
             result = build_dry_run_plan(workspace, ruleset_id, progress=update, cancelled=cancellation)
             result["analysis_session_id"] = session_id
@@ -886,12 +905,15 @@ def _plan_summary(workspace, rows, operations, conflicts):
 
     candidate_groups = summarize(operations)
     executable_operations = [operation for operation in operations if _is_plan_executable(operation)]
+    execution_ready_operations = [operation for operation in executable_operations if not operation.get("preflight_required")]
     groups = summarize(executable_operations)
+    ready_groups = summarize(execution_ready_operations)
     for name, group in candidate_groups.items():
         matching = [operation for operation in operations if operation["operation"] == name]
         group["candidate_file_count"] = len(matching)
         group["executable_file_count"] = sum(_is_plan_executable(operation) for operation in matching)
         group["blocked_count"] = sum(bool(operation.get("blockers")) for operation in matching)
+        group["preflight_required_count"] = sum(bool(operation.get("preflight_required")) for operation in matching)
         group["conflicted_count"] = sum(bool(operation.get("conflicts")) for operation in matching)
         group["already_satisfied_count"] = sum(operation.get("destination_status") == "already_satisfied" for operation in matching)
         group["skipped_count"] = sum(operation.get("destination_status") == "skipped" for operation in matching)
@@ -906,7 +928,9 @@ def _plan_summary(workspace, rows, operations, conflicts):
             if field in candidate_groups[name]:
                 group[f"candidate_{field}"] = candidate_groups[name][field]
         group["executable_file_count"] = group["file_count"]
-        for field in ("blocked_count", "conflicted_count", "already_satisfied_count", "skipped_count"):
+        group["potential_storage_delta_bytes"] = group["estimated_storage_delta_bytes"]
+        group["estimated_storage_delta_bytes"] = ready_groups[name]["estimated_storage_delta_bytes"]
+        for field in ("blocked_count", "preflight_required_count", "conflicted_count", "already_satisfied_count", "skipped_count"):
             group[field] = candidate_groups[name][field]
 
     connection = workspace.connect()
@@ -917,7 +941,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
     asset_members = {}
     for row in files:
         asset_members.setdefault(row["logical_asset_id"], set()).add(row["id"])
-    for position, operation in enumerate(executable_operations):
+    for position, operation in enumerate(execution_ready_operations):
         asset_id = operation["logical_asset_id"]
         members = asset_members.get(asset_id)
         if members is None:
@@ -929,13 +953,16 @@ def _plan_summary(workspace, rows, operations, conflicts):
             members.add(f"planned-output:{position}")
     assets_with_no_surviving_representation = sum(not members for members in asset_members.values())
     candidate_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in candidate_groups.values())
-    storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
+    potential_storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in groups.values())
+    storage_delta = sum(int(group["estimated_storage_delta_bytes"]) for group in ready_groups.values())
     return {
         "candidate_count": len(operations),
         "executable_count": len(executable_operations),
         "conflict_count": len(conflicts),
         "conflicted_count": sum(bool(operation["conflicts"]) for operation in operations),
-        "safe_count": len(executable_operations),
+        "safe_count": len(execution_ready_operations),
+        "execution_ready_count": len(execution_ready_operations),
+        "preflight_required_count": sum(bool(operation.get("preflight_required")) for operation in operations),
         "blocked_count": sum(bool(operation.get("blockers")) for operation in operations),
         "already_satisfied_count": sum(operation.get("destination_status") == "already_satisfied" for operation in operations),
         "skipped_count": sum(operation.get("destination_status") == "skipped" for operation in operations),
@@ -944,6 +971,7 @@ def _plan_summary(workspace, rows, operations, conflicts):
         "move": groups["move"],
         "compress": groups["compress"],
         "candidate_storage_delta_bytes": candidate_storage_delta,
+        "potential_storage_delta_bytes": potential_storage_delta,
         "executable_storage_delta_bytes": storage_delta,
         "estimated_storage_delta_bytes": storage_delta,
         "estimated_net_bytes_freed": max(0, -storage_delta),
@@ -1048,6 +1076,8 @@ def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object]
                 "destination_status": operation.get("destination_status"),
                 "conflicts": operation.get("conflicts") or [],
                 "blockers": operation.get("blockers") or [],
+                "preflight_required": bool(operation.get("preflight_required")),
+                "preflight_reason": operation.get("preflight_reason"),
                 "estimated_output_bytes": operation.get("estimated_output_bytes"),
                 "estimated_storage_delta_bytes": operation.get("estimated_storage_delta_bytes"),
                 "coalesced_by_planned_target": bool(operation.get("coalesced_by_planned_target")),
@@ -1123,6 +1153,8 @@ def _empty_plan(reason: str):
             "conflict_count": 0,
             "conflicted_count": 0,
             "safe_count": 0,
+            "execution_ready_count": 0,
+            "preflight_required_count": 0,
             "blocked_count": 0,
             "capability_blockers": [],
             "delete": {"file_count": 0, "bytes": 0, "source_bytes": 0, "estimated_storage_delta_bytes": 0},
@@ -1130,6 +1162,7 @@ def _empty_plan(reason: str):
             "move": {"file_count": 0, "bytes_moved": 0, "estimated_storage_delta_bytes": 0},
             "compress": {"file_count": 0, "source_bytes": 0, "estimated_output_bytes": 0, "estimated_bytes_saved": 0, "estimated_storage_delta_bytes": 0},
             "candidate_storage_delta_bytes": 0,
+            "potential_storage_delta_bytes": 0,
             "executable_storage_delta_bytes": 0,
             "estimated_storage_delta_bytes": 0,
             "estimated_net_bytes_freed": 0,

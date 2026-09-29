@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import json
+import io
 import unittest
 from fractions import Fraction
 from unittest.mock import patch
@@ -13,7 +14,7 @@ from pathlib import Path
 from archive_index.file_management import build_dry_run_plan, list_profiles, save_ruleset
 from archive_index.file_management_executor import cancel_execution, get_execution, prepare_execution, start_execution
 from archive_index.indexing.scanner import scan
-from archive_index.media.av1 import _timing_is_cfr, analyze_source, build_command, capped_dimensions, source_blocker, source_blocker_from_info
+from archive_index.media.av1 import ProbeTimeoutError, _run_ffprobe, _timing_is_cfr, analyze_source, build_command, capped_dimensions, source_blocker, source_blocker_from_info
 from archive_index.workspace import Workspace
 
 
@@ -32,7 +33,7 @@ class Phase10CAV1Tests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def _wait(self, execution_id: str):
-        for _ in range(600):
+        for _ in range(3000):
             result = get_execution(self.workspace, execution_id)
             if result["status"] not in {"running", "cancelling"}:
                 return result
@@ -96,6 +97,73 @@ class Phase10CAV1Tests(unittest.TestCase):
         with patch("archive_index.media.av1.subprocess.run", return_value=result) as probe:
             self.assertTrue(_timing_is_cfr(self.root / "clip.mp4", {}, 3.0, Fraction(30, 1)))
         self.assertEqual(probe.call_count, 1)
+
+    def test_cancellable_ffprobe_has_deadline_and_stops_hung_child(self):
+        class HungProcess:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            def __init__(self):
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+
+            def poll(self):
+                return -9 if self.killed else None
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                if not self.killed:
+                    raise subprocess.TimeoutExpired("ffprobe", timeout)
+                self.returncode = -9
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                raise AssertionError("hung probe should be stopped before communicate")
+
+        process = HungProcess()
+        with patch("archive_index.media.av1.subprocess.Popen", return_value=process):
+            with self.assertRaises(ProbeTimeoutError):
+                _run_ffprobe(["ffprobe"], threading.Event(), timeout=0)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+
+    def test_plan_does_not_run_deep_av1_timing_for_uncached_source(self):
+        profile = next(item for item in list_profiles(self.workspace) if item["codec"] == "av1")
+        ruleset = save_ruleset(
+            self.workspace,
+            name="av1-plan-preflight",
+            rules=[{"match": {"format": "mp4"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "replace"}}],
+        )
+        with patch("archive_index.compression_analysis.analyze_av1", side_effect=AssertionError("Plan ran AV1 deep analysis")):
+            plan = build_dry_run_plan(self.workspace, ruleset["id"])
+        self.assertTrue(plan["operations"][0]["preflight_required"])
+        self.assertEqual(plan["summary"]["preflight_required_count"], 1)
+
+    def test_preflight_timeout_is_not_persisted(self):
+        from archive_index.compression_analysis import preflight_av1
+
+        connection = self.workspace.connect()
+        try:
+            row = connection.execute("SELECT id, relative_path, sha256, size_bytes, mtime_ns FROM physical_file WHERE extension = '.mp4'").fetchone()
+        finally:
+            connection.close()
+        with patch("archive_index.compression_analysis.analyze_av1", side_effect=ProbeTimeoutError("timed out")) as analyzer:
+            first = preflight_av1(self.workspace, row, timeout=0.01)
+            second = preflight_av1(self.workspace, row, timeout=0.01)
+        self.assertEqual(first.status, "timeout")
+        self.assertEqual(second.status, "timeout")
+        self.assertEqual(analyzer.call_count, 2)
+        connection = self.workspace.connect()
+        try:
+            self.assertIsNone(connection.execute("SELECT analysis_json FROM compression_source_analysis WHERE physical_file_id = ? AND codec = 'av1'", (row["id"],)).fetchone())
+        finally:
+            connection.close()
 
     def test_extra_stream_blocker_identifies_codec(self):
         info = {

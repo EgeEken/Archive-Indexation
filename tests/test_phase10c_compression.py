@@ -15,8 +15,8 @@ from PIL import ImageCms
 from PIL.TiffImagePlugin import IFDRational
 
 from archive_index.api.browser import physical_rows
-from archive_index.file_management import build_dry_run_plan, list_profiles, list_rulesets, save_ruleset, start_plan_analysis, plan_analysis_status
-from archive_index.file_management_executor import get_execution, prepare_execution, start_execution
+from archive_index.file_management import build_dry_run_plan, list_profiles, list_rulesets, save_profile, save_ruleset, start_plan_analysis, plan_analysis_status
+from archive_index.file_management_executor import ExecutionConflict, get_execution, prepare_execution, start_execution
 from archive_index.file_management_provenance import link_managed_derivatives
 from archive_index.indexing.reconciliation import reconcile_workspace
 from archive_index.indexing.scanner import scan
@@ -220,6 +220,37 @@ class Phase10CCompressionTests(unittest.TestCase):
         with patch("archive_index.file_management_executor.build_dry_run_plan", side_effect=AssertionError("review rebuilt the plan")):
             execution = prepare_execution(self.workspace, ruleset["id"], plan["plan_digest"], session_id)
         self.assertEqual(execution["status"], "draft")
+
+    def test_review_rejects_profile_changes_without_reanalyzing(self):
+        profile = save_profile(
+            self.workspace,
+            name="Custom JXL",
+            codec="jpeg-xl",
+            container="jxl",
+            settings={"quality": 60, "effort": 7},
+        )
+        ruleset = save_ruleset(
+            self.workspace,
+            name="profile-stale",
+            rules=[{"match": {"format": "jpeg"}, "action": {"operation": "compress", "profile_id": profile["id"], "source_disposition": "keep", "destination_dir": "derivatives"}}],
+        )
+        session_id = start_plan_analysis(self.workspace, ruleset["id"])
+        for _ in range(200):
+            status = plan_analysis_status(self.workspace, session_id)
+            if status["status"] == "complete":
+                break
+            time.sleep(0.01)
+        self.assertEqual(status["status"], "complete")
+        save_profile(
+            self.workspace,
+            name="Custom JXL",
+            codec="jpeg-xl",
+            container="jxl",
+            settings={"quality": 40, "effort": 7},
+            profile_id=profile["id"],
+        )
+        with self.assertRaises(ExecutionConflict):
+            prepare_execution(self.workspace, ruleset["id"], status["result"]["plan_digest"], session_id)
 
     def test_streaming_metadata_inventory_stops_before_jpeg_scan_data(self):
         source = self.root / "large.jpg"

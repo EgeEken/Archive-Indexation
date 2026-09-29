@@ -16,6 +16,12 @@ AV1_ALGORITHM_VERSION = "2"
 AV1_SUPPORTED_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v", ".mkv"})
 AV1_AUDIO_CODECS = frozenset({"aac", "alac", "mp3", "ac3", "eac3"})
 AV1_HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67", "bt2020-10", "bt2020-12"})
+PLAN_METADATA_TIMEOUT_SECONDS = 2.5
+EXECUTION_PREFLIGHT_TIMEOUT_SECONDS = 15.0
+
+
+class ProbeTimeoutError(RuntimeError):
+    pass
 
 
 def profile_settings(profile: dict[str, object] | None) -> dict[str, object]:
@@ -40,7 +46,15 @@ def profile_settings(profile: dict[str, object] | None) -> dict[str, object]:
     }
 
 
-def analyze_source(source: Path, cancelled=None, progress=None) -> dict[str, object]:
+def analyze_source(
+    source: Path,
+    cancelled=None,
+    progress=None,
+    *,
+    deep_timing: bool = True,
+    metadata_timeout: float = PLAN_METADATA_TIMEOUT_SECONDS,
+    timing_timeout: float = EXECUTION_PREFLIGHT_TIMEOUT_SECONDS,
+) -> dict[str, object]:
     if progress:
         progress("Inspecting video streams")
     result = _run_ffprobe(
@@ -49,6 +63,7 @@ def analyze_source(source: Path, cancelled=None, progress=None) -> dict[str, obj
             "-show_chapters", str(source),
         ],
         cancelled,
+        timeout=metadata_timeout,
     )
     if result.returncode:
         raise ValueError("FFprobe could not read the video source.")
@@ -64,9 +79,15 @@ def analyze_source(source: Path, cancelled=None, progress=None) -> dict[str, obj
     rotation = _rotation(video_stream)
     fps = _ratio(video_stream.get("avg_frame_rate")) or _ratio(video_stream.get("r_frame_rate"))
     duration = _number(video_stream.get("duration")) or _number((payload.get("format") or {}).get("duration"))
-    if progress:
-        progress("Checking video frame timing")
-    timing_cfr, timing = _timing_is_cfr(source, video_stream, duration, fps, cancelled=cancelled, return_details=True)
+    timing_cfr = None
+    timing = {"status": "preflight_required"}
+    if deep_timing:
+        if progress:
+            progress("Checking video frame timing")
+        timing_cfr, timing = _timing_is_cfr(
+            source, video_stream, duration, fps, cancelled=cancelled,
+            timeout=timing_timeout, return_details=True,
+        )
     format_tags = dict((payload.get("format") or {}).get("tags") or {})
     return {
         "streams": streams,
@@ -92,6 +113,7 @@ def analyze_source(source: Path, cancelled=None, progress=None) -> dict[str, obj
         "chapters": payload.get("chapters") or [],
         "timing_cfr": timing_cfr,
         "timing": timing,
+        "preflight_required": not deep_timing,
     }
 
 
@@ -100,33 +122,35 @@ def source_blocker(source: Path, profile: dict[str, object] | None) -> str | Non
         return "This video container is not supported by production AV1 compression."
     try:
         info = analyze_source(source)
+    except ProbeTimeoutError as error:
+        return str(error)
     except ValueError as error:
         return str(error)
     return source_blocker_from_info(info, profile)
 
 
-def source_blocker_from_info(info: dict[str, object], profile: dict[str, object] | None) -> str | None:
-    if not info["width"] or not info["height"] or not info["duration"] or not info["fps"]:
+def source_blocker_from_info(info: dict[str, object], profile: dict[str, object] | None, *, require_timing: bool = True) -> str | None:
+    if not info.get("width") or not info.get("height") or not info.get("duration") or not info.get("fps"):
         return "Video dimensions, duration, and frame rate must be known for AV1 execution."
     unsupported = [stream for stream in info.get("ancillary") or [] if not _ancillary_supported(stream)]
     if unsupported:
         descriptions = ", ".join(_ancillary_description(stream) for stream in unsupported[:3])
         suffix = f"; {len(unsupported) - 3} more" if len(unsupported) > 3 else ""
         return f"{descriptions}{suffix}."
-    for stream in info["audio"]:
+    for stream in info.get("audio") or []:
         if stream.get("codec_name") not in AV1_AUDIO_CODECS:
             return f"Audio codec {stream.get('codec_name') or 'unknown'} is not safe to stream-copy into MP4."
-    if info["color_transfer"] in AV1_HDR_TRANSFERS:
+    if info.get("color_transfer") in AV1_HDR_TRANSFERS:
         return "HDR/PQ/HLG video is not yet supported for AV1 archival replacement."
-    if info["pix_fmt"] not in {"yuv420p", "yuvj420p"} or info["bits_per_raw_sample"] > 8:
+    if info.get("pix_fmt") not in {"yuv420p", "yuvj420p"} or int(info.get("bits_per_raw_sample") or 8) > 8:
         return "Only validated 8-bit SDR video is currently supported for AV1 archival replacement."
-    if info.get("timing_cfr") is not True:
+    if require_timing and info.get("timing_cfr") is not True:
         return "Video frame timing could not be proven constant-frame-rate."
     metadata_issue = _metadata_blocker(info)
     if metadata_issue:
         return metadata_issue
     settings = profile_settings(profile)
-    if float(info["fps"]) <= 0 or float(settings["fps_cap"]) <= 0:
+    if float(info.get("fps") or 0) <= 0 or float(settings["fps_cap"]) <= 0:
         return "Video frame rate is invalid for AV1 execution."
     return None
 
@@ -209,7 +233,7 @@ def encode(source: Path, output: Path, info: dict[str, object], profile: dict[st
 def validate(source: Path, output: Path, source_info: dict[str, object], profile: dict[str, object]) -> dict[str, object]:
     if not output.is_file() or output.stat().st_size <= 0:
         raise ValueError("AV1 encoder returned an empty output.")
-    output_info = analyze_source(output)
+    output_info = analyze_source(output, deep_timing=False)
     _validate_output_contract(output_info, source_info, profile)
     _validate_samples(source, output, source_info, output_info)
     return {
@@ -224,7 +248,7 @@ def validate(source: Path, output: Path, source_info: dict[str, object], profile
 def validate_final(output: Path, source_info: dict[str, object], profile: dict[str, object], expected_sha256: str | None = None) -> dict[str, object]:
     if not output.is_file() or output.stat().st_size <= 0:
         raise ValueError("AV1 final output is unavailable.")
-    output_info = analyze_source(output)
+    output_info = analyze_source(output, deep_timing=False)
     _validate_output_contract(output_info, source_info, profile)
     sha256 = _sha256(output)
     if expected_sha256 and sha256 != expected_sha256:
@@ -351,7 +375,7 @@ def _is_cfr(stream: dict[str, object]) -> bool:
     return average is not None and real is not None and abs(float(average) - float(real)) < 0.01
 
 
-def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | None, fps: Fraction | None, *, cancelled=None, return_details: bool = False):
+def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | None, fps: Fraction | None, *, cancelled=None, timeout: float = EXECUTION_PREFLIGHT_TIMEOUT_SECONDS, return_details: bool = False):
     def pack(value, details):
         return (value, details) if return_details else value
     if duration is None or fps is None or float(fps) <= 0:
@@ -369,6 +393,7 @@ def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | No
             "-show_entries", "frame=best_effort_timestamp_time,pkt_duration_time", "-of", "json", str(source),
         ],
         cancelled,
+        timeout=timeout,
     )
     if probe.returncode:
         return pack(None, {})
@@ -396,27 +421,42 @@ def _timing_is_cfr(source: Path, stream: dict[str, object], duration: float | No
     })
 
 
-def _run_ffprobe(arguments: list[str], cancelled=None):
+def _run_ffprobe(arguments: list[str], cancelled=None, *, timeout: float = PLAN_METADATA_TIMEOUT_SECONDS):
     if cancelled is None:
-        return subprocess.run(arguments, capture_output=True, text=True, timeout=30, check=False)
+        try:
+            return subprocess.run(arguments, capture_output=True, text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired as error:
+            raise ProbeTimeoutError(f"FFprobe exceeded the {timeout:g}-second safety deadline.") from error
     process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + timeout
     try:
-        while process.poll() is None:
+        while True:
             if cancelled.is_set():
-                process.terminate()
-                try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=1)
+                _stop_process(process)
                 raise InterruptedError("Plan analysis was cancelled.")
-            time.sleep(0.02)
-        stdout, stderr = process.communicate(timeout=1)
-        return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_process(process)
+                raise ProbeTimeoutError(f"FFprobe exceeded the {timeout:g}-second safety deadline.")
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
     finally:
         if process.poll() is None:
-            process.kill()
-            process.wait(timeout=1)
+            _stop_process(process)
+
+
+def _stop_process(process) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=0.5)
 
 
 def _ancillary_summary(streams: list[dict[str, object]]) -> list[dict[str, object]]:

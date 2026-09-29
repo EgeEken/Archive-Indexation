@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from .file_management import build_dry_run_plan, completed_plan_analysis, list_rulesets
+from .compression_analysis import blocker_for_analysis, preflight_av1
+from .file_management import _profile_snapshot, build_dry_run_plan, completed_plan_analysis, list_profiles, list_rulesets
 from .file_management_provenance import link_managed_derivatives, record_managed_derivative
 from .indexing.reconciliation import reconcile_workspace
 from .indexing.scanner import hash_file, scan
@@ -149,9 +150,10 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     profile_id, source_disposition, destination_status, conflicts_json,
                     blockers_json, rule_snapshot_json, profile_snapshot_json,
                     estimated_output_bytes, estimated_storage_delta, conflict_policy,
+                    metadata_contract_json,
                     target_expected_size_bytes, target_expected_mtime_ns, target_expected_sha256,
                     target_expected_file_type, error_message, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()), execution_id, position,
@@ -165,6 +167,7 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     _json(operation.get("rule_snapshot") or {}), _json(operation.get("profile_snapshot")),
                     int(operation.get("estimated_output_bytes") or 0), int(operation.get("estimated_storage_delta_bytes") or 0),
                     operation.get("conflict_policy", "rename"),
+                    _json({"preflight_required": bool(operation.get("preflight_required")), "preflight_reason": operation.get("preflight_reason")}),
                     (operation.get("target_snapshot") or {}).get("size_bytes"),
                     (operation.get("target_snapshot") or {}).get("mtime_ns"),
                     (operation.get("target_snapshot") or {}).get("sha256"),
@@ -193,6 +196,7 @@ def _validate_analyzed_plan(workspace: Workspace, plan: dict[str, object]) -> No
         }
     finally:
         connection.close()
+    profiles = {item["id"]: item for item in list_profiles(workspace, seed=False, include_legacy=True)}
     for operation in operations:
         physical_id = operation.get("physical_file_id")
         if not physical_id:
@@ -202,6 +206,11 @@ def _validate_analyzed_plan(workspace: Workspace, plan: dict[str, object]) -> No
             raise ExecutionConflict("The plan changed. Analyze again before executing.")
         if any(row[key] != operation.get(operation_key) for key, operation_key in (("size_bytes", "source_size_bytes"), ("mtime_ns", "source_mtime_ns"), ("sha256", "source_sha256"))):
             raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        profile_id = operation.get("profile_id")
+        if profile_id:
+            profile = profiles.get(profile_id)
+            if profile is None or _json(_profile_snapshot(profile)) != _json(operation.get("profile_snapshot") or {}):
+                raise ExecutionConflict("The plan changed. Analyze again before executing.")
         source = _validate_target(workspace, operation["source_relative_path"], allow_missing=False)
         current_stat = source.stat()
         if current_stat.st_size != int(operation.get("source_size_bytes") or 0) or current_stat.st_mtime_ns != int(operation.get("source_mtime_ns") or 0):
@@ -695,7 +704,11 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
     source = _validate_source(workspace, operation)
     if operation.get("target_relative_path", "").casefold().endswith(".jxl"):
         raise OperationFailure("AV1 output target must be an MP4 file.")
-    info = analyze_av1(source)
+    _set_stage(workspace, operation["id"], "preflight")
+    info = _av1_preflight(workspace, execution_id, operation, profile, cancel)
+    if info is None:
+        return
+    _validate_source(workspace, operation)
     target = _validate_target(workspace, operation["target_relative_path"], allow_missing=True)
     occupied = _existing_case_insensitive_target(workspace, operation["target_relative_path"])
     if occupied is not None:
@@ -732,6 +745,8 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         except InterruptedError as error:
             raise OperationCancelled(str(error)) from error
         validation = validate_av1(source, temp, info, profile)
+        if cancel.is_set() or _cancel_requested(workspace, execution_id):
+            raise OperationCancelled("Execution cancelled after AV1 validation.")
         if validation["size_bytes"] >= int(operation["source_size_bytes"] or 0):
             _remove_owned_temp(workspace, temp)
             _skip_operation(workspace, operation["id"], "Skipped — compressed output was not smaller than the source.")
@@ -780,6 +795,40 @@ def _compress_av1(workspace: Workspace, execution_id: str, operation, cancel: th
         if temp.exists():
             _remove_owned_temp(workspace, temp)
         raise
+
+
+def _av1_preflight(workspace, execution_id, operation, profile, cancel):
+    row = {
+        "id": operation["physical_file_id"],
+        "relative_path": operation["source_relative_path"],
+        "sha256": operation["source_sha256"],
+        "size_bytes": operation["source_size_bytes"],
+        "mtime_ns": operation["source_mtime_ns"],
+    }
+    outcome = preflight_av1(
+        workspace,
+        row,
+        cancelled=cancel,
+        progress=lambda phase: _set_stage(workspace, operation["id"], "preflight"),
+    )
+    if outcome.status == "unsupported":
+        reason = blocker_for_analysis("av1", outcome, profile, operation.get("source_disposition", "keep")) or outcome.message or "Video is unsupported by the current AV1 safe subset."
+        _skip_operation(workspace, operation["id"], f"Skipped — unsupported for current AV1 safe subset: {reason}")
+        return None
+    if outcome.status == "timeout":
+        _skip_operation(workspace, operation["id"], "Skipped — video timing analysis exceeded the safe preflight limit.")
+        return None
+    if outcome.status == "transient_failure":
+        _skip_operation(workspace, operation["id"], f"Skipped — AV1 preflight could not complete: {outcome.message or 'temporary probe failure.'}")
+        return None
+    reason = blocker_for_analysis("av1", outcome, profile, operation.get("source_disposition", "keep"))
+    if reason:
+        _skip_operation(workspace, operation["id"], f"Skipped — unsupported for current AV1 safe subset: {reason}")
+        return None
+    if cancel.is_set() or _cancel_requested(workspace, execution_id):
+        raise OperationCancelled("Execution cancelled after AV1 preflight.")
+    _set_stage(workspace, operation["id"], "encoding")
+    return outcome.analysis
 
 
 def _swap_av1_source(workspace, execution_id, operation, cancel, temp, source_info, profile, output_size, output_sha256):
@@ -877,6 +926,8 @@ def _recover_compressed_final(workspace, execution_id, operation, target) -> Non
         return
     final = _validate_final_jxl(target, {"size_bytes": operation["actual_output_size_bytes"], "sha256": operation["actual_output_sha256"]})
     metadata_contract = _parse_json(operation.get("metadata_contract_json")) or {}
+    if set(metadata_contract).issubset({"preflight_required", "preflight_reason"}):
+        metadata_contract = {}
     if not metadata_contract:
         source = _validate_target(workspace, operation["source_relative_path"], allow_missing=True)
         if source.is_file():
@@ -1534,6 +1585,7 @@ def _execution_payload(execution, operations) -> dict[str, object]:
         "current_operation": {
             "operation": current["operation"],
             "filename": current["filename"],
+            "stage": current["stage"],
             "profile_name": (_parse_json(current["profile_snapshot_json"]) or {}).get("name"),
             "bytes_completed": current["bytes_completed"],
             "bytes_total": current["source_size_bytes"],
@@ -1565,6 +1617,9 @@ def _operation_payload(row) -> dict[str, object]:
     value["blockers"] = _parse_json(value.pop("blockers_json")) or []
     value["rule_snapshot"] = _parse_json(value.pop("rule_snapshot_json")) or {}
     value["profile_snapshot"] = _parse_json(value.pop("profile_snapshot_json"))
+    metadata_contract = _parse_json(value.get("metadata_contract_json")) or {}
+    value["preflight_required"] = bool(metadata_contract.get("preflight_required"))
+    value["preflight_reason"] = metadata_contract.get("preflight_reason")
     return value
 
 
