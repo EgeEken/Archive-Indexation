@@ -7,6 +7,7 @@ import os
 import subprocess
 import threading
 import uuid
+from fractions import Fraction
 from pathlib import Path
 
 from ..indexing.scanner import hash_file
@@ -128,10 +129,14 @@ def _run(workspace: Workspace, physical_id: str, cancel: threading.Event) -> Non
         output.parent.mkdir(parents=True, exist_ok=True)
         temp = output.with_name(f".{output.name}.{row['id']}.tmp")
         temp.unlink(missing_ok=True)
+        filters = ["scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2"]
+        source_fps = _source_fps(source_path)
+        if source_fps is not None and source_fps > 60.001:
+            filters.append("fps=60")
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(source_path),
             "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-c:v", "libx264", "-preset", "veryfast",
-            "-crf", "23", "-pix_fmt", "yuv420p", "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-crf", "23", "-pix_fmt", "yuv420p", "-vf", ",".join(filters),
             "-fps_mode", "passthrough", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", "-f", "mp4", str(temp),
         ]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -182,6 +187,20 @@ def _source_current(path: Path, source) -> bool:
         return path.is_file() and stat.st_size == int(source["size_bytes"]) and stat.st_mtime_ns == int(source["mtime_ns"]) and hash_file(path) == source["sha256"]
     except OSError:
         return False
+
+
+def _source_fps(path: Path) -> float | None:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode or not value or value in {"0/0", "N/A"}:
+            return None
+        return float(Fraction(value))
+    except (OSError, ValueError, ZeroDivisionError, subprocess.TimeoutExpired):
+        return None
 
 
 def _proxy_is_current(workspace: Workspace, row) -> bool:
