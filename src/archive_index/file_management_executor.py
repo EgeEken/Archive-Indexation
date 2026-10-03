@@ -64,7 +64,18 @@ _progress_marks: dict[str, tuple[float, int]] = {}
 _progress_lock = threading.Lock()
 
 
-def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest: str, analysis_session_id: str | None = None) -> dict[str, object]:
+def _selection_digest(positions: set[int]) -> str:
+    return hashlib.sha256(json.dumps(sorted(positions), separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def prepare_execution(
+    workspace: Workspace,
+    ruleset_id: str | None,
+    plan_digest: str,
+    analysis_session_id: str | None = None,
+    selected_operations: list[int] | None = None,
+    rtmd_loss_acknowledged: bool = False,
+) -> dict[str, object]:
     if not isinstance(plan_digest, str) or not plan_digest:
         raise ValueError("plan_digest is required")
     _recover_startup(workspace)
@@ -91,12 +102,13 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
             if active["status"] == "interrupted":
                 raise ExecutionConflict("An interrupted File Management execution must be resumed or abandoned before starting a new one.")
             raise ExecutionConflict("A File Management execution is already changing files for this workspace.")
-        existing = connection.execute(
-            "SELECT id FROM file_management_execution WHERE status = 'draft' AND ruleset_id IS ? AND plan_digest = ? ORDER BY created_at DESC LIMIT 1",
-            (plan.get("ruleset_id"), plan_digest),
-        ).fetchone()
-        if existing is not None:
-            return get_execution(workspace, existing["id"])
+        if selected_operations is None:
+            existing = connection.execute(
+                "SELECT id FROM file_management_execution WHERE status = 'draft' AND ruleset_id IS ? AND plan_digest = ? ORDER BY created_at DESC LIMIT 1",
+                (plan.get("ruleset_id"), plan_digest),
+            ).fetchone()
+            if existing is not None:
+                return get_execution(workspace, existing["id"])
         now = _timestamp()
         connection.execute(
             "UPDATE file_management_execution SET status = 'superseded', finished_at = ?, updated_at = ?, error_message = ? WHERE status = 'draft'",
@@ -107,13 +119,38 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
             enumerate(plan.get("operations") or []),
             key=lambda item: (OPERATION_PHASE.get(str(item[1].get("operation")), 9), item[0]),
         )
+        by_plan_position = {int(operation.get("plan_position", original_position)): operation for original_position, operation in operations}
+        pending_positions = {
+            position for position, operation in by_plan_position.items()
+            if _operation_status(operation) == "pending"
+        }
+        selected_positions = pending_positions if selected_operations is None else {int(position) for position in selected_operations}
+        if selected_positions - pending_positions:
+            raise ExecutionConflict("The selected operations are not executable in the analyzed plan.")
+        copy_positions = {
+            f"{operation.get('rule_id')}:{operation.get('physical_file_id')}": int(operation.get("plan_position", original_position))
+            for original_position, operation in operations
+            if operation.get("operation") == "copy"
+        }
+        missing_dependencies = {
+            copy_positions[operation.get("dependency_key")]
+            for original_position, operation in operations
+            if int(operation.get("plan_position", original_position)) in selected_positions
+            and operation.get("dependency_key") in copy_positions
+            and copy_positions[operation.get("dependency_key")] not in selected_positions
+        }
+        if missing_dependencies:
+            raise ExecutionConflict("Select the required archival copy before selecting its dependent compression operation.")
+        selection_digest = _selection_digest(selected_positions)
         executable = [
-            operation for _, operation in operations
-            if _operation_status(operation) == "pending" and not operation.get("preflight_required")
+            operation for original_position, operation in operations
+            if int(operation.get("plan_position", original_position)) in selected_positions
+            and _operation_status(operation) == "pending" and not operation.get("preflight_required")
         ]
         potential_executable = [
-            operation for _, operation in operations
-            if _operation_status(operation) == "pending"
+            operation for original_position, operation in operations
+            if int(operation.get("plan_position", original_position)) in selected_positions
+            and _operation_status(operation) == "pending"
         ]
         estimated_written = sum(
             int(operation.get("bytes") or 0) if operation.get("operation") == "copy" else int(operation.get("estimated_output_bytes") or 0)
@@ -128,24 +165,31 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
         summary = dict(plan.get("summary") or {})
         summary["execution_executable_count"] = len(executable)
         summary["execution_potential_count"] = len(potential_executable)
+        summary["execution_selected_count"] = len(selected_positions)
+        summary["execution_deselected_count"] = len(pending_positions - selected_positions)
         connection.execute(
             """
             INSERT INTO file_management_execution(
                 id, ruleset_id, plan_digest, status, summary_json, plan_metadata_json,
                 created_at, updated_at, estimated_bytes_written, estimated_bytes_removed,
-                estimated_storage_delta, temporary_space_upper_bound_bytes
-            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
+                estimated_storage_delta, temporary_space_upper_bound_bytes, rtmd_loss_acknowledged,
+                selection_digest
+            ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 execution_id, plan.get("ruleset_id"), plan_digest,
                 _json(summary), _json({"executor": plan.get("executor"), "ruleset_id": plan.get("ruleset_id")}),
                 now, now, estimated_written, estimated_removed, estimated_delta,
                 int((summary.get("temporary_space_upper_bound_bytes") or 0)),
+                int(bool(rtmd_loss_acknowledged)), selection_digest,
             ),
         )
         copy_operation_ids = {}
         for position, (plan_position, operation) in enumerate(operations):
             status = _operation_status(operation)
+            selected = plan_position in selected_positions
+            if status == "pending" and not selected:
+                status = "excluded"
             reason = _operation_reason(operation, status)
             operation_id = str(uuid.uuid4())
             dependency_key = operation.get("dependency_key")
@@ -163,8 +207,9 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     estimated_output_bytes, estimated_storage_delta, conflict_policy,
                     metadata_contract_json, preservation_report_json,
                     target_expected_size_bytes, target_expected_mtime_ns, target_expected_sha256,
-                    target_expected_file_type, dependency_key, dependency_operation_id, error_message, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_expected_file_type, dependency_key, dependency_operation_id, error_message, updated_at,
+                    user_selected, original_plan_position, requires_rtmd_ack
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     operation_id, execution_id, position,
@@ -186,6 +231,7 @@ def prepare_execution(workspace: Workspace, ruleset_id: str | None, plan_digest:
                     (operation.get("target_snapshot") or {}).get("file_type"),
                     dependency_key, dependency_operation_id,
                     reason, now,
+                    int(selected), plan_position, int(bool(operation.get("requires_rtmd_ack"))),
                 ),
             )
     return get_execution(workspace, execution_id)
@@ -203,7 +249,7 @@ def _validate_analyzed_plan(workspace: Workspace, plan: dict[str, object]) -> No
         indexed = {
             row["id"]: row
             for row in connection.execute(
-                f"SELECT id, relative_path, size_bytes, mtime_ns, sha256, is_online FROM physical_file WHERE id IN ({','.join('?' for _ in ids) or '?'})",
+                f"SELECT pf.id, pf.relative_path, pf.size_bytes, pf.mtime_ns, pf.sha256, pf.is_online, pf.role, la.selection_state FROM physical_file AS pf JOIN logical_asset AS la ON la.id = pf.logical_asset_id WHERE pf.id IN ({','.join('?' for _ in ids) or '?'})",
                 ids or [""],
             ).fetchall()
         }
@@ -218,6 +264,8 @@ def _validate_analyzed_plan(workspace: Workspace, plan: dict[str, object]) -> No
         if row is None or not row["is_online"] or row["relative_path"] != operation.get("source_relative_path"):
             raise ExecutionConflict("The plan changed. Analyze again before executing.")
         if any(row[key] != operation.get(operation_key) for key, operation_key in (("size_bytes", "source_size_bytes"), ("mtime_ns", "source_mtime_ns"), ("sha256", "source_sha256"))):
+            raise ExecutionConflict("The plan changed. Analyze again before executing.")
+        if row["role"] != operation.get("source_role") or row["selection_state"] != operation.get("selection_state"):
             raise ExecutionConflict("The plan changed. Analyze again before executing.")
         profile_id = operation.get("profile_id")
         if profile_id:
@@ -314,8 +362,8 @@ def get_execution(workspace: Workspace, execution_id: str) -> dict[str, object]:
     return _execution_payload(execution, operations)
 
 
-def start_execution(workspace: Workspace, execution_id: str) -> dict[str, object]:
-    return _start_execution(workspace, execution_id, {"draft"})
+def start_execution(workspace: Workspace, execution_id: str, rtmd_loss_acknowledged: bool | None = None) -> dict[str, object]:
+    return _start_execution(workspace, execution_id, {"draft"}, rtmd_loss_acknowledged)
 
 
 def resume_execution(workspace: Workspace, execution_id: str) -> dict[str, object]:
@@ -417,7 +465,7 @@ def recover_workspace(workspace: Workspace) -> None:
     _recover_startup(workspace)
 
 
-def _start_execution(workspace: Workspace, execution_id: str, allowed: set[str]) -> dict[str, object]:
+def _start_execution(workspace: Workspace, execution_id: str, allowed: set[str], rtmd_loss_acknowledged: bool | None = None) -> dict[str, object]:
     if _active_job(workspace) is not None:
         raise ExecutionConflict("File Management cannot start while a workspace job is running.")
     _recover_startup(workspace)
@@ -427,7 +475,7 @@ def _start_execution(workspace: Workspace, execution_id: str, allowed: set[str])
         if worker is not None and worker.thread.is_alive():
             raise ExecutionConflict("A File Management execution is already running for this workspace.")
         with workspace.transaction() as connection:
-            row = connection.execute("SELECT status FROM file_management_execution WHERE id = ?", (execution_id,)).fetchone()
+            row = connection.execute("SELECT status, rtmd_loss_acknowledged FROM file_management_execution WHERE id = ?", (execution_id,)).fetchone()
             if row is None:
                 raise ExecutionNotFound("File Management execution was not found.")
             other = connection.execute(
@@ -440,6 +488,20 @@ def _start_execution(workspace: Workspace, execution_id: str, allowed: set[str])
                 raise ExecutionConflict("A File Management execution is already changing files for this workspace.")
             if row["status"] not in allowed:
                 raise ExecutionConflict("This execution cannot be started in its current state.")
+            if rtmd_loss_acknowledged is not None:
+                connection.execute(
+                    "UPDATE file_management_execution SET rtmd_loss_acknowledged = ?, updated_at = ? WHERE id = ?",
+                    (int(bool(rtmd_loss_acknowledged)), _timestamp(), execution_id),
+                )
+                acknowledged = bool(rtmd_loss_acknowledged)
+            else:
+                acknowledged = bool(row["rtmd_loss_acknowledged"])
+            required = connection.execute(
+                "SELECT COUNT(*) FROM file_management_execution_operation WHERE execution_id = ? AND requires_rtmd_ack = 1 AND status = 'pending' AND user_selected = 1",
+                (execution_id,),
+            ).fetchone()[0]
+            if required and not acknowledged:
+                raise ExecutionConflict("Acknowledge that Sony RTMD camera metadata will be lost before starting this execution.")
             free = _available_space(workspace)
             required = connection.execute("SELECT temporary_space_upper_bound_bytes FROM file_management_execution WHERE id = ?", (execution_id,)).fetchone()
             required_bytes = int(required[0] or 0) if required else 0
@@ -1269,7 +1331,8 @@ def _accept_existing_copy(workspace, execution_id, operation, source, target) ->
     if not _matches_expected(target, operation):
         raise OperationFailure("Destination now exists.")
     record_managed_copy(workspace, operation, operation["source_sha256"])
-    _complete_operation(workspace, execution_id, operation, target.stat().st_size, operation["source_sha256"], target.stat().st_size, target.stat().st_size, 0, 0)
+    _set_output(workspace, operation["id"], target.stat().st_size, operation["source_sha256"])
+    _skip_operation(workspace, operation["id"], "Already satisfied")
 
 
 def _matches_expected(path: Path, operation) -> bool:
@@ -1640,6 +1703,7 @@ def _recover_run(workspace: Workspace, execution_id: str) -> None:
 def _execution_payload(execution, operations) -> dict[str, object]:
     rows = [dict(row) for row in operations]
     counts = {status: sum(1 for row in rows if row["status"] == status) for status in ("completed", "failed", "skipped", "pending", "interrupted", "cancelled", "excluded")}
+    already_satisfied = sum(1 for row in rows if row["status"] == "skipped" and str(row["error_message"] or "").startswith("Already satisfied"))
     total = sum(1 for row in rows if row["status"] != "excluded")
     completed = counts["completed"]
     finished = completed + counts["failed"] + counts["skipped"]
@@ -1662,7 +1726,10 @@ def _execution_payload(execution, operations) -> dict[str, object]:
         "updated_at": execution["updated_at"],
         "finished_at": execution["finished_at"],
         "cancel_requested": bool(execution["cancel_requested"]),
-        "counts": {"completed": completed, "failed": counts["failed"], "skipped": counts["skipped"], "pending": counts["pending"] + counts["interrupted"] + counts["cancelled"], "excluded": counts["excluded"], "total": total, "finished": finished},
+        "counts": {"completed": completed, "failed": counts["failed"], "skipped": counts["skipped"], "already_satisfied": already_satisfied, "pending": counts["pending"] + counts["interrupted"] + counts["cancelled"], "excluded": counts["excluded"], "total": total, "finished": finished},
+        "selection_digest": execution["selection_digest"],
+        "rtmd_loss_acknowledged": bool(execution["rtmd_loss_acknowledged"]),
+        "rtmd_loss_required_count": sum(1 for row in rows if row["requires_rtmd_ack"] and row["user_selected"] and row["status"] == "pending"),
         "current_operation": {
             "operation": current["operation"],
             "filename": current["filename"],
@@ -1704,6 +1771,8 @@ def _operation_payload(row) -> dict[str, object]:
     value["progress"] = _parse_json(value.get("progress_json")) or {}
     value["preflight_required"] = bool(metadata_contract.get("preflight_required"))
     value["preflight_reason"] = metadata_contract.get("preflight_reason")
+    value["user_selected"] = bool(value.get("user_selected", 1))
+    value["requires_rtmd_ack"] = bool(value.get("requires_rtmd_ack", 0))
     return value
 
 

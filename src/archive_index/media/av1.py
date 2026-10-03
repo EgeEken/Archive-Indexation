@@ -17,6 +17,7 @@ AV1_SUPPORTED_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v", ".mkv"})
 AV1_AUDIO_CODECS = frozenset({"aac", "alac", "mp3", "ac3", "eac3"})
 AV1_TEXT_SUBTITLE_CODECS = frozenset({"mov_text"})
 AV1_DATA_CODECS = frozenset()
+AV1_WARNING_DATA_CODECS = frozenset({"rtmd"})
 AV1_HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67", "bt2020-10", "bt2020-12"})
 PLAN_METADATA_TIMEOUT_SECONDS = 2.5
 EXECUTION_PREFLIGHT_TIMEOUT_SECONDS = 15.0
@@ -53,7 +54,7 @@ def analyze_source(
     cancelled=None,
     progress=None,
     *,
-    deep_timing: bool = True,
+    deep_timing: bool = False,
     metadata_timeout: float = PLAN_METADATA_TIMEOUT_SECONDS,
     timing_timeout: float = EXECUTION_PREFLIGHT_TIMEOUT_SECONDS,
 ) -> dict[str, object]:
@@ -128,13 +129,16 @@ def source_blocker(source: Path, profile: dict[str, object] | None) -> str | Non
         return str(error)
     except ValueError as error:
         return str(error)
-    return source_blocker_from_info(info, profile)
+    return source_blocker_from_info(info, profile, require_timing=False)
 
 
 def source_blocker_from_info(info: dict[str, object], profile: dict[str, object] | None, *, require_timing: bool = True) -> str | None:
     if not info.get("width") or not info.get("height") or not info.get("duration") or not info.get("fps"):
         return "Video dimensions, duration, and frame rate must be known for AV1 execution."
-    unsupported = [stream for stream in info.get("ancillary") or [] if not _ancillary_supported(stream)]
+    unsupported = [
+        stream for stream in info.get("ancillary") or []
+        if not _ancillary_supported(stream) and not _ancillary_warning(stream)
+    ]
     if unsupported:
         descriptions = ", ".join(_ancillary_description(stream) for stream in unsupported[:3])
         suffix = f"; {len(unsupported) - 3} more" if len(unsupported) > 3 else ""
@@ -363,7 +367,9 @@ def preservation_report(source_info: dict[str, object], output_info: dict[str, o
         else:
             report["lost"].append({"kind": f"{stream.get('codec_type')}_stream", "severity": "warning", "message": f"{stream.get('codec_name') or stream.get('codec_tag_string') or stream['codec_type']} stream is not carried into the MP4 output."})
     for stream in source_info.get("ancillary") or []:
-        if not _ancillary_supported(stream):
+        if _ancillary_warning(stream):
+            report["lost"].append({"kind": f"{stream.get('codec_type')}_stream", "severity": "warning", "message": "Sony timed camera metadata (RTMD) will be removed. It may contain per-frame camera settings, timecode, or telemetry."})
+        elif not _ancillary_supported(stream):
             report["lost"].append({"kind": f"{stream.get('codec_type')}_stream", "severity": "warning", "message": f"{_ancillary_description(stream)} is not carried into the MP4 output."})
     for key, label in (("color_transfer", "transfer"), ("color_primaries", "primaries"), ("color_space", "matrix"), ("color_range", "range")):
         source_value = source_info.get(key)
@@ -563,6 +569,11 @@ def _ancillary_supported(stream: dict[str, object]) -> bool:
     if stream.get("codec_type") == "data":
         return codec in AV1_DATA_CODECS
     return False
+
+
+def _ancillary_warning(stream: dict[str, object]) -> bool:
+    codec = str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold()
+    return stream.get("codec_type") == "data" and codec in AV1_WARNING_DATA_CODECS
 
 
 def _supported_video_pixel_format(value: object) -> bool:

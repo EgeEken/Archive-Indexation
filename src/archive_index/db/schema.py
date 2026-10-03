@@ -6,7 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 DEFAULT_IMAGE_EXTENSIONS_JSON = json.dumps(sorted({
     ".arw", ".avif", ".cr2", ".cr3", ".dng", ".heic", ".heif", ".jpeg",
@@ -845,6 +845,16 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """,
         "CREATE INDEX IF NOT EXISTS video_playback_proxy_status_idx ON video_playback_proxy(status, updated_at)",
     ),
+    32: (
+        "ALTER TABLE file_management_execution ADD COLUMN rtmd_loss_acknowledged INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE file_management_execution ADD COLUMN selection_digest TEXT",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN user_selected INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN original_plan_position INTEGER",
+        "ALTER TABLE file_management_execution_operation ADD COLUMN requires_rtmd_ack INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE video_playback_proxy ADD COLUMN proxy_mtime_ns INTEGER",
+        "ALTER TABLE video_playback_proxy ADD COLUMN last_accessed_at TEXT",
+        "CREATE INDEX IF NOT EXISTS video_playback_proxy_lru_idx ON video_playback_proxy(status, last_accessed_at)",
+    ),
 }
 
 
@@ -882,6 +892,12 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 if version == 30 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
                     continue
                 if version == 31 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
+                    continue
+                if version == 32 and statement.startswith("ALTER TABLE file_management_execution ADD COLUMN") and _has_column(connection, "file_management_execution", statement.split()[5]):
+                    continue
+                if version == 32 and statement.startswith("ALTER TABLE file_management_execution_operation ADD COLUMN") and _has_column(connection, "file_management_execution_operation", statement.split()[5]):
+                    continue
+                if version == 32 and statement.startswith("ALTER TABLE video_playback_proxy ADD COLUMN") and _has_column(connection, "video_playback_proxy", statement.split()[5]):
                     continue
                 if (
                     version == 8

@@ -79,11 +79,9 @@ def load_or_analyze(workspace, row, codec: str, *, cancelled=None, progress=None
         return AnalysisOutcome(status, analysis, True, message)
     if cancelled and cancelled.is_set():
         raise InterruptedError("Plan analysis was cancelled.")
-    if codec == "av1" and not allow_probe:
-        return AnalysisOutcome("preflight_required", _indexed_av1_analysis(row), False, "AV1 compatibility requires execution preflight.")
     source = workspace.absolute_path(row["relative_path"])
     try:
-        analysis = _analyze(source, codec, cancelled, progress, deep_timing=allow_probe)
+        analysis = _analyze(source, codec, cancelled, progress, deep_timing=False)
     except InterruptedError:
         raise
     except ProbeTimeoutError as error:
@@ -91,12 +89,18 @@ def load_or_analyze(workspace, row, codec: str, *, cancelled=None, progress=None
     except (PermissionError, OSError) as error:
         return AnalysisOutcome("transient_failure", {}, False, str(error))
     except ValueError as error:
+        if codec == "av1":
+            analysis = _indexed_av1_analysis(row)
+            _store(workspace, row, codec, contract, runtime, source_sha256, source_size, source_mtime, "preflight_required", analysis, str(error))
+            return AnalysisOutcome("preflight_required", analysis, False, "AV1 compatibility requires execution preflight.")
         status = "unsupported"
         analysis = {"error": str(error)}
         _store(workspace, row, codec, contract, runtime, source_sha256, source_size, source_mtime, status, analysis, str(error))
         return AnalysisOutcome(status, analysis, False, str(error))
     except Exception as error:
         LOGGER.warning("compression analysis failed for %s: %s", row["relative_path"], error)
+        if codec == "av1":
+            return AnalysisOutcome("preflight_required", _indexed_av1_analysis(row), False, "AV1 compatibility requires execution preflight.")
         return AnalysisOutcome("transient_failure", {}, False, str(error))
     _store(workspace, row, codec, contract, runtime, source_sha256, source_size, source_mtime, "success", analysis, None)
     return AnalysisOutcome("success", analysis, False)
@@ -104,20 +108,13 @@ def load_or_analyze(workspace, row, codec: str, *, cancelled=None, progress=None
 
 def preflight_av1(workspace, row, *, cancelled=None, progress=None, timeout: float = EXECUTION_PREFLIGHT_TIMEOUT_SECONDS) -> AnalysisOutcome:
     cached = load_or_analyze(workspace, row, "av1", cancelled=cancelled, progress=progress)
-    if cached.status in {"success", "unsupported"}:
+    if cached.status != "preflight_required":
         return cached
     if cancelled and cancelled.is_set():
         raise InterruptedError("AV1 preflight was cancelled.")
     source = workspace.absolute_path(row["relative_path"])
     try:
-        analysis = analyze_av1(
-            source,
-            cancelled=cancelled,
-            progress=progress,
-            deep_timing=False,
-            metadata_timeout=timeout,
-            timing_timeout=timeout,
-        )
+        analysis = analyze_av1(source, cancelled=cancelled, progress=progress, deep_timing=False, metadata_timeout=timeout, timing_timeout=timeout)
     except InterruptedError:
         raise
     except ProbeTimeoutError as error:
@@ -126,8 +123,9 @@ def preflight_av1(workspace, row, *, cancelled=None, progress=None, timeout: flo
         return AnalysisOutcome("transient_failure", {}, False, str(error))
     except ValueError as error:
         analysis = {"error": str(error)}
-        _store_outcome(workspace, row, "av1", AnalysisOutcome("unsupported", analysis, False, str(error)))
-        return AnalysisOutcome("unsupported", analysis, False, str(error))
+        outcome = AnalysisOutcome("unsupported", analysis, False, str(error))
+        _store_outcome(workspace, row, "av1", outcome)
+        return outcome
     outcome = AnalysisOutcome("success", analysis, False)
     _store_outcome(workspace, row, "av1", outcome)
     return outcome
@@ -206,6 +204,10 @@ def preservation_report_for_analysis(codec: str, outcome: AnalysisOutcome, profi
         return report
     if codec == "av1":
         from .media.av1 import capped_dimensions, output_pixel_format, preservation_report
+
+        if analysis.get("error"):
+            report["hard_blockers"].append({"kind": "eligibility", "severity": "blocker", "message": str(analysis["error"])})
+            return report
 
         projected = dict(analysis)
         projected["width"], projected["height"] = capped_dimensions(analysis, profile)

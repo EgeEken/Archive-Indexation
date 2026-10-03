@@ -94,22 +94,89 @@ def record_managed_copy(workspace: Workspace, operation, output_sha256: str) -> 
         )
 
 
-def link_managed_copies(workspace: Workspace) -> int:
+def backfill_managed_copies(workspace: Workspace) -> int:
+    """Recover selected-original provenance for completed copy operations."""
+    created = 0
     with workspace.transaction() as connection:
-        rows = connection.execute(
+        operations = connection.execute(
             """
-            SELECT mc.id, pf.id AS physical_file_id
-            FROM managed_copy AS mc
-            LEFT JOIN physical_file AS pf
-              ON pf.relative_path = mc.output_relative_path
-             AND pf.sha256 = mc.output_sha256
-             AND pf.is_online = 1 AND pf.in_scope = 1
+            SELECT op.*
+            FROM file_management_execution_operation AS op
+            JOIN file_management_execution AS execution ON execution.id = op.execution_id
+            WHERE op.operation = 'copy' AND op.status = 'completed'
+            ORDER BY op.completed_at, op.id
             """
         ).fetchall()
+        physical = {
+            row["relative_path"].casefold(): row
+            for row in connection.execute(
+                "SELECT id, relative_path, sha256, is_online, in_scope FROM physical_file"
+            ).fetchall()
+        }
+        for operation in operations:
+            action = _json(operation["rule_snapshot_json"]) or {}
+            if (action.get("action") or {}).get("copy_role") != "selected_original":
+                continue
+            output_path = operation["target_relative_path"]
+            output_sha = operation["actual_output_sha256"]
+            output = physical.get(str(output_path or "").casefold())
+            if not output or not output["is_online"] or not output["in_scope"] or not output_sha or output["sha256"] != output_sha:
+                continue
+            existing = connection.execute(
+                "SELECT id FROM managed_copy WHERE execution_operation_id = ?",
+                (operation["id"],),
+            ).fetchone()
+            if existing:
+                continue
+            now = _timestamp()
+            connection.execute(
+                """
+                INSERT INTO managed_copy(
+                    id, execution_operation_id, source_physical_file_id, source_logical_asset_id,
+                    source_relative_path, source_sha256, output_relative_path, output_sha256,
+                    purpose, physical_file_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'selected_original', ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()), operation["id"], operation["physical_file_id"],
+                    operation["logical_asset_id"], operation["source_relative_path"],
+                    operation["source_sha256"], output_path, output_sha, output["id"], now, now,
+                ),
+            )
+            connection.execute("UPDATE physical_file SET role = 'selected_original' WHERE id = ?", (output["id"],))
+            created += 1
+    return created
+
+
+def link_managed_copies(workspace: Workspace) -> int:
+    with workspace.transaction() as connection:
+        connection.execute("UPDATE physical_file SET role = 'source_original' WHERE role = 'selected_original'")
+        connection.execute("UPDATE managed_copy SET physical_file_id = NULL WHERE purpose = 'selected_original'")
+        physical = {
+            (row["relative_path"].casefold(), row["sha256"]): row
+            for row in connection.execute(
+                "SELECT id, relative_path, sha256, is_online, in_scope FROM physical_file"
+            ).fetchall()
+        }
+        rows = connection.execute(
+            """
+            SELECT mc.id, mc.output_relative_path, mc.output_sha256
+            FROM managed_copy AS mc
+            LEFT JOIN file_management_execution_operation AS op ON op.id = mc.execution_operation_id
+            LEFT JOIN file_management_execution AS execution ON execution.id = op.execution_id
+            WHERE mc.purpose = 'selected_original'
+            ORDER BY COALESCE(execution.created_at, mc.created_at) DESC, mc.created_at DESC, mc.id DESC
+            """
+        ).fetchall()
+        now = _timestamp()
+        claimed = set()
         for row in rows:
-            connection.execute("UPDATE managed_copy SET physical_file_id = ?, updated_at = ? WHERE id = ?", (row["physical_file_id"], _timestamp(), row["id"]))
-            if row["physical_file_id"]:
-                connection.execute("UPDATE physical_file SET role = 'selected_original' WHERE id = ?", (row["physical_file_id"],))
+            output = physical.get((row["output_relative_path"].casefold(), row["output_sha256"]))
+            physical_id = output["id"] if output and output["is_online"] and output["in_scope"] and output["id"] not in claimed else None
+            connection.execute("UPDATE managed_copy SET physical_file_id = ?, updated_at = ? WHERE id = ?", (physical_id, now, row["id"]))
+            if physical_id:
+                claimed.add(physical_id)
+                connection.execute("UPDATE physical_file SET role = 'selected_original' WHERE id = ?", (physical_id,))
         return len(rows)
 
 

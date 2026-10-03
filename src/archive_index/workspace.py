@@ -115,6 +115,10 @@ class Workspace:
                 raise WorkspaceError("workspace metadata is missing")
         finally:
             connection.close()
+        from .file_management_provenance import backfill_managed_copies, link_managed_copies, link_managed_derivatives
+        backfill_managed_copies(workspace)
+        link_managed_copies(workspace)
+        link_managed_derivatives(workspace)
         return workspace
 
     def connect(self) -> sqlite3.Connection:

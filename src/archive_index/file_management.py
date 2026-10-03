@@ -138,6 +138,22 @@ def list_rulesets(workspace: Workspace, *, seed: bool = True) -> list[dict[str, 
     return [{**_ruleset(row), "rules": by_ruleset.get(row["id"], []), "is_builtin": row["id"] in BUILTIN_RULESET_IDS} for row in rulesets]
 
 
+def list_workspace_folders(workspace: Workspace) -> list[str]:
+    connection = workspace.connect()
+    try:
+        paths = [str(row["relative_path"]).replace("\\", "/") for row in connection.execute(
+            "SELECT relative_path FROM physical_file WHERE in_scope = 1"
+        ).fetchall()]
+    finally:
+        connection.close()
+    folders = set()
+    for path in paths:
+        parts = path.split("/")[:-1]
+        for index in range(1, len(parts) + 1):
+            folders.add("/".join(parts[:index]))
+    return sorted(folders, key=str.casefold)
+
+
 def list_presets(workspace: Workspace) -> list[dict[str, object]]:
     _ensure_builtins(workspace)
     connection = workspace.connect()
@@ -192,6 +208,7 @@ def save_ruleset(
             action = rule.get("action") or {}
             if not isinstance(match, dict) or not isinstance(action, dict):
                 raise ValueError("rule match and action must be objects")
+            match = _normalize_match(match)
             rule_id = str(rule.get("id") or uuid.uuid4())
             if new_ruleset or rule_id in rule_ids:
                 rule_id = str(uuid.uuid4())
@@ -275,6 +292,8 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
 
     report("Loading indexed files")
     _ensure_builtins(workspace)
+    from .file_management_provenance import backfill_managed_copies
+    backfill_managed_copies(workspace)
     rulesets = list_rulesets(workspace, seed=False)
     if ruleset_id is None:
         connection = workspace.connect()
@@ -296,16 +315,21 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
             SELECT pf.id, pf.logical_asset_id, pf.relative_path, pf.filename, pf.extension,
                        pf.media_type, pf.role, pf.size_bytes, pf.mtime_ns, pf.sha256, pf.in_scope, pf.is_online,
                        pf.width, pf.height, pf.duration_seconds, pf.codec, pf.metadata_json,
-                   la.selection_state
+                   la.selection_state,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM managed_copy mc
+                       WHERE mc.output_relative_path = pf.relative_path
+                         AND mc.output_sha256 = pf.sha256
+                         AND mc.physical_file_id = pf.id
+                   ) OR EXISTS (
+                       SELECT 1 FROM managed_derivative md
+                       WHERE md.output_relative_path = pf.relative_path
+                         AND md.output_sha256 = pf.sha256
+                         AND md.physical_file_id = pf.id
+                   ) THEN 1 ELSE 0 END AS managed_output
             FROM physical_file AS pf
             JOIN logical_asset AS la ON la.id = pf.logical_asset_id
             WHERE pf.in_scope = 1 AND pf.is_online = 1
-              AND NOT EXISTS (
-                  SELECT 1 FROM managed_copy AS mc
-                  WHERE mc.output_relative_path = pf.relative_path
-                    AND mc.output_sha256 = pf.sha256
-                    AND mc.purpose = 'selected_original'
-              )
             ORDER BY pf.relative_path, pf.id
             """
         ).fetchall()
@@ -379,6 +403,7 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 workspace,
                 row,
                 codec,
+                allow_probe=True,
                 cancelled=cancelled,
                 progress=lambda phase_name, filename=row["filename"]: report(phase_name, analysis_index, len(requests), filename),
             )
@@ -459,11 +484,12 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 and item["profile"].get("codec") == "av1"
                 and not item_blockers
                 and av1_outcome is not None
-                and (av1_outcome.status == "preflight_required" or av1_outcome.analysis.get("timing_cfr") is None)
+                and (av1_outcome.status == "preflight_required" or av1_outcome.analysis.get("preflight_required"))
             )
             preservation_report = {"preserved": [], "changed": [], "lost": [], "hard_blockers": []}
+            analysis_outcome = analysis_results.get((row["id"], current_profile["codec"])) if operation == "compress" and current_profile and current_profile.get("codec") in {"jpeg-xl", "av1"} else None
             if operation == "compress" and current_profile is not None and current_profile.get("codec") in {"jpeg-xl", "av1"}:
-                outcome = analysis_results.get((row["id"], current_profile["codec"]))
+                outcome = analysis_outcome
                 if outcome is not None:
                     preservation_report = preservation_report_for_analysis(
                         current_profile["codec"], outcome, current_profile, item["action"].get("source_disposition", "keep")
@@ -479,6 +505,9 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "logical_asset_id": row["logical_asset_id"],
                 "filename": row["filename"],
                 "source_relative_path": source,
+                "source_role": row["role"],
+                "selection_state": row["selection_state"],
+                "source_origin": _representation_origin(row),
                 "target_relative_path": target,
                 "operation": operation,
                 "profile_id": item["profile_id"],
@@ -505,6 +534,17 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "profile_snapshot": _profile_snapshot(item["profile"]),
                 "preflight_required": preflight_required,
                 "preflight_reason": "AV1 compatibility requires execution preflight." if preflight_required else None,
+                "requires_rtmd_ack": bool(
+                    operation == "compress"
+                    and current_profile is not None
+                    and current_profile.get("codec") == "av1"
+                    and item["action"].get("source_disposition", "keep") == "replace"
+                    and analysis_outcome is not None
+                    and any(
+                        str(stream.get("codec_name") or stream.get("codec_tag_string") or "").casefold() == "rtmd"
+                        for stream in analysis_outcome.analysis.get("ancillary") or []
+                    )
+                ),
                 "preservation_report": preservation_report,
                 "requires_confirmation": True,
             }
@@ -518,6 +558,8 @@ def build_dry_run_plan(workspace: Workspace, ruleset_id: str | None = None, *, p
                 "operation": operation,
                 "reason": reason,
             } for reason in item_conflicts)
+    for plan_position, operation in enumerate(operations):
+        operation["plan_position"] = plan_position
     report("Summarizing plan", total_rows, total_rows)
     summary = _plan_summary(workspace, rows, operations, conflicts)
     summary["blocker_count"] = sum(int(item["affected_count"]) for item in blockers.values())
@@ -610,10 +652,16 @@ def _matches(row, match: dict[str, object]) -> bool:
     extensions = match.get("extensions") or []
     if extensions and row["extension"].casefold() not in {str(value).casefold() for value in extensions}:
         return False
-    if match.get("folder_prefix") and not (
-        row["relative_path"] == match["folder_prefix"]
-        or row["relative_path"].startswith(f"{str(match['folder_prefix']).rstrip('/')}/")
-    ):
+    scope = match.get("folder_scope")
+    if scope:
+        mode = str(scope.get("mode", "all"))
+        paths = [str(path).replace("\\", "/").strip("/").casefold() for path in scope.get("paths", []) if str(path).strip("/")]
+        in_scope = any(_path_in_folder(row["relative_path"], path) for path in paths)
+        if mode == "only" and not in_scope:
+            return False
+        if mode in {"except", "all_except"} and in_scope:
+            return False
+    elif match.get("folder_prefix") and not _path_in_folder(row["relative_path"], str(match["folder_prefix"])):
         return False
     if match.get("formats") and _format_name(row["extension"]) not in {str(value).casefold() for value in match["formats"]}:
         return False
@@ -621,7 +669,7 @@ def _matches(row, match: dict[str, object]) -> bool:
         return False
     if match.get("representation_class") and _representation_class(row) != match["representation_class"]:
         return False
-    if match.get("origin") and _representation_origin(row) != match["origin"]:
+    if match.get("origin") and match["origin"] not in {"either", "all"} and _representation_origin(row) != match["origin"]:
         return False
     if match.get("role") and row["role"] != match["role"]:
         return False
@@ -636,6 +684,40 @@ def _matches(row, match: dict[str, object]) -> bool:
     if match.get("max_size_bytes") is not None and (row["size_bytes"] or 0) > int(match["max_size_bytes"]):
         return False
     return True
+
+
+def _path_in_folder(relative_path: str, folder: str) -> bool:
+    path = str(relative_path).replace("\\", "/").casefold().strip("/")
+    folder = str(folder).replace("\\", "/").casefold().strip("/")
+    return bool(folder) and (path == folder or path.startswith(f"{folder}/"))
+
+
+def _normalize_match(match: dict[str, object]) -> dict[str, object]:
+    normalized = dict(match)
+    scope = normalized.get("folder_scope")
+    if scope is None and normalized.get("folder_prefix"):
+        scope = {"mode": "only", "paths": [normalized["folder_prefix"]]}
+    if scope is not None:
+        if not isinstance(scope, dict):
+            raise ValueError("folder_scope must be an object")
+        mode = str(scope.get("mode", "all"))
+        if mode == "all_except":
+            mode = "except"
+        if mode not in {"all", "only", "except"}:
+            raise ValueError("folder_scope mode must be all, only, or except")
+        paths = []
+        for value in scope.get("paths", []):
+            path = str(value).replace("\\", "/").strip("/")
+            if path and path.casefold() not in {item.casefold() for item in paths}:
+                if "\x00" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+                    raise ValueError("folder_scope contains an invalid path")
+                paths.append(path)
+        normalized["folder_scope"] = {"mode": mode, "paths": sorted(paths, key=str.casefold)}
+    if normalized.get("origin") not in {None, "source", "managed", "either", "external"}:
+        raise ValueError("origin must be source, managed, or either")
+    if normalized.get("origin") == "external":
+        normalized["origin"] = "source"
+    return normalized
 
 
 def _target_path(workspace: Workspace, row, action, profile):
@@ -1083,6 +1165,9 @@ def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object]
                 "physical_file_id": operation.get("physical_file_id"),
                 "logical_asset_id": operation.get("logical_asset_id"),
                 "source_relative_path": operation.get("source_relative_path"),
+                "source_role": operation.get("source_role"),
+                "selection_state": operation.get("selection_state"),
+                "source_origin": operation.get("source_origin"),
                 "source_size_bytes": operation.get("source_size_bytes", operation.get("bytes")),
                 "source_mtime_ns": operation.get("source_mtime_ns"),
                 "source_sha256": operation.get("source_sha256"),
@@ -1104,6 +1189,7 @@ def _plan_digest(operations: list[dict[str, object]], ruleset: dict[str, object]
                 "estimated_storage_delta_bytes": operation.get("estimated_storage_delta_bytes"),
                 "coalesced_by_planned_target": bool(operation.get("coalesced_by_planned_target")),
                 "dependency_key": operation.get("dependency_key"),
+                "requires_rtmd_ack": bool(operation.get("requires_rtmd_ack")),
             }
             for position, operation in enumerate(operations)
         ],
@@ -1137,7 +1223,9 @@ def _representation_class(row) -> str:
 
 
 def _representation_origin(row) -> str:
-    return "managed" if str(row["role"] or "").casefold().startswith(("managed", "derived")) else "external"
+    if row.keys() and row.keys().__contains__("managed_output") and row["managed_output"]:
+        return "managed"
+    return "managed" if str(row["role"] or "").casefold().startswith(("managed", "derived", "selected_original")) else "source"
 
 
 def _profile(row):
@@ -1214,15 +1302,15 @@ def _ensure_builtins(workspace: Workspace) -> None:
         (LEGACY_BUILTIN_AV1_PROFILE_ID, "AV1 Archival (pending)", "av1", "mp4", {"alias_of": BUILTIN_AV1_PROFILE_ID, "contract_version": "av1-svt-v3", "crf": 30}),
     ]
     cleanup_rules = [
-        {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw"}, "action": {"operation": "move", "destination_dir": "raws", "preserve_relative_structure": False, "conflict_policy": "rename"}},
-        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename", "copy_role": "selected_original"}},
-        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename", "depends_on_rule_id": f"{BUILTIN_ARCHIVE_CLEANUP_ID}-4"}},
-        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"]}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
-        {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"]}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video"}, "action": {"operation": "delete"}},
-        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "undecided", "representation_class": "raw", "origin": "source"}, "action": {"operation": "delete"}},
+        {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "raw", "origin": "source"}, "action": {"operation": "delete"}},
+        {"enabled": True, "match": {"selection_state": "selected", "representation_class": "raw", "origin": "source"}, "action": {"operation": "move", "destination_dir": "raws", "preserve_relative_structure": False, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"], "origin": "source"}, "action": {"operation": "copy", "destination_dir": "jpgs", "preserve_relative_structure": False, "conflict_policy": "rename", "copy_role": "selected_original"}},
+        {"enabled": True, "match": {"selection_state": "selected", "formats": ["jpeg", "png"], "origin": "source"}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename", "depends_on_rule_id": f"{BUILTIN_ARCHIVE_CLEANUP_ID}-4"}},
+        {"enabled": True, "match": {"selection_state": "undecided", "formats": ["jpeg", "png"], "origin": "source"}, "action": {"operation": "compress", "profile_id": BUILTIN_BALANCED_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
+        {"enabled": True, "match": {"selection_state": "rejected", "formats": ["jpeg", "png"], "origin": "source"}, "action": {"operation": "delete"}},
+        {"enabled": True, "match": {"selection_state": "rejected", "representation_class": "video", "origin": "source"}, "action": {"operation": "delete"}},
+        {"enabled": True, "match": {"representation_class": "video", "selection_state_not": "rejected", "origin": "source"}, "action": {"operation": "compress", "profile_id": BUILTIN_AV1_PROFILE_ID, "source_disposition": "replace", "compress_in_place": True, "conflict_policy": "rename"}},
     ]
     selected_rules = [
         {"enabled": True, "match": {"selection_state": "rejected"}, "action": {"operation": "delete"}},
