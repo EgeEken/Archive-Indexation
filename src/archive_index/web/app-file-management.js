@@ -1,4 +1,4 @@
-let fileManagement = {profiles: [], rulesets: [], presets: [], current: null, draft: [], dirty: false, planSession: null, analysisSession: null, planToken: 0, planTimer: null, plan: null, execution: null, executionTimer: null};
+let fileManagement = {profiles: [], rulesets: [], presets: [], folders: [], current: null, draft: [], dirty: false, planSession: null, analysisSession: null, planToken: 0, planTimer: null, plan: null, execution: null, executionTimer: null};
 
 const assetSelectors = [["all", "All"], ["selected", "Selected"], ["undecided", "Undecided"], ["rejected", "Rejected"]];
 const representationSelectors = [["all", "All"], ["raw", "RAW"], ["conventional-image", "JPEG/PNG"], ["jpeg", "JPEG"], ["png", "PNG"], ["jxl", "JXL"], ["avif", "AVIF"], ["webp", "WebP"], ["video", "Video"]];
@@ -61,7 +61,8 @@ function ruleToUi(rule = {}) {
   const action = rule.action || {};
   let representation = match.representation_class || match.format || "all";
   if (match.formats?.length === 2 && match.formats.includes("jpeg") && match.formats.includes("png")) representation = "conventional-image";
-  return {id: rule.id || newId(), enabled: true, asset: match.selection_state || "all", representation, operation: action.operation || "delete", profileId: action.profile_id || fileManagement.profiles.find(profile => profile.codec === "jpeg-xl")?.id || "", disposition: action.source_disposition !== "replace", inPlace: action.compress_in_place !== false, destination: action.destination_dir || action.target_template || "", preserve: action.preserve_relative_structure === true, conflictPolicy: action.conflict_policy || (action.rename_on_conflict === false ? "skip" : "rename"), copyRole: action.copy_role || null, dependsOnRuleId: action.depends_on_rule_id || null};
+  const folderScope = match.folder_scope || (match.folder_prefix ? {mode: "only", paths: [match.folder_prefix]} : {mode: "all", paths: []});
+  return {id: rule.id || newId(), enabled: true, asset: match.selection_state || "all", representation, operation: action.operation || "delete", profileId: action.profile_id || fileManagement.profiles.find(profile => profile.codec === "jpeg-xl")?.id || "", disposition: action.source_disposition !== "replace", inPlace: action.compress_in_place !== false, destination: action.destination_dir || action.target_template || "", preserve: action.preserve_relative_structure === true, conflictPolicy: action.conflict_policy || (action.rename_on_conflict === false ? "skip" : "rename"), copyRole: action.copy_role || null, dependsOnRuleId: action.depends_on_rule_id || null, origin: match.origin || "either", folderMode: folderScope.mode || "all", folderPaths: [...(folderScope.paths || [])]};
 }
 
 function uiToRule(rule) {
@@ -70,6 +71,8 @@ function uiToRule(rule) {
   if (["raw", "conventional-image", "compressed-image", "video"].includes(rule.representation)) match.representation_class = rule.representation;
   if (["jpeg", "png", "jxl", "avif", "webp"].includes(rule.representation)) match.format = rule.representation;
   if (rule.representation === "conventional-image") match.formats = ["jpeg", "png"];
+  if (rule.origin !== "either") match.origin = rule.origin;
+  if (rule.folderMode !== "all") match.folder_scope = {mode: rule.folderMode, paths: rule.folderPaths || []};
   const action = {operation: rule.operation};
   if (rule.operation === "compress") { action.profile_id = rule.profileId || null; action.source_disposition = rule.disposition ? "keep" : "replace"; action.compress_in_place = rule.inPlace; action.conflict_policy = rule.conflictPolicy; if (!rule.inPlace) action.destination_dir = rule.destination; if (rule.dependsOnRuleId) action.depends_on_rule_id = rule.dependsOnRuleId; }
   if (["copy", "move"].includes(rule.operation)) { action.destination_dir = rule.destination; action.preserve_relative_structure = rule.preserve; action.conflict_policy = rule.conflictPolicy; if (rule.copyRole) action.copy_role = rule.copyRole; }
@@ -117,7 +120,9 @@ function renderFileManagementRules() {
       : ["copy", "move"].includes(rule.operation)
         ? `<div class="rule-options rule-options-copy"><label class="rule-field">Destination <input data-rule-field="destination" value="${escapeHtml(rule.destination)}" placeholder="raws/"></label><label class="rule-option-toggle rule-checkbox"><input type="checkbox" data-rule-field="preserve"${rule.preserve ? " checked" : ""}> <span>Recreate source folders inside destination</span></label>${conflictPolicy}<p class="muted rule-help" data-rule-help>${ruleHelperMarkup(rule)}</p></div>`
         : "";
-    return `<article class="file-rule-card" data-rule-index="${index}"><div class="rule-card-header"><span class="rule-number">Rule ${index + 1}</span><button class="icon" type="button" data-rule-remove aria-label="Remove rule">×</button></div><div class="rule-line">For <select data-rule-field="representation">${fileManagementOptionList(representationSelectors, rule.representation)}</select> representations of <select data-rule-field="asset">${fileManagementOptionList(assetSelectors, rule.asset)}</select> assets → <select data-rule-field="operation">${fileManagementOptionList(operationSelectors, rule.operation)}</select></div>${actionFields}</article>`;
+    const folderOptions = fileManagement.folders.map(folder => `<label class="folder-scope-option"><input type="checkbox" data-rule-folder="${escapeHtml(folder)}"${rule.folderPaths.includes(folder) ? " checked" : ""}> <span>${escapeHtml(folder)}</span></label>`).join("");
+    const scope = `<div class="rule-scope-fields"><label class="rule-field">Origin <select data-rule-field="origin">${fileManagementOptionList([["either", "Source or managed"], ["source", "Source only"], ["managed", "Managed only"]], rule.origin)}</select></label><label class="rule-field">Folders <select data-rule-field="folderMode">${fileManagementOptionList([["all", "All"], ["only", "Only selected"], ["except", "All except selected"]], rule.folderMode)}</select></label>${rule.folderMode !== "all" ? `<div class="folder-scope-options">${folderOptions || `<span class="muted">No indexed folders</span>`}</div>` : ""}</div>`;
+    return `<article class="file-rule-card" data-rule-index="${index}"><div class="rule-card-header"><span class="rule-number">Rule ${index + 1}</span><button class="icon" type="button" data-rule-remove aria-label="Remove rule">×</button></div><div class="rule-line">For <select data-rule-field="representation">${fileManagementOptionList(representationSelectors, rule.representation)}</select> representations of <select data-rule-field="asset">${fileManagementOptionList(assetSelectors, rule.asset)}</select> assets → <select data-rule-field="operation">${fileManagementOptionList(operationSelectors, rule.operation)}</select></div>${scope}${actionFields}</article>`;
   }).join("") || `<p class="muted">No rules yet. Add a rule to define the plan.</p>`;
   $("file-management-rules").querySelectorAll("[data-rule-index]").forEach(card => {
     const index = Number(card.dataset.ruleIndex);
@@ -137,6 +142,7 @@ function renderFileManagementRules() {
       };
       control.addEventListener(control.dataset.ruleField === "destination" ? "input" : "change", update);
     });
+    card.querySelectorAll("[data-rule-folder]").forEach(control => control.addEventListener("change", () => { const path = control.dataset.ruleFolder; const paths = fileManagement.draft[index].folderPaths || []; fileManagement.draft[index].folderPaths = control.checked ? [...new Set([...paths, path])] : paths.filter(item => item !== path); markRulesDirty(); }));
     card.querySelector("[data-rule-remove]").addEventListener("click", () => { fileManagement.draft.splice(index, 1); markRulesDirty(); renderFileManagementRules(); });
   });
   renderFileManagementLockState();
@@ -172,10 +178,11 @@ function renderFileManagementProfiles() {
 }
 
 async function refreshFileManagementEditor(preferredId = null) {
-  const [profiles, rulesets, presets] = await Promise.all([api("/api/file-management/profiles"), api("/api/file-management/rulesets"), api("/api/file-management/presets")]);
+  const [profiles, rulesets, presets, folders] = await Promise.all([api("/api/file-management/profiles"), api("/api/file-management/rulesets"), api("/api/file-management/presets"), api("/api/file-management/folders")]);
   fileManagement.profiles = profiles.profiles || [];
   fileManagement.rulesets = rulesets.rulesets || [];
   fileManagement.presets = presets.presets || [];
+  fileManagement.folders = folders.folders || [];
   const preset = preferredId ? fileManagement.presets.find(item => item.ruleset_id === preferredId) : fileManagement.presets.find(item => item.name === "Archive cleanup") || fileManagement.presets[0];
   selectRuleset(preset?.ruleset_id || fileManagement.rulesets[0]?.id);
   renderFileManagementProfiles();
@@ -236,12 +243,31 @@ function preservationMarkup(report) {
   if (!groups.length) return "";
   return `<details class="preservation-details"><summary>Preservation changes</summary>${groups.map(([label, entries, className]) => `<div class="${className}"><strong>${label}</strong><ul>${entries.slice(0, 6).map(entry => `<li>${escapeHtml(entry.message || entry.kind || "Preservation detail")}</li>`).join("")}</ul>${entries.length > 6 ? `<small>${entries.length - 6} more</small>` : ""}</div>`).join("")}</details>`;
 }
-function planOperationRow(item) { return `<div class="plan-operation-row" data-plan-operation-row><span><strong>${escapeHtml(item.filename || "File")}</strong><small>${escapeHtml(item.source_relative_path || "")}</small></span><span>${escapeHtml(item.target_relative_path || item.profile_name || "Delete")}${item.renamed_to_avoid_conflict ? " · Renamed to avoid conflict" : item.replaces_source_in_place ? " · Replaces source in place" : ""}${preservationMarkup(item.preservation_report)}</span><span><strong data-plan-status>${escapeHtml(planOperationStatus(item))}</strong><small>${formatBytes(item.bytes)}</small></span></div>`; }
+function planSelectable(item) { return ["copy", "compress", "move", "delete"].includes(item.operation) && !item.conflicts?.length && !item.blockers?.length && !["already_satisfied", "skipped"].includes(item.destination_status); }
+function selectedPlanPositions() { return (fileManagement.plan?.operations || []).filter(item => planSelectable(item) && item.user_selected !== false).map(item => Number(item.plan_position)); }
+function setPlanSelection(position, checked) {
+  const operations = fileManagement.plan?.operations || [];
+  const selected = operations.find(item => Number(item.plan_position) === Number(position));
+  if (!selected || !planSelectable(selected)) return;
+  selected.user_selected = checked;
+  if (checked && selected.dependency_key) {
+    const dependency = operations.find(item => `${item.rule_id}:${item.physical_file_id}` === selected.dependency_key);
+    if (dependency) dependency.user_selected = true;
+  }
+  if (!checked && selected.operation === "copy") operations.filter(item => item.dependency_key === `${selected.rule_id}:${selected.physical_file_id}`).forEach(item => { item.user_selected = false; });
+  renderFileManagementPlan(fileManagement.plan);
+}
+function planOperationRow(item) { const selectable = planSelectable(item); return `<div class="plan-operation-row" data-plan-operation-row><span class="plan-operation-select">${selectable ? `<input type="checkbox" data-plan-select="${Number(item.plan_position)}"${item.user_selected !== false ? " checked" : ""} aria-label="Include ${escapeHtml(item.filename || "file")} in execution">` : ""}</span><span><strong>${escapeHtml(item.filename || "File")}</strong><small>${escapeHtml(item.source_relative_path || "")}</small></span><span>${escapeHtml(item.target_relative_path || item.profile_name || "Delete")}${item.renamed_to_avoid_conflict ? " · Renamed to avoid conflict" : item.replaces_source_in_place ? " · Replaces source in place" : ""}${preservationMarkup(item.preservation_report)}</span><span><strong data-plan-status>${escapeHtml(planOperationStatus(item))}</strong><small>${formatBytes(item.bytes)}</small></span></div>`; }
 function renderPlanOperationGroup(operation, rows) {
   const label = operation[0].toUpperCase() + operation.slice(1);
   const initial = rows.slice(0, 1).map(planOperationRow).join("");
   const remaining = rows.length - 1;
-  return `<details class="plan-operation"><summary>${label} · ${rows.length}</summary><div data-plan-operation-rows>${initial}</div>${remaining > 0 ? `<button type="button" class="secondary" data-plan-show-more data-operation="${operation}" data-offset="1">Show more (${remaining})</button>` : ""}</details>`;
+  const selectable = rows.filter(planSelectable).length;
+  return `<details class="plan-operation"><summary>${label} · ${rows.length}</summary>${selectable ? `<div class="plan-selection-actions"><button type="button" class="secondary" data-plan-select-all data-operation="${operation}">Select all</button><button type="button" class="secondary" data-plan-select-none data-operation="${operation}">Select none</button></div>` : ""}<div data-plan-operation-rows>${initial}</div>${remaining > 0 ? `<button type="button" class="secondary" data-plan-show-more data-operation="${operation}" data-offset="1">Show more (${remaining})</button>` : ""}</details>`;
+}
+function bindPlanSelectionControls(data) {
+  document.querySelectorAll("[data-plan-select]").forEach(control => control.addEventListener("change", () => setPlanSelection(control.dataset.planSelect, control.checked)));
+  document.querySelectorAll("[data-plan-select-all], [data-plan-select-none]").forEach(button => button.addEventListener("click", () => { const value = button.hasAttribute("data-plan-select-all"); (data.operations || []).filter(item => item.operation === button.dataset.operation && planSelectable(item)).forEach(item => { item.user_selected = value; }); renderFileManagementPlan(data); }));
 }
 function bindPlanOperationDetails(data) {
   document.querySelectorAll("[data-plan-show-more]").forEach(button => button.addEventListener("click", () => {
@@ -254,7 +280,9 @@ function bindPlanOperationDetails(data) {
     const left = rows.length - next;
     button.textContent = left ? `Show more (${left})` : "Show all shown";
     if (!left) button.disabled = true;
+    bindPlanSelectionControls(data);
   }));
+  bindPlanSelectionControls(data);
 }
 function planGroupStatus(group) {
   const parts = [];
@@ -273,6 +301,7 @@ function noExecutionExplanation(summary) {
 }
 function renderFileManagementPlan(data) {
   fileManagement.plan = data;
+  (data.operations || []).forEach(item => { if (item.user_selected === undefined) item.user_selected = planSelectable(item); });
   fileManagement.analysisSession = data.analysis_session_id || fileManagement.analysisSession;
   const summary = data.summary || {};
   const cards = [["DELETE", summary.delete, "bytes"], ["COMPRESS", summary.compress, "source_bytes"], ["COPY", summary.copy, "bytes_added"], ["MOVE", summary.move, "bytes_moved"]].filter(([, value]) => Number(value?.candidate_file_count ?? value?.file_count ?? 0) > 0);
@@ -288,7 +317,7 @@ function renderFileManagementPlan(data) {
   $("file-management-plan-details").innerHTML = ["delete", "compress", "copy", "move"].map(operation => { const rows = operations.filter(item => item.operation === operation); return rows.length ? renderPlanOperationGroup(operation, rows) : ""; }).join("");
   bindPlanOperationDetails(data);
   $("file-management-plan-note").textContent = "";
-  const executable = (data.operations || []).some(item => ["copy", "compress", "move", "delete"].includes(item.operation) && !item.conflicts?.length && !item.blockers?.length && !["already_satisfied", "skipped"].includes(item.destination_status));
+  const executable = (data.operations || []).some(item => planSelectable(item) && item.user_selected !== false);
   $("file-management-execution-panel").innerHTML = executable ? `<div class="execution-review-actions"><button type="button" class="primary-action" data-review-execution>Review execution</button><small>Review freezes this completed analysis after lightweight stale-state checks.</small></div>` : `<p class="muted" data-no-execution>${escapeHtml(noExecutionExplanation(summary))}</p>`;
   $("file-management-execution-panel").classList.remove("hidden");
   $("file-management-execution-panel").querySelector("[data-review-execution]")?.addEventListener("click", () => { void prepareFileManagementExecution(); });
@@ -321,11 +350,14 @@ function renderExecution(execution) {
     const movedBytes = pending.filter(row => row.operation === "move").reduce((sum, row) => sum + Number(row.source_size_bytes || 0), 0);
     const targetFolders = [...new Set(pending.map(row => String(row.target_relative_path || "").split("/").slice(0, -1).join("/")).filter(Boolean))];
     const preservationChanges = pending.reduce((sum, row) => sum + Number(row.preservation_report?.changed?.length || 0) + Number(row.preservation_report?.lost?.length || 0), 0);
+    const rtmdRequired = pending.some(row => row.requires_rtmd_ack && row.user_selected !== false);
     const countMarkup = [["Copy", copies], ["Compress", compressed], ["Move", moves], ["Delete", deletes], ["Pending preflight", preflight], ["Blocked compression", blockedCompression]].filter(([, count]) => count).map(([label, count]) => `<span>${label} <strong>${count}</strong></span>`).join("");
     const potential = Number(execution.summary?.potential_storage_delta_bytes);
     const potentialMarkup = preflight && Number.isFinite(potential) && potential !== Number(execution.estimated_storage_delta || 0) ? ` · Potential after preflight ${estimatedChangeMarkup(potential)}` : "";
-    panel.innerHTML = `<section class="execution-review"><h3>Review execution</h3><p>This frozen review contains the exact operations that will be attempted.</p><div class="execution-counts">${countMarkup}</div><p class="muted">Bytes written ${formatBytes(execution.estimated_bytes_written || 0)} · Bytes moved ${formatBytes(movedBytes)} · Bytes permanently deleted ${formatBytes(execution.estimated_bytes_removed || 0)} · Estimated confirmed change ${estimatedChangeMarkup(execution.estimated_storage_delta)}${potentialMarkup}</p><p class="muted">Temporary space required ${formatBytes(execution.temporary_space_upper_bound_bytes || 0)}${targetFolders.length ? ` · Target folders ${escapeHtml(targetFolders.join(", "))}` : ""}</p>${preservationChanges ? `<p class="execution-warning">${preservationChanges} preservation change${preservationChanges === 1 ? " is" : "s are"} recorded in the reviewed compression operations.</p>` : ""}${blockedCompression ? `<p class="muted">${blockedCompression} compression operation${blockedCompression === 1 ? " is" : "s are"} blocked by the current codec capability policy.</p>` : ""}${destructive ? `<p class="execution-warning">Move, Delete, or source-replacing Compress operations will modify source files. Delete operations permanently remove the confirmed files.</p><label class="checkbox-line execution-acknowledgement"><input type="checkbox" data-execution-ack><span>I understand that this execution will modify source files.</span></label>` : ""}<div class="form-actions"><button type="button" class="primary-action" data-execution-start ${destructive ? "disabled" : ""}>Execute safe operations</button><button type="button" class="secondary" data-execution-discard>Discard review</button></div></section>`;
-    panel.querySelector("[data-execution-ack]")?.addEventListener("change", event => { panel.querySelector("[data-execution-start]").disabled = !event.target.checked; });
+    panel.innerHTML = `<section class="execution-review"><h3>Review execution</h3><p>This frozen review contains the exact operations that will be attempted.</p><div class="execution-counts">${countMarkup}</div><p class="muted">Bytes written ${formatBytes(execution.estimated_bytes_written || 0)} · Bytes moved ${formatBytes(movedBytes)} · Bytes permanently deleted ${formatBytes(execution.estimated_bytes_removed || 0)} · Estimated confirmed change ${estimatedChangeMarkup(execution.estimated_storage_delta)}${potentialMarkup}</p><p class="muted">Temporary space required ${formatBytes(execution.temporary_space_upper_bound_bytes || 0)}${targetFolders.length ? ` · Target folders ${escapeHtml(targetFolders.join(", "))}` : ""}</p>${preservationChanges ? `<p class="execution-warning">${preservationChanges} preservation change${preservationChanges === 1 ? " is" : "s are"} recorded in the reviewed compression operations.</p>` : ""}${blockedCompression ? `<p class="muted">${blockedCompression} compression operation${blockedCompression === 1 ? " is" : "s are"} blocked by the current codec capability policy.</p>` : ""}${destructive ? `<p class="execution-warning">Move, Delete, or source-replacing Compress operations will modify source files. Delete operations permanently remove the confirmed files.</p><label class="checkbox-line execution-acknowledgement"><input type="checkbox" data-execution-ack><span>I understand that this execution will modify source files.</span></label>` : ""}${rtmdRequired ? `<label class="checkbox-line execution-acknowledgement"><input type="checkbox" data-rtmd-ack><span>I understand that Sony RTMD camera metadata will be lost from the AV1 replacement.</span></label>` : ""}<div class="form-actions"><button type="button" class="primary-action" data-execution-start ${(destructive || rtmdRequired) ? "disabled" : ""}>Execute safe operations</button><button type="button" class="secondary" data-execution-discard>Discard review</button></div></section>`;
+    const updateStart = () => { const sourceAck = panel.querySelector("[data-execution-ack]"); const rtmdAck = panel.querySelector("[data-rtmd-ack]"); panel.querySelector("[data-execution-start]").disabled = Boolean((sourceAck && !sourceAck.checked) || (rtmdAck && !rtmdAck.checked)); };
+    panel.querySelector("[data-execution-ack]")?.addEventListener("change", updateStart);
+    panel.querySelector("[data-rtmd-ack]")?.addEventListener("change", updateStart);
     panel.querySelector("[data-execution-start]")?.addEventListener("click", () => { void startFileManagementExecution(); });
     panel.querySelector("[data-execution-discard]")?.addEventListener("click", () => { void executionAction("discard"); });
     renderFileManagementLockState();
@@ -343,11 +375,13 @@ function renderExecution(execution) {
   const codecProgress = current?.operation === "compress" && current?.profile_name?.startsWith("AV1") && progress.fraction != null ? `${Math.round(Number(progress.fraction) * 100)}%${progress.speed != null ? ` · ${Number(progress.speed).toFixed(2)}× realtime` : ""}${progress.fps != null ? ` · ${Math.round(Number(progress.fps))} fps` : ""}` : null;
   const byteLine = codecProgress || byteLineBase;
   const throughput = codecProgress ? "Codec progress" : throughputBase;
-  const operationLine = current ? (current.stage === "preflight" ? `Preflight · ${current.filename}` : `${current.operation} · ${current.filename}`) : (active ? "Preparing next operation…" : "All operations finished");
+  const operationLine = current ? (current.stage === "preflight" ? `Preflight · ${current.filename}` : `${current.operation} · ${current.filename}`) : (active ? "Preparing next operation…" : "");
   const profileLine = current?.stage === "preflight" ? "Checking media structure and timing…" : current?.profile_name ? current.profile_name : (active ? "" : "");
-  panel.innerHTML = `<section class="execution-progress"><div class="execution-progress-header"><h3>${escapeHtml(statusLabel)}</h3><span class="execution-timer" data-execution-timer>${timer}</span></div><div class="execution-status-block"><p class="execution-current-operation">${escapeHtml(operationLine)}</p><p class="execution-current-profile">${escapeHtml(profileLine)}</p><p class="execution-byte-line">${byteLine}</p><p class="execution-throughput">${throughput}</p></div><div class="execution-counts"><span>Completed <strong>${counts.completed || 0}</strong></span><span>Failed <strong>${counts.failed || 0}</strong></span><span>Skipped <strong>${counts.skipped || 0}</strong></span><span>Pending <strong>${counts.pending || 0}</strong></span><span>${counts.finished || counts.completed || 0} / ${counts.total || 0} operations</span></div><p class="muted">${executionChangeMarkup(execution.actual_bytes_written, execution.actual_bytes_removed, execution.actual_storage_delta)}</p>${execution.error ? `<p class="status error">${escapeHtml(execution.error)}</p>` : ""}${execution.warning ? `<p class="status">${escapeHtml(execution.warning)}</p>` : ""}<div class="form-actions">${active ? `<button type="button" class="danger-button" data-execution-cancel>Cancel</button>` : ""}${canResume ? `<button type="button" class="primary-action" data-execution-resume>Resume</button>` : ""}${execution.status === "interrupted" ? `<button type="button" class="secondary" data-execution-abandon>Abandon</button>` : ""}${canRetry ? `<button type="button" class="secondary" data-execution-retry>Retry failed</button>` : ""}</div></section>`;
+  const runtimeSkipped = Math.max(0, Number(counts.skipped || 0) - Number(counts.already_satisfied || 0));
+  const countMarkup = `<span>Completed <strong>${counts.completed || 0}</strong></span>${counts.already_satisfied ? `<span>Already satisfied <strong>${counts.already_satisfied}</strong></span>` : ""}<span>Skipped <strong>${runtimeSkipped}</strong></span><span>Failed <strong>${counts.failed || 0}</strong></span><span>Pending <strong>${counts.pending || 0}</strong></span><span>${counts.finished || counts.completed || 0} / ${counts.total || 0} operations</span>`;
+  panel.innerHTML = `<section class="execution-progress"><div class="execution-progress-header"><h3>${escapeHtml(statusLabel)}</h3><span class="execution-timer" data-execution-timer>${timer}</span></div><div class="execution-status-block"><p class="execution-current-operation">${escapeHtml(operationLine)}</p><p class="execution-current-profile">${escapeHtml(profileLine)}</p><p class="execution-byte-line">${byteLine}</p><p class="execution-throughput">${throughput}</p></div><div class="execution-counts">${countMarkup}</div><p class="muted">${executionChangeMarkup(execution.actual_bytes_written, execution.actual_bytes_removed, execution.actual_storage_delta)}</p>${execution.error ? `<p class="status error">${escapeHtml(execution.error)}</p>` : ""}${execution.warning ? `<p class="status">${escapeHtml(execution.warning)}</p>` : ""}<div class="form-actions">${active ? `<button type="button" class="danger-button" data-execution-cancel>Cancel</button>` : ""}${canResume ? `<button type="button" class="primary-action" data-execution-resume>Resume</button>` : ""}${execution.status === "interrupted" ? `<button type="button" class="secondary" data-execution-abandon>Abandon</button>` : ""}${canRetry ? `<button type="button" class="secondary" data-execution-retry>Retry failed</button>` : ""}</div></section>`;
   if (!active) {
-    const results = rows.filter(row => ["failed", "skipped"].includes(row.status));
+    const results = rows.filter(row => row.status === "failed" || (row.status === "skipped" && !String(row.error_message || "").startsWith("Already satisfied")));
     if (results.length) {
       const section = document.createElement("section");
       section.className = "execution-results";
@@ -376,18 +410,18 @@ async function prepareFileManagementExecution() {
   panel.classList.remove("hidden");
   panel.innerHTML = `<section class="execution-review-busy" aria-busy="true"><h3>Freezing reviewed plan…</h3><p class="muted">Checking lightweight stale-state preconditions; codec analysis is reused from Analyze.</p><progress></progress></section>`;
   try {
-    const result = await api("/api/file-management/executions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ruleset_id: fileManagement.current, plan_digest: fileManagement.plan?.plan_digest, analysis_session_id: fileManagement.analysisSession})});
+    const result = await api("/api/file-management/executions", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ruleset_id: fileManagement.current, plan_digest: fileManagement.plan?.plan_digest, analysis_session_id: fileManagement.analysisSession, selected_operations: selectedPlanPositions()})});
     renderExecution(result.execution);
   } catch (error) {
     panel.innerHTML = `<section class="execution-review-actions"><p class="status error">${escapeHtml(error.message)}</p><button type="button" class="secondary" data-review-execution>Review execution</button></section>`;
     panel.querySelector("[data-review-execution]").addEventListener("click", () => { void prepareFileManagementExecution(); });
   }
 }
-async function startFileManagementExecution() { try { const result = await executionAction("start"); if (result) void pollFileManagementExecution(); } catch {} }
-async function executionAction(action) {
+async function startFileManagementExecution() { try { const result = await executionAction("start", {rtmd_loss_acknowledged: Boolean($("file-management-execution-panel")?.querySelector("[data-rtmd-ack]")?.checked)}); if (result) void pollFileManagementExecution(); } catch {} }
+async function executionAction(action, body = {}) {
   if (!fileManagement.execution?.id) return null;
   try {
-    const result = await api(`/api/file-management/executions/${encodeURIComponent(fileManagement.execution.id)}/${action}`, {method: "POST", headers: {"Content-Type": "application/json"}});
+    const result = await api(`/api/file-management/executions/${encodeURIComponent(fileManagement.execution.id)}/${action}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     renderExecution(result.execution);
     if (["running", "cancelling"].includes(result.execution.status)) void pollFileManagementExecution();
     return result.execution;
@@ -395,8 +429,9 @@ async function executionAction(action) {
 }
 
 function editProfile(id) { const profile = fileManagement.profiles.find(item => item.id === id); if (!profile) return; const form = $("file-management-profile-form"); form.dataset.profileId = id; $("file-management-profile-name").value = profile.name; $("file-management-profile-codec").value = profile.codec; $("file-management-profile-quality").value = profile.settings?.quality ?? 60; $("file-management-profile-effort").value = profile.settings?.effort ?? 7; form.classList.remove("hidden"); }
+function ensurePlaybackCacheButton() { const header = $("file-management-dialog")?.querySelector(".file-management-header-actions"); if (!header || $("file-management-clear-playback-cache")) return; const button = document.createElement("button"); button.id = "file-management-clear-playback-cache"; button.className = "secondary"; button.type = "button"; button.textContent = "Clear playback cache"; button.addEventListener("click", async () => { try { const result = await api("/api/file-management/playback-cache/clear", {method: "POST"}); fileManagementStatus(`Playback cache cleared: ${result.removed || 0} removed.`); } catch (error) { fileManagementStatus(`Playback cache cleanup failed: ${error.message}`, true); } }); header.insertBefore(button, header.querySelector("#file-management-close")); }
 
-$("file-management-button").addEventListener("click", async () => { try { await refreshFileManagementEditor(); const active = await api("/api/file-management/executions/active"); renderExecution(active.execution && active.execution.status !== "draft" ? active.execution : null); $("file-management-dialog").querySelector(".planning-badge").textContent = "Copy · Compress · Move · Delete"; $("file-management-dialog").showModal(); if (active.execution && ["running", "cancelling"].includes(active.execution.status)) void pollFileManagementExecution(); } catch (error) { fileManagementStatus(`File Management failed: ${error.message}`, true); } });
+$("file-management-button").addEventListener("click", async () => { try { await refreshFileManagementEditor(); ensurePlaybackCacheButton(); const active = await api("/api/file-management/executions/active"); renderExecution(active.execution && active.execution.status !== "draft" ? active.execution : null); $("file-management-dialog").querySelector(".planning-badge").textContent = "Copy · Compress · Move · Delete"; $("file-management-dialog").showModal(); if (active.execution && ["running", "cancelling"].includes(active.execution.status)) void pollFileManagementExecution(); } catch (error) { fileManagementStatus(`File Management failed: ${error.message}`, true); } });
 $("file-management-close").addEventListener("click", () => $("file-management-dialog").close());
 $("file-management-dialog").addEventListener("close", () => { void cancelFileManagementPlan(); stopExecutionPolling(); });
 document.querySelectorAll("[data-file-management-tab]").forEach(button => button.addEventListener("click", () => setFileManagementTab(button.dataset.fileManagementTab)));

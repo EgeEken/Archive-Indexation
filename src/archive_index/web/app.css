@@ -300,6 +300,15 @@
 .execution-warning { margin: 0; color: #f2b5b5; }
 .execution-review-actions { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
 .execution-review-actions small { color: #9faab5; }
+.plan-selection-actions { display: flex; gap: .45rem; padding: .4rem 0; }
+.plan-operation-row { display: grid; grid-template-columns: 1.5rem minmax(12rem, 1.2fr) minmax(10rem, 1fr) minmax(9rem, .8fr); gap: .6rem; align-items: center; padding: .45rem 0; border-top: 1px solid #29343d; }
+.plan-operation-select { display: flex; justify-content: center; }
+.execution-results { display: grid; gap: .6rem; margin-top: .8rem; }
+.execution-results h4 { margin: 0; }
+.execution-result { display: grid; gap: .15rem; padding: .55rem .65rem; border: 1px solid #39444f; border-radius: .4rem; background: #141c22; }
+.execution-result small { color: #cbd6de; }
+.rule-scope-fields { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; margin-top: .55rem; }
+.folder-scope-options { display: flex; flex-wrap: wrap; gap: .35rem .7rem; max-height: 7rem; overflow: auto; padding: .4rem .55rem; border: 1px solid #39444f; border-radius: .35rem; }
 .plan-operation { border-top: 1px solid #39444f; padding: .65rem 0; }
 .plan-operation-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(8rem, .7fr); gap: .7rem; padding: .45rem 0; border-top: 1px solid #252d34; }
 .plan-operation-row small { display: block; color: #8f9ba6; overflow-wrap: anywhere; }
