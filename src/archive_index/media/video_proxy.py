@@ -7,6 +7,7 @@ import os
 import subprocess
 import threading
 import uuid
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from ..workspace import Workspace, WorkspaceError
 PROXY_CONTRACT_VERSION = "h264-aac-1080p60-v1"
 _workers: dict[tuple[str, str], tuple[threading.Thread, threading.Event]] = {}
 _lock = threading.Lock()
+_session_cache: dict[tuple[str, str, str, int, int], str] = {}
+_active_serves: set[tuple[str, str]] = set()
+MAX_PROXY_BYTES = 10 * 1024 * 1024 * 1024
+MAX_PROXY_COUNT = 32
 
 
 def browser_compatible(codec: str | None) -> bool:
@@ -26,7 +31,7 @@ def proxy_status(workspace: Workspace, physical_id: str) -> dict[str, object]:
     connection = workspace.connect()
     try:
         row = connection.execute(
-            "SELECT pf.relative_path, pf.sha256, pf.size_bytes, pf.mtime_ns, pf.codec, pf.is_online, pf.in_scope, vp.id AS proxy_id, vp.status AS proxy_status, vp.source_sha256 AS proxy_source_sha256, vp.source_size_bytes AS proxy_source_size_bytes, vp.source_mtime_ns AS proxy_source_mtime_ns, vp.proxy_relative_path, vp.proxy_sha256, vp.proxy_size_bytes, vp.error_message, vp.progress_json FROM physical_file AS pf LEFT JOIN video_playback_proxy AS vp ON vp.physical_file_id = pf.id AND vp.contract_version = ? WHERE pf.id = ?",
+            "SELECT pf.relative_path, pf.sha256, pf.size_bytes, pf.mtime_ns, pf.codec, pf.is_online, pf.in_scope, vp.id AS proxy_id, vp.status AS proxy_status, vp.source_sha256 AS proxy_source_sha256, vp.source_size_bytes AS proxy_source_size_bytes, vp.source_mtime_ns AS proxy_source_mtime_ns, vp.proxy_relative_path, vp.proxy_sha256, vp.proxy_size_bytes, vp.proxy_mtime_ns, vp.error_message, vp.progress_json FROM physical_file AS pf LEFT JOIN video_playback_proxy AS vp ON vp.physical_file_id = pf.id AND vp.contract_version = ? WHERE pf.id = ?",
             (PROXY_CONTRACT_VERSION, physical_id),
         ).fetchone()
     finally:
@@ -37,10 +42,15 @@ def proxy_status(workspace: Workspace, physical_id: str) -> dict[str, object]:
         return {"status": "not_required", "direct": True}
     status = row["proxy_status"]
     if status == "complete" and _proxy_is_current(workspace, row):
+        key = _cache_key(workspace, physical_id, row)
+        with _lock:
+            _session_cache[key] = row["proxy_relative_path"]
+        with workspace.transaction() as connection:
+            connection.execute("UPDATE video_playback_proxy SET last_accessed_at = ?, updated_at = ? WHERE id = ?", (_timestamp(), _timestamp(), row["proxy_id"]))
         return {"status": "complete", "proxy_url": f"/api/files/{physical_id}/playback-proxy/media"}
     if status == "complete":
         with workspace.transaction() as connection:
-            connection.execute("UPDATE video_playback_proxy SET status = 'pending', proxy_sha256 = NULL, proxy_size_bytes = NULL, updated_at = datetime('now') WHERE id = ?", (row["proxy_id"],))
+            connection.execute("UPDATE video_playback_proxy SET status = 'pending', proxy_sha256 = NULL, proxy_size_bytes = NULL, proxy_mtime_ns = NULL, updated_at = datetime('now') WHERE id = ?", (row["proxy_id"],))
         status = "pending"
     with _lock:
         worker = _workers.get((str(workspace.root), physical_id))
@@ -103,12 +113,48 @@ def cancel_proxy(workspace: Workspace, physical_id: str) -> bool:
 def proxy_path(workspace: Workspace, physical_id: str) -> Path:
     connection = workspace.connect()
     try:
-        row = connection.execute("SELECT proxy_relative_path, status FROM video_playback_proxy WHERE physical_file_id = ? AND contract_version = ?", (physical_id, PROXY_CONTRACT_VERSION)).fetchone()
+        row = connection.execute("SELECT proxy_relative_path, status, proxy_size_bytes, proxy_mtime_ns FROM video_playback_proxy WHERE physical_file_id = ? AND contract_version = ?", (physical_id, PROXY_CONTRACT_VERSION)).fetchone()
     finally:
         connection.close()
     if row is None or row["status"] != "complete":
         raise ValueError("Playable proxy is not ready.")
-    return workspace.index_path(row["proxy_relative_path"])
+    try:
+        path = workspace.index_path(row["proxy_relative_path"])
+        stat = path.stat()
+    except (OSError, WorkspaceError) as error:
+        raise ValueError("Playable proxy is not ready.") from error
+    if not path.is_file() or int(row["proxy_size_bytes"] or 0) != stat.st_size or int(row["proxy_mtime_ns"] or 0) != stat.st_mtime_ns:
+        raise ValueError("Playable proxy is not ready.")
+    with _lock:
+        _active_serves.add((str(workspace.root), physical_id))
+    with workspace.transaction() as connection:
+        connection.execute("UPDATE video_playback_proxy SET last_accessed_at = ?, updated_at = ? WHERE physical_file_id = ? AND contract_version = ?", (_timestamp(), _timestamp(), physical_id, PROXY_CONTRACT_VERSION))
+    return path
+
+
+def release_proxy(workspace: Workspace, physical_id: str) -> None:
+    with _lock:
+        _active_serves.discard((str(workspace.root), physical_id))
+
+
+def clear_playback_cache(workspace: Workspace) -> dict[str, int]:
+    removed = 0
+    skipped = 0
+    with workspace.transaction() as connection:
+        rows = connection.execute("SELECT id, physical_file_id, proxy_relative_path FROM video_playback_proxy WHERE status = 'complete'").fetchall()
+        for row in rows:
+            key = (str(workspace.root), row["physical_file_id"])
+            with _lock:
+                active = key in _active_serves or key in _workers
+            if active:
+                skipped += 1
+                continue
+            _remove_owned_proxy(workspace, row["proxy_relative_path"])
+            connection.execute("DELETE FROM video_playback_proxy WHERE id = ?", (row["id"],))
+            removed += 1
+    with _lock:
+        _session_cache.clear()
+    return {"removed": removed, "skipped": skipped}
 
 
 def _run(workspace: Workspace, physical_id: str, cancel: threading.Event) -> None:
@@ -168,7 +214,9 @@ def _run(workspace: Workspace, physical_id: str, cancel: threading.Event) -> Non
         os.replace(temp, output)
         digest = hash_file(output)
         with workspace.transaction() as connection:
-            connection.execute("UPDATE video_playback_proxy SET status = 'complete', proxy_sha256 = ?, proxy_size_bytes = ?, progress_json = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?", (digest, output.stat().st_size, json.dumps(progress, sort_keys=True), row["id"]))
+            output_stat = output.stat()
+            connection.execute("UPDATE video_playback_proxy SET status = 'complete', proxy_sha256 = ?, proxy_size_bytes = ?, proxy_mtime_ns = ?, progress_json = ?, error_message = NULL, last_accessed_at = ?, updated_at = ? WHERE id = ?", (digest, output_stat.st_size, output_stat.st_mtime_ns, json.dumps(progress, sort_keys=True), _timestamp(), _timestamp(), row["id"]))
+        _evict_completed(workspace)
     except InterruptedError as error:
         _finish(workspace, physical_id, "cancelled", str(error))
     except Exception as error:
@@ -209,9 +257,44 @@ def _proxy_is_current(workspace: Workspace, row) -> bool:
             return False
         source = workspace.absolute_path(row["relative_path"])
         proxy = workspace.index_path(row["proxy_relative_path"])
-        return _source_current(source, row) and proxy.is_file() and proxy.stat().st_size == int(row["proxy_size_bytes"] or 0) and hash_file(proxy) == row["proxy_sha256"]
+        source_stat = source.stat()
+        proxy_stat = proxy.stat()
+        return source.is_file() and source_stat.st_size == int(row["size_bytes"] or 0) and source_stat.st_mtime_ns == int(row["mtime_ns"] or 0) and proxy.is_file() and proxy_stat.st_size == int(row["proxy_size_bytes"] or 0) and proxy_stat.st_mtime_ns == int(row["proxy_mtime_ns"] or 0)
     except (OSError, WorkspaceError):
         return False
+
+
+def _cache_key(workspace: Workspace, physical_id: str, row) -> tuple[str, str, str, int, int]:
+    return (str(workspace.root), physical_id, str(row["sha256"] or ""), int(row["size_bytes"] or 0), int(row["mtime_ns"] or 0))
+
+
+def _evict_completed(workspace: Workspace) -> None:
+    with workspace.transaction() as connection:
+        rows = connection.execute("SELECT id, physical_file_id, proxy_relative_path, proxy_size_bytes FROM video_playback_proxy WHERE status = 'complete' ORDER BY COALESCE(last_accessed_at, updated_at) DESC, id DESC").fetchall()
+        total = sum(int(row["proxy_size_bytes"] or 0) for row in rows)
+        candidates = list(reversed(rows))
+        while candidates and (len(rows) > MAX_PROXY_COUNT or total > MAX_PROXY_BYTES):
+            row = candidates.pop(0)
+            with _lock:
+                active = (str(workspace.root), row["physical_file_id"]) in _active_serves or (str(workspace.root), row["physical_file_id"]) in _workers
+            if active:
+                continue
+            _remove_owned_proxy(workspace, row["proxy_relative_path"])
+            connection.execute("DELETE FROM video_playback_proxy WHERE id = ?", (row["id"],))
+            total -= int(row["proxy_size_bytes"] or 0)
+            rows.pop()
+
+
+def _remove_owned_proxy(workspace: Workspace, relative_path: str) -> None:
+    if not str(relative_path).startswith("video-proxies/"):
+        return
+    path = workspace.index_path(relative_path)
+    if path.is_file():
+        path.unlink()
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _update_progress(workspace: Workspace, proxy_id: str, progress: dict[str, object], duration) -> None:

@@ -34,7 +34,7 @@ from ..indexing.media_pipeline import index_workspace
 from ..indexing.scanner import scan
 from ..media.quality_provider import default_model_path
 from ..media.raw_preview import extract_embedded_preview
-from ..media.video_proxy import cancel_proxy, proxy_path, proxy_status, request_proxy
+from ..media.video_proxy import cancel_proxy, clear_playback_cache, proxy_path, proxy_status, release_proxy, request_proxy
 from ..media.metadata import UnsupportedDecoderError
 from ..media_types import is_raw_extension
 from ..jobs.engine import JobStore, SUBSTAGES
@@ -47,6 +47,7 @@ from ..file_management import (
     list_profiles,
     list_presets,
     list_rulesets,
+    list_workspace_folders,
     plan_analysis_status,
     save_profile,
     save_preset,
@@ -388,6 +389,8 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, custom_profile_preview(workspace, profile))
             elif request.path == "/api/file-management/rulesets":
                 self._send_json(200, {"rulesets": list_rulesets(workspace)})
+            elif request.path == "/api/file-management/folders":
+                self._send_json(200, {"folders": list_workspace_folders(workspace)})
             elif request.path == "/api/file-management/presets":
                 self._send_json(200, {"presets": list_presets(workspace)})
             elif request.path == "/api/file-management/plan":
@@ -514,6 +517,10 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 physical_id = request.path[len(proxy_prefix):-len("/playback-proxy/cancel")]
                 self._send_json(202, {"cancelled": cancel_proxy(workspace, physical_id)})
                 return
+            if request.path == "/api/file-management/playback-cache/clear":
+                _, workspace = self._workspace(query)
+                self._send_json(200, clear_playback_cache(workspace))
+                return
             if request.path == "/api/file-management/executions":
                 body = self._json_body()
                 _, workspace = self._workspace(query)
@@ -523,7 +530,13 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 analysis_session_id = body.get("analysis_session_id")
                 if analysis_session_id is not None and not isinstance(analysis_session_id, str):
                     raise InvalidRequest("analysis_session_id must be a string or null")
-                self._send_json(201, {"execution": prepare_execution(workspace, ruleset_id, body.get("plan_digest"), analysis_session_id)})
+                selected = body.get("selected_operations")
+                if selected is not None and (not isinstance(selected, list) or not all(isinstance(value, int) and not isinstance(value, bool) for value in selected)):
+                    raise InvalidRequest("selected_operations must be a list of integer plan positions")
+                rtmd_ack = body.get("rtmd_loss_acknowledged", False)
+                if not isinstance(rtmd_ack, bool):
+                    raise InvalidRequest("rtmd_loss_acknowledged must be a boolean")
+                self._send_json(201, {"execution": prepare_execution(workspace, ruleset_id, body.get("plan_digest"), analysis_session_id, selected, rtmd_ack)})
                 return
             execution_prefix = "/api/file-management/executions/"
             if request.path.startswith(execution_prefix):
@@ -543,7 +556,15 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
                 handler = actions.get(action)
                 if handler is None:
                     raise ResourceNotFound("execution route not found")
-                self._send_json(202, {"execution": handler(workspace, execution_id)})
+                if action == "start":
+                    body = self._json_body()
+                    acknowledgement = body.get("rtmd_loss_acknowledged")
+                    if acknowledgement is not None and not isinstance(acknowledgement, bool):
+                        raise InvalidRequest("rtmd_loss_acknowledged must be a boolean")
+                    result = handler(workspace, execution_id, acknowledgement)
+                else:
+                    result = handler(workspace, execution_id)
+                self._send_json(202, {"execution": result})
                 return
             if request.path == "/api/workspaces/apply":
                 body = self._json_body()
@@ -802,7 +823,11 @@ class ArchiveRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[:2] == ["api", "files"] and parts[3:] == ["playback-proxy", "media"]:
             if proxy_status(workspace, parts[2]).get("status") != "complete":
                 raise ResourceNotFound("playable proxy is not ready")
-            self._send_file(proxy_path(workspace, parts[2]), "video/mp4", allow_range=True)
+            proxy = proxy_path(workspace, parts[2])
+            try:
+                self._send_file(proxy, "video/mp4", allow_range=True)
+            finally:
+                release_proxy(workspace, parts[2])
             return
         if len(parts) == 4 and parts[:2] == ["api", "files"] and parts[3] == "preview":
             self._serve_raw_preview(workspace, parts[2])

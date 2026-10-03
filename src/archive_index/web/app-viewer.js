@@ -76,6 +76,21 @@ function showViewer(index, items = state.items, context = { mode: "gallery" }) {
 }
 
 function browserVideoCompatible(item) { return new Set(["h264", "avc1", "av1", "vp8", "vp9"]).has(String(item.codec || "").toLowerCase()); }
+const playbackProxyCache = new Map();
+function playbackProxyKey(item) { return String(item.preferred_physical_id || "") + ":" + String(item.sha256 || item.size_bytes || "unknown"); }
+function createViewerVideo(item, source) {
+  const media = document.createElement("video");
+  media.className = "viewer-media viewer-video";
+  media.alt = item.filename;
+  media.controls = true;
+  media.preload = "metadata";
+  media.playsInline = true;
+  media.draggable = false;
+  media.src = source;
+  media.addEventListener("error", () => { if (media.isConnected && media.getAttribute("src") && item.preferred_physical_id) renderPlaybackProxyPrompt(item, {error: "The browser could not decode this video."}); });
+  $("viewer-media").replaceChildren(media);
+  return media;
+}
 function renderPlaybackProxyPrompt(item, existing = {}) {
   const container = $("viewer-media");
   const running = existing.status === "running";
@@ -94,7 +109,7 @@ function renderPlaybackProxyPrompt(item, existing = {}) {
       await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`, {method: "POST"});
       for (;;) {
         const result = await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`);
-        if (result.status === "complete") { renderViewer(); return; }
+        if (result.status === "complete") { playbackProxyCache.set(playbackProxyKey(item), true); renderViewer(); return; }
         if (["failed", "cancelled"].includes(result.status)) throw new Error(result.error || "Playable proxy creation failed.");
         status.textContent = result.progress?.fraction != null ? `Creating playable proxy… ${Math.round(result.progress.fraction * 100)}%` : "Creating playable proxy…";
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -103,18 +118,23 @@ function renderPlaybackProxyPrompt(item, existing = {}) {
   });
 }
 
-async function useExistingPlaybackProxy(item, media) {
-  if (browserVideoCompatible(item) || !item.preferred_physical_id) return;
+async function useExistingPlaybackProxy(item) {
+  if (!item.preferred_physical_id) return;
+  const cacheKey = playbackProxyKey(item);
+  if (playbackProxyCache.has(cacheKey)) {
+    createViewerVideo(item, apiPath("/api/files/" + encodeURIComponent(item.preferred_physical_id) + "/playback-proxy/media"));
+    return;
+  }
   try {
     const result = await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`);
-    if (result.status === "complete" && media.isConnected) media.src = apiPath(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy/media`);
-    else if (media.isConnected) {
+    if (result.status === "complete") { playbackProxyCache.set(cacheKey, true); createViewerVideo(item, apiPath("/api/files/" + encodeURIComponent(item.preferred_physical_id) + "/playback-proxy/media")); }
+    else {
       renderPlaybackProxyPrompt(item, result);
       if (result.status === "running") {
         for (;;) {
           await new Promise(resolve => setTimeout(resolve, 500));
           const current = await api(`/api/files/${encodeURIComponent(item.preferred_physical_id)}/playback-proxy`);
-          if (current.status === "complete") { renderViewer(); return; }
+          if (current.status === "complete") { playbackProxyCache.set(cacheKey, true); renderViewer(); return; }
           if (["failed", "cancelled"].includes(current.status)) { renderPlaybackProxyPrompt(item, current); return; }
           const status = $("viewer-media")?.querySelector("[data-playback-proxy-status]");
           if (status) status.textContent = current.progress?.fraction != null ? `Creating playable proxy… ${Math.round(current.progress.fraction * 100)}%` : "Creating playable proxy…";
@@ -142,6 +162,14 @@ function renderViewer() {
   if (!item.display_url && !item.original_url) {
     $("viewer-media").innerHTML = `<div class="viewer-error">${item.issues?.includes("offline") ? "This media is offline." : "This media cannot currently be rendered."}</div>`;
   } else {
+    if (item.media_type === "video" && !browserVideoCompatible(item) && item.preferred_physical_id) {
+      $("viewer-media").innerHTML = "<div class=\"viewer-error\"><p>Checking playback proxy…</p></div>";
+      void useExistingPlaybackProxy(item);
+      $("viewer-details").classList.toggle("hidden", !state.viewerInfoOpen);
+      $("viewer-stage").classList.toggle("info-open", state.viewerInfoOpen);
+      if (state.viewerInfoOpen) loadViewerDetails();
+      return;
+    }
     const media = item.media_type === "video" ? document.createElement("video") : document.createElement("img");
     media.className = "viewer-media";
     media.alt = item.filename;
@@ -162,7 +190,6 @@ function renderViewer() {
       }
     });
     $("viewer-media").appendChild(media);
-    if (item.media_type === "video") void useExistingPlaybackProxy(item, media);
     if (item.media_type === "image") media.addEventListener("load", () => applyViewerTransform(media));
     applyViewerTransform(media);
   }
